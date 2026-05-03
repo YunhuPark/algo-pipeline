@@ -1,0 +1,42 @@
+{
+  "brand": {
+    "name": "알고",
+    "handle": "@algo__kr",
+    "tagline": "세상 모든 뉴스, 알고 시작해요",
+    "description": "AI가 매일 최신 뉴스를 골라 쉽게 풀어드리는 카드뉴스"
+  },
+  "voice": {
+    "tone": "트렌디하고 쉽게 풀어주는, MZ세대 눈높이의 AI 뉴스 큐레이터",
+    "style": "복잡한 뉴스를 핵심만 쏙 뽑아 짧고 임팩트 있게 전달하는",
+    "cta_text": "팔로우하면 매일 아침 최신 뉴스를 가장 쉽게 받아볼 수 있어요! 🔔",
+    "target_audience": "AI, IT, 비즈니스, 사회 최신 트렌드에 관심 있는 MZ세대",
+    "comment_reply_tone": "친근하고 유익하게, 짧고 임팩트 있게 한두 문장으로 핵심 추가 정보를 제공",
+    "dm_reply_tone": "따뜻하고 개인적인 느낌으로, 질문에 친절하게 답변하고 팔로우 유도"
+  },
+  "design": {
+    "primary_color": "#5B4FE8",
+    "accent_color": "#00E5FF",
+    "overlay_darkness": 170,
+    "image_source": "auto",
+    "preferred_style": "dark_modern"
+  },
+  "hashtag_base": [
+    "#알고",
+    "#오늘의뉴스",
+    "#뉴스요약",
+    "#카드뉴스",
+    "#AI트렌드",
+    "#인공지능",
+    "#테크뉴스",
+    "#IT뉴스",
+    "#최신트렌드",
+    "#디지털",
+    "#MZ",
+    "#정보공유"
+  ],
+  "cards": {
+    "default_count": 6,
+    "cover_emoji": "📰",
+    "cta_emoji": "🔔"
+  }
+}
