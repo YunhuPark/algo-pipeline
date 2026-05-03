@@ -1,0 +1,36 @@
+# 환경변수 / 시크릿
+.env
+secrets/
+
+# 생성 결과물 (대용량)
+output/
+logs/
+data/
+
+# 파이썬
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# 임시 파일
+*.log
+*.tmp
+temp.*
+test_*.py
+null
+
+# 미디어
+*.mp4
+*.webm
+*.png
+ffmpeg.exe
+
+# 문서 / 개인파일
+*.pdf
+*.xlsx
+*.png
+
+# algo-site (별도 repo)
+algo-site/
