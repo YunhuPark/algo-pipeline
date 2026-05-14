@@ -206,17 +206,22 @@ def generate_dalle_background(topic: str) -> Image.Image:
         )
 
     print(f"  [DALL-E] 프롬프트: {prompt[:80]}...")
+    import base64 as _b64
     response = client.images.generate(
-        model="dall-e-3",
+        model="gpt-image-1",
         prompt=prompt,
-        size="1024x1792",
-        quality="standard",
+        size="1024x1536",
+        quality="medium",
         n=1,
     )
 
-    img_url = response.data[0].url
-    img_resp = httpx.get(img_url, timeout=60, follow_redirects=True)
-    img = Image.open(io.BytesIO(img_resp.content)).convert("RGB")
+    img_data = response.data[0]
+    if getattr(img_data, "b64_json", None):
+        img = Image.open(io.BytesIO(_b64.b64decode(img_data.b64_json))).convert("RGB")
+    else:
+        img_url = img_data.url
+        img_resp = httpx.get(img_url, timeout=60, follow_redirects=True)
+        img = Image.open(io.BytesIO(img_resp.content)).convert("RGB")
     return _resize_and_crop(img)
 
 
