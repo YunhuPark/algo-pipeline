@@ -234,7 +234,75 @@ _CARD_HUMAN = """기사 제목: {article_title}
 {video_section}
 
 위 내용으로 {num_cards}장 카드뉴스를 만드세요.
-사람이 직접 쓴 것처럼 자연스럽게. AI 냄새 나는 문장은 즉시 교체.{feedback_section}"""
+사람이 직접 쓴 것처럼 자연스럽게. AI 냄새 나는 문장은 즉시 교체.{angle_structure}{feedback_section}"""
+
+# 앵글별 카드 구조 지시문 (인스타 저장률 최적화)
+_ANGLE_STRUCTURES: dict[str, str] = {
+    "리스트형": """
+
+[앵글: 리스트형 — 저장률 최우선 구조]
+이 앵글은 독자가 "나중에 하나씩 써봐야지"해서 저장하게 만드는 구조입니다.
+
+카드 구조 (기존 6장 구조 무시하고 아래로 대체):
+  카드 1 (cover): title에 "N가지" 숫자 포함 필수. body에 "저장해두면 하나씩 써먹을 수 있어요" 포함.
+  카드 2~{last_content} (content): 각 카드 = 리스트 1개 항목.
+    - title: "[숫자/전체] 항목명" 형식. 예: "[1/5] ChatGPT 코드 리뷰"
+    - body: 해당 항목의 구체적 사용법 or 핵심 정보 2~3줄. 기사 사실에서 뽑을 것.
+    - accent: 해당 항목의 핵심 수치나 키워드
+  카드 {num_cards} (cta): "이 N가지 중 지금 당장 써볼 것 1개 댓글로!" 형식의 참여 유도.
+    body 마지막 줄: "저장해두고 하나씩 써봐요 🔖"
+""",
+    "Before/After": """
+
+[앵글: Before/After — 대비로 저장 욕구 자극]
+독자가 "나도 이렇게 바꿔봐야겠다"해서 저장하게 만드는 구조입니다.
+
+카드 구조:
+  카드 1 (cover): title에 "→" 또는 "전/후" 대비 포함. 시간·비용 수치 필수.
+                  예: "3시간 → 30분, AI로 실제 됨?"
+  카드 2 (content): [Before] — 기존 방식의 불편함·문제점. 독자 공감 자극.
+    - title: "기존엔 이랬어" / "Before: 이 상황 공감?" 형식
+    - body: 독자가 직접 경험했을 법한 불편한 상황 묘사 (기사 맥락 연결)
+  카드 3 (content): [전환점] — AI/신기술이 등장한 이유와 어떻게 다른지
+  카드 4 (content): [After] — 실제 결과. 수치·비교 필수.
+    - title: "After: 이렇게 달라졌어" 형식
+    - body: 구체적 변화 수치. 기사에서 직접 추출.
+  카드 5 (content): [알고의 시선] 💡 알고의 한 줄 요약 포함
+  카드 6 (cta): "여러분도 이 방법 써봤나요? Before/After 댓글로 알려주세요!"
+""",
+    "즉시실행": """
+
+[앵글: 즉시실행 — "지금 바로 써먹을 수 있는" 구조]
+독자가 "당장 해봐야겠다"해서 저장하게 만드는 구조입니다.
+
+카드 구조:
+  카드 1 (cover): "지금 바로", "복붙 가능", "당장 써봐" 뉘앙스 필수.
+                  구체적 행동 + 결과 포함. 예: "ChatGPT에 이렇게 입력하면 됨"
+  카드 2~{last_content} (content): 각 카드가 독립적으로 실행 가능한 팁 1개.
+    - 추상적 설명 금지. "OO에 들어가서 OO 하면 됨" 수준으로 구체적.
+    - 실제 프롬프트·URL·단계가 있으면 반드시 포함.
+    - accent: 소요 시간 or 절약 효과 (예: "30초", "무료")
+  카드 {num_cards} (cta): "써봤으면 결과 댓글로 알려줘요! 다음에 더 소개할게요"
+    body 마지막 줄: "나중에 다시 쓸 때 저장해두세요 🔖"
+""",
+    "몰랐던사실": """
+
+[앵글: 몰랐던사실 — FOMO 자극 구조]
+독자가 "나만 몰랐네, 저장해야겠다"해서 저장하게 만드는 구조입니다.
+
+카드 구조:
+  카드 1 (cover): "N%가 모르는", "아직도 모르면 늦은" 뉘앙스. 독점 정보 느낌.
+  카드 2 (content): "왜 이걸 모르는 사람이 많은가" — 기존 상식과의 차이
+  카드 3~{last_content} (content): 실제 몰랐던 사실들. 각 카드 = 충격 포인트 1개.
+    - 기사에서 의외의 수치·사실을 발굴해 전면에 배치
+    - body 첫 줄: 의외성 강한 사실 직접 서술 (도입 없이 바로)
+  카드 {num_cards} (cta): "주변에 이거 아는 사람 있으면 공유해줘요"
+    body 마지막 줄: "저장해두고 나중에 활용하세요 🔖"
+""",
+}
+
+# 기본 구조 (앵글 없을 때 또는 미지원 앵글)
+_DEFAULT_ANGLE_STRUCTURE = ""
 
 
 def _search_usage_examples(query: str) -> str:
@@ -362,6 +430,17 @@ def run(
     # 브랜드 고정 태그 3개만 — 나머지 12개는 GPT가 기사별로 직접 생성
     hashtag_brand = "#알고 #오늘의뉴스 #카드뉴스"
 
+    # 앵글별 카드 구조 힌트 추출 (feedback_section의 앵글 정보에서 감지)
+    angle_name = ""
+    combined_lower = (combined_feedback + (trend_report.summary or "")).lower()
+    for _angle_key in _ANGLE_STRUCTURES:
+        if _angle_key in (combined_feedback + (trend_report.summary or "")):
+            angle_name = _angle_key
+            break
+    angle_structure = _ANGLE_STRUCTURES.get(angle_name, _DEFAULT_ANGLE_STRUCTURE)
+    if angle_name:
+        print(f"  [ContentCreator] 앵글 구조 적용: {angle_name}")
+
     invoke_kwargs = {
         "brand_name":     p.brand_name,
         "handle":         active_handle,
@@ -378,6 +457,7 @@ def run(
         "today":          date.today().strftime("%Y년 %m월 %d일"),
         "facts_list":     facts_list,
         "video_section":  video_section,
+        "angle_structure": angle_structure,
         "feedback_section": feedback_section,
     }
 
