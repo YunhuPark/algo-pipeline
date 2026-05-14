@@ -290,8 +290,14 @@ def _run_once(
         )
 
     # ── Phase 2.5: Fact Check ────────────────────────────
+    # 리스트형 주제는 GPT 지식 기반 생성 → 기사와 대조 불가 → 팩트체크 스킵
+    from src.agents.content_creator import _is_listicle_topic as _pipeline_is_listicle
+    _skip_factcheck = _pipeline_is_listicle(topic)
+    if _skip_factcheck:
+        print("\n[2.5] 팩트체크 스킵 (리스트형 주제 — GPT 지식 기반 생성)")
+    fc_report = None
     disputed_notes = ""
-    if fact_check:
+    if fact_check and not _skip_factcheck:
         print("\n[2.5] 팩트체크 중...")
         try:
             from src.agents.fact_checker import check_script
