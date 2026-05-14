@@ -1,0 +1,14 @@
+{
+  "brand_name": "AI인사이트",
+  "handle": "@ai_insight_kr",
+  "voice_tone": "전문적이지만 친근한",
+  "preferred_style": "bold_gradient",
+  "color_primary": "#7B2FBE",
+  "always_include_cta": true,
+  "cta_text": "팔로우하면 매주 트렌드를 알려드려요!",
+  "hashtag_clusters": {
+    "ai": ["#인공지능", "#AI", "#ChatGPT", "#딥러닝", "#머신러닝", "#생성AI"],
+    "tech": ["#테크트렌드", "#IT", "#스타트업", "#기술뉴스", "#디지털트랜스포메이션"],
+    "general": ["#카드뉴스", "#정보", "#트렌드", "#알아두면좋은", "#지식"]
+  }
+}

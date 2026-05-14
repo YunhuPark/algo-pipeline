@@ -45,8 +45,24 @@ from pathlib import Path
 from urllib.parse import quote
 
 import httpx
+import requests
 
 from src.config import OUTPUT_DIR
+
+
+def _upload_to_catbox(image_path: Path) -> str:
+    """이미지를 catbox.moe에 업로드하고 공개 HTTPS URL 반환."""
+    with open(image_path, "rb") as f:
+        r = requests.post(
+            "https://catbox.moe/user/api.php",
+            data={"reqtype": "fileupload"},
+            files={"fileToUpload": (image_path.name, f, "image/png")},
+            timeout=60,
+        )
+    url = r.text.strip()
+    if not url.startswith("https://"):
+        raise RuntimeError(f"catbox 업로드 실패: {url}")
+    return url
 
 # ── 환경 변수 ─────────────────────────────────────────────
 IG_ACCESS_TOKEN  = os.getenv("IG_ACCESS_TOKEN", "")
@@ -249,26 +265,23 @@ def publish(
     if not imgs:
         raise ValueError("업로드할 미디어(PNG/MP4) 파일이 없습니다.")
 
-    # 공개 URL 결정: 명시 → .env → ngrok 자동 시작
+    # 공개 URL 결정: catbox → 명시 URL → .env → ngrok 자동 시작
     url_base = (base_url or IG_IMAGE_BASE_URL or "").rstrip("/")
-    if not url_base:
-        print("  [Publisher] 공개 URL 없음 → ngrok 자동 터널 시작...")
-        image_dir = imgs[0].parent
-        url_base = _get_public_url(image_dir).rstrip("/")
-        # ngrok URL에 이미 폴더 경로가 포함되어 있으므로 파일명만 붙임
-        _use_dir_url = True
-    else:
-        _use_dir_url = False
+    use_catbox = url_base.lower() in ("catbox", "catbox://", "")
 
     print(f"\n  [Publisher] Instagram 업로드 시작 ({len(imgs)}장)...")
-    print(f"  [Publisher] 이미지 URL 베이스: {url_base}")
 
     # 1. 각 이미지/비디오 미디어 컨테이너 생성
     container_ids: list[str] = []
     for img_path in imgs:
-        img_url = f"{url_base}/output_img/{quote(img_path.parent.name)}/{quote(img_path.name)}"
         is_video = img_path.suffix.lower() == ".mp4"
-        print(f"  [Publisher] 컨테이너 생성 (video={is_video}): {img_path.name}")
+        if use_catbox:
+            print(f"  [Publisher] catbox 업로드: {img_path.name}...", end=" ", flush=True)
+            img_url = _upload_to_catbox(img_path)
+            print(img_url)
+        else:
+            img_url = f"{url_base}/output_img/{quote(img_path.parent.name)}/{quote(img_path.name)}"
+            print(f"  [Publisher] 컨테이너 생성 (video={is_video}): {img_path.name}")
         cid = _create_media_container(img_url, is_carousel_item=True, is_video=is_video)
         print(f"    → container_id: {cid}")
         _wait_for_ready(cid)

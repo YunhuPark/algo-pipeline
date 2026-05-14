@@ -21,7 +21,7 @@ from src.utils.text_utils import wrap_text
 from src.persona import Persona, load_persona
 
 W, H = 1080, 1350
-PAD = 60
+PAD = 96
 
 
 # ── 색상/스타일 ────────────────────────────────────────────

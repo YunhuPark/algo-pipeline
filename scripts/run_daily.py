@@ -21,6 +21,7 @@ from dotenv import load_dotenv
 load_dotenv(ROOT / ".env")
 
 LOG = ROOT / "logs" / "scheduler.log"
+LOCK_FILE = ROOT / "logs" / "pipeline.lock"
 
 
 def _log(msg: str) -> None:
@@ -97,24 +98,57 @@ def _pick_topic() -> str:
     return resp.choices[0].message.content.strip().strip('"').strip("'")
 
 
+def _is_pipeline_running() -> bool:
+    if not LOCK_FILE.exists():
+        return False
+    try:
+        import os
+        pid = int(LOCK_FILE.read_text().strip())
+        os.kill(pid, 0)
+        return True
+    except (ValueError, OSError):
+        LOCK_FILE.unlink(missing_ok=True)
+        return False
+
+
+def _try_acquire_lock() -> bool:
+    """락파일 원자적 획득 시도. 성공하면 True."""
+    import os
+    try:
+        with open(LOCK_FILE, "x") as f:
+            f.write(str(os.getpid()))
+        return True
+    except FileExistsError:
+        return False
+
+
 def main() -> None:
     _log("=== 알고 일일 자동화 시작 ===")
 
-    if _queue_pending():
-        _log("큐에서 발행")
-        result = subprocess.run(
-            [sys.executable, str(ROOT / "main.py"), "--queue-publish"],
-            cwd=str(ROOT),
-        )
-        topic = "큐 항목"
-    else:
-        _log("큐 비어있음 — GPT 주제 선택")
-        topic = _pick_topic()
-        _log(f"선택된 주제: {topic}")
-        result = subprocess.run(
-            [sys.executable, str(ROOT / "main.py"), topic, "--publish"],
-            cwd=str(ROOT),
-        )
+    # stale 락파일 정리
+    _is_pipeline_running()
+
+    if not _try_acquire_lock():
+        _log("파이프라인 이미 실행 중 (락파일 존재) → 종료")
+        return
+    try:
+        if _queue_pending():
+            _log("큐에서 발행")
+            result = subprocess.run(
+                [sys.executable, str(ROOT / "main.py"), "--queue-publish"],
+                cwd=str(ROOT),
+            )
+            topic = "큐 항목"
+        else:
+            _log("큐 비어있음 — GPT 주제 선택")
+            topic = _pick_topic()
+            _log(f"선택된 주제: {topic}")
+            result = subprocess.run(
+                [sys.executable, str(ROOT / "main.py"), topic, "--publish"],
+                cwd=str(ROOT),
+            )
+    finally:
+        LOCK_FILE.unlink(missing_ok=True)
 
     _log(f"완료 (exit={result.returncode})")
 
