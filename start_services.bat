@@ -1,5 +1,5 @@
 @echo off
-cd /d "C:\Users\박윤후\Desktop\프로젝트\cardnews"
+cd /d "C:\projects\cardnews"
 
 REM ── Flask 대시보드 (포트 5001) ──────────────────────────
 netstat -ano | find ":5001" | find "LISTEN" >nul 2>&1
