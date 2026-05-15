@@ -1,5 +1,5 @@
 @echo off
-cd /d "C:\Users\박윤후\Desktop\프로젝트\cardnews"
+cd /d "C:\projects\cardnews"
 
 REM 큐에 항목이 있으면 큐에서 발행, 없으면 GPT로 주제 선택해서 실행
 C:\Python313\python.exe -c "
