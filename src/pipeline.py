@@ -340,29 +340,33 @@ def _run_once(
         from src.agents.youtube_fetcher import find_verified_video_for_slide
         content_slides_list = [s for s in script.slides if s.slide_type == "content"]
         video_infos = []
-        assigned_pool = list(video_candidates)   # 전체 후보 풀
         used_video_ids: set[str] = set()         # 이미 배정된 video_id (슬라이드별 중복 방지)
 
+        # 리스트형: 기사 후보 풀 무시, 슬라이드 제목 자체로 검색
+        if _skip_factcheck:
+            assigned_pool: list = []
+        else:
+            assigned_pool = list(video_candidates)
+
         # 기사 제목 + 본문 앞부분으로 엔티티 추출 소스 확장
-        # 제목만 쓰면 "How to Ground..." 같은 튜토리얼 제목에서 일반 단어만 추출됨.
-        # 본문 앞 300자를 추가하면 "Nemotron", "NVIDIA", "KOSIS" 같은 실제 브랜드명이 포함됨.
         _main_result = trend_report.results[0] if trend_report.results else None
         _article_title_for_match = (
             f"{_main_result.title} {_main_result.content[:300]}"
-            if _main_result else topic
+            if _main_result and not _skip_factcheck else ""
         )
 
         for i, slide in enumerate(content_slides_list):
             print(f"  슬라이드{i+1} '{slide.title[:25]}' 영상 검색·자막 검증 중...")
-            # 이미 다른 슬라이드에 배정된 영상은 후보 풀에서 제외 → 슬라이드마다 다른 영상
             available_pool = [c for c in assigned_pool if c.video_id not in used_video_ids]
+            # 리스트형: 슬라이드 제목(도구명)을 엔티티 기준으로 사용
+            _entity_src = slide.title if _skip_factcheck else _article_title_for_match
             vi, start_t = find_verified_video_for_slide(
                 slide_title=slide.title,
                 slide_body=slide.body,
                 topic=topic,
                 candidates=available_pool,
                 used_video_ids=used_video_ids,
-                article_title=_article_title_for_match,  # ★ 기사 제목 엔티티 기준
+                article_title=_entity_src,
             )
             if vi is not None:
                 vi.start_seconds = start_t

@@ -22,6 +22,11 @@ def init_db() -> None:
     """DB 및 테이블 초기화 (최초 1회)."""
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     with _conn() as conn:
+        # 기존 DB 마이그레이션: status 컬럼 없으면 추가
+        try:
+            conn.execute("ALTER TABLE posts ADD COLUMN status TEXT DEFAULT 'active'")
+        except Exception:
+            pass  # 이미 존재하면 무시
         conn.executescript("""
         CREATE TABLE IF NOT EXISTS posts (
             id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -33,6 +38,7 @@ def init_db() -> None:
             hashtags    TEXT DEFAULT '[]',      -- JSON array
             image_dir   TEXT DEFAULT '',        -- output/ 하위 폴더 경로
             posted_at   TEXT NOT NULL,
+            status      TEXT DEFAULT 'active',  -- active / deleted
             created_at  TEXT NOT NULL DEFAULT (datetime('now','localtime'))
         );
 
@@ -109,16 +115,22 @@ def insert_post(
         return cur.lastrowid
 
 
-def get_posts(platform: str | None = None, limit: int = 50) -> list[sqlite3.Row]:
+def get_posts(platform: str | None = None, limit: int = 50, include_deleted: bool = False) -> list[sqlite3.Row]:
+    status_filter = "" if include_deleted else "AND (status IS NULL OR status != 'deleted')"
     with _conn() as conn:
         if platform:
             return conn.execute(
-                "SELECT * FROM posts WHERE platform=? ORDER BY posted_at DESC LIMIT ?",
+                f"SELECT * FROM posts WHERE platform=? {status_filter} ORDER BY posted_at DESC LIMIT ?",
                 (platform, limit),
             ).fetchall()
         return conn.execute(
-            "SELECT * FROM posts ORDER BY posted_at DESC LIMIT ?", (limit,)
+            f"SELECT * FROM posts WHERE 1=1 {status_filter} ORDER BY posted_at DESC LIMIT ?", (limit,)
         ).fetchall()
+
+
+def update_post_status(post_id: str, status: str) -> None:
+    with _conn() as conn:
+        conn.execute("UPDATE posts SET status=? WHERE post_id=?", (status, post_id))
 
 
 # ── analytics ─────────────────────────────────────────────
