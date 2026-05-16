@@ -211,42 +211,35 @@ def _layout_cta(card, profile, image, draw, fonts, handle, hashtags):
     pad = profile.layout_padding
     text_w = W - pad * 2
 
-    y = int(H * 0.22)
+    # ── 총 콘텐츠 높이 사전 계산 (수직 중앙 정렬용) ──
+    def _line_h(font):
+        _, _, _, h = draw.textbbox((0, 0), "가나다", font=font)
+        return h
 
-    # 이모지
+    total_h = 0
+    emoji_font = fonts.get("emoji") or fonts["headline"]
     if card.emoji:
-        emoji_font = fonts.get("emoji") or fonts["headline"]
-        draw.text((W // 2 - 30, y), card.emoji, font=emoji_font, fill=hex_to_rgb(profile.accent_color), anchor="mm")
-        y += int(emoji_font.size * 1.5)
+        total_h += int(emoji_font.size * 1.5)
 
-    # 헤드라인 (중앙 정렬)
     hl_lines = wrap_korean_text(card.headline, fonts["headline"], text_w, draw)
-    y = draw_text_block(draw, hl_lines, pad, y, fonts["headline"], profile.primary_text_color, profile.line_spacing, align="center", max_width=text_w)
-    y += 16
+    total_h += int(_line_h(fonts["headline"]) * profile.line_spacing * len(hl_lines)) + 16
 
-    # 바디
+    body_lines: list[str] = []
     if card.body_text:
         body_lines = wrap_korean_text(card.body_text, fonts["body"], text_w, draw)
-        y = draw_text_block(draw, body_lines, pad, y, fonts["body"], profile.secondary_text_color, profile.line_spacing, align="center", max_width=text_w)
-        y += 32
+        total_h += int(_line_h(fonts["body"]) * profile.line_spacing * len(body_lines)) + 32
 
-    # 구분선
     if profile.divider_color:
-        draw_horizontal_line(draw, pad + 100, W - pad - 100, y, profile.divider_color, width=2)
-        y += 24
+        total_h += 24 + 24  # 선 + 여백
 
-    # 핸들
+    handle_font = fonts.get("subheadline") or fonts["body"]
     if handle:
-        handle_font = fonts.get("subheadline") or fonts["body"]
-        handle_w = draw.textlength(handle, font=handle_font)
-        draw.text((W // 2 - handle_w // 2, y), handle, font=handle_font, fill=hex_to_rgb(profile.accent_color))
-        y += handle_font.size + 24
+        total_h += handle_font.size + 24
 
-    # 해시태그 (작은 폰트)
+    tag_font = fonts.get("tag") or fonts["body"]
+    tag_lines: list[str] = []
     if hashtags:
-        tag_font = fonts.get("tag") or fonts["body"]
         tag_line_w = text_w
-        tag_lines: list[str] = []
         current_line = ""
         for tag in hashtags[:20]:
             test = (current_line + " " + tag).strip()
@@ -258,9 +251,39 @@ def _layout_cta(card, profile, image, draw, fonts, handle, hashtags):
                 current_line = tag
         if current_line:
             tag_lines.append(current_line)
+        tag_lines = tag_lines[:4]
+        total_h += int(tag_font.size * 1.4) * len(tag_lines)
 
-        # 최대 4줄
-        for line in tag_lines[:4]:
-            lw = draw.textlength(line, font=tag_font)
-            draw.text((W // 2 - lw // 2, y), line, font=tag_font, fill=hex_to_rgb(profile.secondary_text_color))
-            y += int(tag_font.size * 1.4)
+    # 수직 중앙에서 시작
+    y = max(pad, (H - total_h) // 2)
+
+    # 이모지
+    if card.emoji:
+        draw.text((W // 2 - 30, y), card.emoji, font=emoji_font, fill=hex_to_rgb(profile.accent_color), anchor="mm")
+        y += int(emoji_font.size * 1.5)
+
+    # 헤드라인 (중앙 정렬)
+    y = draw_text_block(draw, hl_lines, pad, y, fonts["headline"], profile.primary_text_color, profile.line_spacing, align="center", max_width=text_w)
+    y += 16
+
+    # 바디
+    if body_lines:
+        y = draw_text_block(draw, body_lines, pad, y, fonts["body"], profile.secondary_text_color, profile.line_spacing, align="center", max_width=text_w)
+        y += 32
+
+    # 구분선
+    if profile.divider_color:
+        draw_horizontal_line(draw, pad + 100, W - pad - 100, y, profile.divider_color, width=2)
+        y += 24
+
+    # 핸들
+    if handle:
+        handle_w = draw.textlength(handle, font=handle_font)
+        draw.text((W // 2 - handle_w // 2, y), handle, font=handle_font, fill=hex_to_rgb(profile.accent_color))
+        y += handle_font.size + 24
+
+    # 해시태그 (작은 폰트, 이미 계산된 tag_lines 재사용)
+    for line in tag_lines:
+        lw = draw.textlength(line, font=tag_font)
+        draw.text((W // 2 - lw // 2, y), line, font=tag_font, fill=hex_to_rgb(profile.secondary_text_color))
+        y += int(tag_font.size * 1.4)
