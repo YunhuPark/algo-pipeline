@@ -781,21 +781,21 @@ def index():
     ) or "<tr><td colspan='5' style='color:var(--muted)'>데이터 없음</td></tr>"
 
     body = f"""
-    {stats}
-    <div style="margin-bottom:16px">{pf_badges}</div>
+    <div id="stat-grid-wrap">{stats}</div>
+    <div id="pf-badges-wrap" style="margin-bottom:16px">{pf_badges}</div>
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:20px">
       <div class="panel">
         <div class="panel-header">
           <div>
             <div class="panel-title">최근 게시물</div>
-            <div class="panel-sub">최근 5개</div>
+            <div id="last-updated" class="panel-sub">최근 5개</div>
           </div>
           <a href="/queue" class="btn btn-secondary" style="font-size:12px;padding:6px 14px">큐 관리 →</a>
         </div>
         <div class="table-wrap">
           <table>
             <thead><tr><th>주제</th><th>앵글</th><th>플랫폼</th><th>날짜</th></tr></thead>
-            <tbody>{recent_rows}</tbody>
+            <tbody id="recent-tbody">{recent_rows}</tbody>
           </table>
         </div>
       </div>
@@ -815,7 +815,68 @@ def index():
         </div>
       </div>
     </div>"""
-    return _page("대시보드", "/", body)
+    poll_js = """
+<script>
+(function() {
+  function pad(n) { return String(n).padStart(2,'0'); }
+  function fmt(d) { return d.getFullYear()+'-'+pad(d.getMonth()+1)+'-'+pad(d.getDate())+' '+pad(d.getHours())+':'+pad(d.getMinutes())+':'+pad(d.getSeconds()); }
+
+  function refreshStats() {
+    fetch('/api/stats').then(r=>r.json()).then(d=>{
+      document.getElementById('stat-grid-wrap').innerHTML = d.stats_html;
+      document.getElementById('pf-badges-wrap').innerHTML = d.pf_html;
+      document.getElementById('recent-tbody').innerHTML = d.recent_html;
+      document.getElementById('last-updated').textContent = '업데이트: ' + fmt(new Date());
+    }).catch(()=>{});
+  }
+
+  setInterval(refreshStats, 30000);
+})();
+</script>"""
+    return _page("대시보드", "/", body + poll_js)
+
+
+# ── /api/stats (대시보드 실시간 폴링용) ──────────────────────
+
+@app.route("/api/stats")
+def api_stats():
+    from flask import jsonify
+    posts = get_posts(limit=100)
+    today = datetime.now().strftime("%Y-%m-%d")
+    week_ago = (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d")
+
+    total = len(posts)
+    today_cnt = sum(1 for p in posts if str(p["posted_at"]).startswith(today))
+    week_cnt = sum(1 for p in posts if str(p["posted_at"]) >= week_ago)
+    q_cnt = queue_count("pending")
+
+    platforms: dict[str, int] = {}
+    for p in posts:
+        pf = p["platform"] or "unknown"
+        platforms[pf] = platforms.get(pf, 0) + 1
+
+    stats_html = f"""
+    <div class="stat-grid">
+      <div class="stat-card"><div class="val">{today_cnt}</div><div class="lbl">오늘 게시물</div><div class="icon-bg">📅</div></div>
+      <div class="stat-card"><div class="val">{week_cnt}</div><div class="lbl">이번주 게시물</div><div class="icon-bg">📆</div></div>
+      <div class="stat-card"><div class="val">{total}</div><div class="lbl">전체 게시물</div><div class="icon-bg">📰</div></div>
+      <div class="stat-card"><div class="val">{q_cnt}</div><div class="lbl">큐 대기 중</div><div class="icon-bg">📋</div></div>
+    </div>"""
+
+    pf_html = "".join(
+        f'<span class="badge badge-{pf}">{pf} {cnt}</span>&nbsp;'
+        for pf, cnt in platforms.items()
+    )
+
+    recent = list(posts)[:5]
+    recent_html = "".join(
+        "<tr><td>{}</td><td>{}</td><td><span class='badge badge-{}'>{}</span></td><td>{}</td></tr>".format(
+            p['topic'], p['angle'] or '-', p['platform'], p['platform'], str(p['posted_at'])[:16]
+        )
+        for p in recent
+    )
+
+    return jsonify(stats_html=stats_html, pf_html=pf_html, recent_html=recent_html)
 
 
 # ── /queue 큐 관리 ────────────────────────────────────────
