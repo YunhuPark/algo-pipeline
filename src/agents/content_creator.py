@@ -428,24 +428,59 @@ def run(
             _trend_ctx_parts.append(f"- {_f.fact}")
         _trend_ctx = "\n".join(_trend_ctx_parts) or "최신 AI/테크 트렌드"
         # facts_list에 기사 내용 제거 + 명확한 지시만 포함
-        facts_list = (
-            f"⚠️ 이 주제는 '{topic}'입니다. 기사 사실 무효.\n"
-            f"당신의 AI/테크 최신 지식에서 {list_n}가지 실용 아이템을 직접 선정하세요.\n"
-            f"조건: ① 실제 존재 ② 지금 바로 사용 가능 ③ 기업명·제품명 필수 ④ 무료 여부 명시\n\n"
-            f"[현재 AI 트렌드 — 어떤 분야가 핫한지 참고만 할 것]\n{_trend_ctx}"
-        )
-        listicle_override = (
-            f"\n\n⚠️ [OVERRIDE — 리스트형 모드]\n"
-            f"기사 사실 규칙 완전 무효. 기사에서 아이템 추출 절대 금지.\n"
-            f"AI/테크 최신 지식에서 {list_n}가지 서로 다른 실용 아이템 직접 선정.\n\n"
-            f"각 아이템 body 필수 조건 (위반 시 즉시 탈락):\n"
-            f"  · 첫 줄: 핵심 기능 1줄 — '무엇을' '어떻게' 구체적으로\n"
-            f"    ✓ 'SNS 썸네일 30초 완성' / '영문 이메일 문법 실시간 교정'\n"
-            f"    ❌ '쉽게 쓸 수 있어요' / '다방면으로 활용' (즉시 탈락)\n"
-            f"  · 둘째 줄: 무료 여부 + 구체적 제한 — '무료 (하루 50회 제한)' / '기본 무료, 유료 $12/월'\n"
-            f"  · 셋째 줄(선택): 추천 대상 — '영상 편집 처음 시작할 때 최고'\n"
-            f"기사 관련 키워드(샌드박스, AutoScout24 등)를 아이템으로 사용하면 즉시 탈락."
-        )
+        # 단일 제품 기능 목록인지 vs 여러 도구 목록인지 판단
+        _single_product_keywords = [
+            "chatgpt", "gpt", "claude", "gemini", "copilot", "notion", "figma",
+            "canva", "slack", "excel", "sheets", "cursor", "perplexity"
+        ]
+        _is_single_product = any(kw in topic.lower() for kw in _single_product_keywords)
+        _product_name = next((kw.upper() if kw in ["gpt"] else kw.title()
+                              for kw in _single_product_keywords if kw in topic.lower()), "")
+
+        if _is_single_product:
+            # 단일 제품의 기능 목록 (예: ChatGPT 꿀기능 5선)
+            facts_list = (
+                f"⚠️ 이 주제는 '{topic}'입니다. 기사 사실 무효.\n"
+                f"{_product_name}의 실제 존재하는 구체적 기능/기법 {list_n}가지를 직접 선정하세요.\n"
+                f"조건: ① 반드시 {_product_name}에 실제 존재하는 기능 ② 기능명 명시 필수 ③ 모호한 '활용법'·'팁' 금지\n\n"
+                f"[예시 — 이런 수준의 구체성 필요]\n"
+                f"- DALL-E 이미지 생성 (ChatGPT 내장 → GPT-4o 구독자 무료)\n"
+                f"- Voice Mode (실시간 음성 대화 → iOS/Android 앱 → GPT-4o 필요)\n"
+                f"- Custom GPTs (나만의 AI 만들기 → ChatGPT.com/gpts)\n"
+                f"- Code Interpreter (데이터 분석·그래프 생성 → 파일 업로드 후 질문)\n"
+                f"❌ 탈락 예시: '활용 팁 공유', '할인 방법 안내', '시험 문제 도움' (기능명 없음)"
+            )
+            listicle_override = (
+                f"\n\n⚠️ [OVERRIDE — {_product_name} 기능 리스트 모드]\n"
+                f"기사 사실 규칙 완전 무효. 기사에서 아이템 추출 절대 금지.\n"
+                f"{_product_name}에 실제 존재하는 기능 {list_n}가지 — 반드시 기능명이 title에 명시되어야 함.\n\n"
+                f"title 형식: '[N/5] 기능명' (예: '[1/5] DALL-E 이미지 생성', '[2/5] Voice Mode')\n"
+                f"❌ title 탈락 기준: '활용 팁', '할인 방법', '도움', '안내', '공유' 같은 모호한 단어 포함 시\n\n"
+                f"body 필수 조건:\n"
+                f"  · 첫 줄: 이 기능으로 '무엇을' '어떻게' — 구체적 행동 동사 사용\n"
+                f"  · 둘째 줄: 접근 방법 (어디서, 어떻게 켜는지) + 무료/유료 여부\n"
+                f"  · 셋째 줄(선택): 추천 상황 1가지"
+            )
+        else:
+            # 여러 도구 목록 (예: 무료 AI 도구 5가지)
+            facts_list = (
+                f"⚠️ 이 주제는 '{topic}'입니다. 기사 사실 무효.\n"
+                f"당신의 AI/테크 최신 지식에서 {list_n}가지 실용 아이템을 직접 선정하세요.\n"
+                f"조건: ① 실제 존재 ② 지금 바로 사용 가능 ③ 서비스명·제품명 필수 ④ 무료 여부 명시\n\n"
+                f"[현재 AI 트렌드 — 어떤 분야가 핫한지 참고만 할 것]\n{_trend_ctx}"
+            )
+            listicle_override = (
+                f"\n\n⚠️ [OVERRIDE — 리스트형 모드]\n"
+                f"기사 사실 규칙 완전 무효. 기사에서 아이템 추출 절대 금지.\n"
+                f"AI/테크 최신 지식에서 {list_n}가지 서로 다른 실용 아이템 직접 선정.\n\n"
+                f"각 아이템 body 필수 조건 (위반 시 즉시 탈락):\n"
+                f"  · 첫 줄: 핵심 기능 1줄 — '무엇을' '어떻게' 구체적으로\n"
+                f"    ✓ 'SNS 썸네일 30초 완성' / '영문 이메일 문법 실시간 교정'\n"
+                f"    ❌ '쉽게 쓸 수 있어요' / '다방면으로 활용' (즉시 탈락)\n"
+                f"  · 둘째 줄: 무료 여부 + 구체적 제한 — '무료 (하루 50회 제한)' / '기본 무료, 유료 $12/월'\n"
+                f"  · 셋째 줄(선택): 추천 대상\n"
+                f"기사 관련 키워드를 아이템으로 사용하면 즉시 탈락."
+            )
         print(f"  [ContentCreator] 리스트형 모드 활성화: {list_n}가지 → GPT 지식 기반 (기사 무효)")
     else:
         list_n = 0

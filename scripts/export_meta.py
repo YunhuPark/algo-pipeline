@@ -55,19 +55,32 @@ def export() -> int:
 
 def _git_push() -> None:
     import subprocess as _sp
+    import os
     # git repo가 있는 algo-site 경로 찾기 (.git 폴더 기준)
     candidates = [t.parent.parent.parent for t in _TARGETS]
     algo_site = next((p for p in candidates if (p / ".git").exists()), None)
     if not algo_site:
         return
+    # PowerShell로 실행 → 한글 경로도 안전하게 처리
+    ps_script = (
+        f"Set-Location '{algo_site}'; "
+        f"git add src/data/posts_meta.json; "
+        f"$diff = git diff --cached --quiet; "
+        f"if ($LASTEXITCODE -ne 0) {{"
+        f"  git commit -m 'data: posts_meta.json 자동 갱신'; "
+        f"  git push origin main; "
+        f"  Write-Host 'algo-site git push 완료'"
+        f"}}"
+    )
     try:
-        _sp.run(["git", "add", "src/data/posts_meta.json"], cwd=str(algo_site), check=True, capture_output=True)
-        result = _sp.run(["git", "diff", "--cached", "--quiet"], cwd=str(algo_site), capture_output=True)
-        if result.returncode == 0:
-            return  # 변경 없으면 스킵
-        _sp.run(["git", "commit", "-m", "data: posts_meta.json 자동 갱신"], cwd=str(algo_site), check=True, capture_output=True)
-        _sp.run(["git", "push", "origin", "main"], cwd=str(algo_site), check=True, capture_output=True)
-        print("  -> algo-site git push 완료 (Vercel 배포 트리거)")
+        result = _sp.run(
+            ["powershell", "-NonInteractive", "-NoProfile", "-Command", ps_script],
+            capture_output=True, text=True, encoding="utf-8", errors="replace"
+        )
+        if "git push 완료" in result.stdout:
+            print("  -> algo-site git push 완료 (Vercel 배포 트리거)")
+        else:
+            print("  -> algo-site 변경 없음 (스킵)")
     except Exception as e:
         print(f"  -> git push 실패 (무시): {e}")
 

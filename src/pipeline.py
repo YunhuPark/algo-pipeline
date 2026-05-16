@@ -358,27 +358,49 @@ def _run_once(
         for i, slide in enumerate(content_slides_list):
             print(f"  슬라이드{i+1} '{slide.title[:25]}' 영상 검색·자막 검증 중...")
             available_pool = [c for c in assigned_pool if c.video_id not in used_video_ids]
-            # 리스트형: 슬라이드 제목(도구명)을 엔티티 기준으로 사용
-            _entity_src = slide.title if _skip_factcheck else _article_title_for_match
-            vi, start_t = find_verified_video_for_slide(
-                slide_title=slide.title,
-                slide_body=slide.body,
-                topic=topic,
-                candidates=available_pool,
-                used_video_ids=used_video_ids,
-                article_title=_entity_src,
-            )
-            if vi is not None:
-                vi.start_seconds = start_t
-                used_video_ids.add(vi.video_id)
-                # 새로 발견된 영상을 풀에 추가 (다음 슬라이드 검색용)
-                if not any(c.video_id == vi.video_id for c in assigned_pool):
-                    assigned_pool.append(vi)
-                video_infos.append(vi)
+
+            if _skip_factcheck:
+                # 리스트형: 자막 검증 없이 썸네일만 — 429 rate limit 회피
+                from src.agents.youtube_fetcher import _search_youtube, _validate_candidates
+                # 슬라이드 제목에서 핵심 키워드 추출 (예: "[1/5] DALL-E 이미지 생성" → "DALL-E")
+                import re as _re_kw
+                _raw_title = _re_kw.sub(r'\[\d+/\d+\]\s*', '', slide.title).strip()
+                _kw = f"{topic} {_raw_title}"
+                _candidates = _search_youtube(_kw, n=5, days=180)
+                _valid = _validate_candidates(_candidates, min_views=2000)
+                vi = next(
+                    (c for c in _valid if c.video_id not in used_video_ids and c.thumbnail),
+                    None
+                )
+                if vi:
+                    vi.start_seconds = 0
+                    used_video_ids.add(vi.video_id)
+                    if not any(c.video_id == vi.video_id for c in assigned_pool):
+                        assigned_pool.append(vi)
+                    print(f"  ✓  슬라이드{i+1} 썸네일 확보: '{vi.title[:35]}'")
+                    video_infos.append(vi)
+                else:
+                    print(f"  ⚠️  슬라이드{i+1} '{slide.title[:25]}' 영상 없음 → 이미지 슬라이드로 처리")
+                    video_infos.append(None)
             else:
-                # 영상 없는 슬라이드 → None(이미지 전용) 으로 처리 (파이프라인 중단 X)
-                print(f"  ⚠️  슬라이드{i+1} '{slide.title[:25]}' 영상 없음 → 이미지 슬라이드로 처리")
-                video_infos.append(None)
+                _entity_src = _article_title_for_match
+                vi, start_t = find_verified_video_for_slide(
+                    slide_title=slide.title,
+                    slide_body=slide.body,
+                    topic=topic,
+                    candidates=available_pool,
+                    used_video_ids=used_video_ids,
+                    article_title=_entity_src,
+                )
+                if vi is not None:
+                    vi.start_seconds = start_t
+                    used_video_ids.add(vi.video_id)
+                    if not any(c.video_id == vi.video_id for c in assigned_pool):
+                        assigned_pool.append(vi)
+                    video_infos.append(vi)
+                else:
+                    print(f"  ⚠️  슬라이드{i+1} '{slide.title[:25]}' 영상 없음 → 이미지 슬라이드로 처리")
+                    video_infos.append(None)
 
         video_cnt = sum(1 for v in video_infos if v is not None)
         print(f"  → {video_cnt}/{len(content_slides_list)} 슬라이드 영상 매핑 완료 (영상 없는 슬라이드는 이미지로 처리)")
