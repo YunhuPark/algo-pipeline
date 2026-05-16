@@ -12,10 +12,11 @@ from pathlib import Path
 ROOT = Path(__file__).parent.parent
 OUTPUT_DIR = ROOT / "output"
 
-# cardnews 내부 경로와 독립 배포용 경로 둘 다 갱신
+# cardnews 내부 경로 + 이전 Desktop 경로 + 독립 배포용 경로 모두 갱신
 _TARGETS = [
     ROOT / "algo-site" / "src" / "data",
     ROOT.parent / "algo-site" / "src" / "data",
+    Path(r"C:\Users\박윤후\Desktop\프로젝트\algo-site") / "src" / "data",
 ]
 
 
@@ -28,6 +29,9 @@ def export() -> int:
             continue
         try:
             data = json.loads(meta_path.read_text(encoding="utf-8"))
+            # 삭제된 게시물은 algo-site에서 제외
+            if data.get("status") == "deleted":
+                continue
             data["folder"] = folder.name
             records.append(data)
         except Exception as e:

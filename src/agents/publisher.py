@@ -229,6 +229,20 @@ def get_post_permalink(post_id: str) -> str:
     return resp.json().get("permalink", "")
 
 
+def check_post_exists(post_id: str) -> bool:
+    """Instagram에 게시물이 여전히 존재하는지 확인 (삭제/보관 감지)."""
+    try:
+        resp = httpx.get(
+            f"{GRAPH_BASE}/{post_id}",
+            params={"fields": "id", "access_token": IG_ACCESS_TOKEN},
+            timeout=10,
+        )
+        data = resp.json()
+        return "id" in data and "error" not in data
+    except Exception:
+        return True  # 네트워크 오류는 존재로 간주
+
+
 def _build_caption(hook: str, hashtags: list[str]) -> str:
     """인스타그램 캡션 조합 (후킹 문구 + 줄바꿈 + 해시태그)"""
     tag_str = " ".join(hashtags)
