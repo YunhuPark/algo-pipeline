@@ -360,24 +360,25 @@ def _run_once(
             available_pool = [c for c in assigned_pool if c.video_id not in used_video_ids]
 
             if _skip_factcheck:
-                # 리스트형: 자막 검증 없이 썸네일만 — 429 rate limit 회피
-                from src.agents.youtube_fetcher import _search_youtube, _validate_candidates
-                # 슬라이드 제목에서 핵심 키워드 추출 (예: "[1/5] DALL-E 이미지 생성" → "DALL-E")
+                # 리스트형: 슬라이드별 개별 검색 + 자막 검증 (12초 간격으로 429 방지)
                 import re as _re_kw
                 _raw_title = _re_kw.sub(r'\[\d+/\d+\]\s*', '', slide.title).strip()
-                _kw = f"{topic} {_raw_title}"
-                _candidates = _search_youtube(_kw, n=5, days=180)
-                _valid = _validate_candidates(_candidates, min_views=2000)
-                vi = next(
-                    (c for c in _valid if c.video_id not in used_video_ids and c.thumbnail),
-                    None
+                vi, start_t = find_verified_video_for_slide(
+                    slide_title=slide.title,
+                    slide_body=slide.body,
+                    topic=f"{topic} {_raw_title}",
+                    candidates=[],
+                    used_video_ids=used_video_ids,
+                    article_title="",   # 기사 없음 → topic 기반 엔티티
+                    max_verify=2,
+                    search_days=365,
                 )
-                if vi:
-                    vi.start_seconds = 0
+                if vi is not None:
+                    vi.start_seconds = start_t
                     used_video_ids.add(vi.video_id)
                     if not any(c.video_id == vi.video_id for c in assigned_pool):
                         assigned_pool.append(vi)
-                    print(f"  ✓  슬라이드{i+1} 썸네일 확보: '{vi.title[:35]}'")
+                    print(f"  ✓  슬라이드{i+1} 영상 확보: '{vi.title[:35]}' → {start_t}초")
                     video_infos.append(vi)
                 else:
                     print(f"  ⚠️  슬라이드{i+1} '{slide.title[:25]}' 영상 없음 → 이미지 슬라이드로 처리")

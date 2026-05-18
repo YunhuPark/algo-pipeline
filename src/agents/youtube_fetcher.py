@@ -29,7 +29,7 @@ _video_meta_cache: dict[str, dict] = {}
 _transcript_cache: dict[str, str] = {}
 # 마지막 자막 다운로드 시각 — 요청 간격 조절용
 _last_transcript_fetch: float = 0.0
-_TRANSCRIPT_INTERVAL = 4.0  # 자막 요청 최소 간격(초) — 429 rate limit 방지
+_TRANSCRIPT_INTERVAL = 12.0  # 자막 요청 최소 간격(초) — 429 rate limit 방지 (4초→12초)
 
 
 @dataclass
@@ -845,14 +845,19 @@ def find_verified_video_for_slide(
         transcript = _get_video_transcript(vi.video_id)
 
         if not transcript:
-            # 자막 없음 → 제목+스니펫으로 엔티티 게이트 + 키워드 매칭
-            combined = f"{vi.title} {vi.snippet}".lower()
+            # 자막 없음 → 엔티티 게이트 먼저
             if not _entity_gate(vi.title, vi.snippet, "자막없음"):
                 return False, 0
-
+            # 한국어 주제(엔티티 게이트 비활성) + 자막 없음 = 내용 검증 불가 → 거절
+            # (키워드 2개 매칭만으론 "ChatGPT Plus vs Free" 같은 엉뚱한 영상이 통과됨)
+            if not _entity_gate_active:
+                print(f"  [YouTubeFetcher] ✗ 자막없음+한국어주제(검증불가): '{vi.title[:40]}'")
+                return False, 0
+            # 영어 주제 + 자막 없음: 키워드 매칭 (임계값 3으로 강화)
+            combined = f"{vi.title} {vi.snippet}".lower()
             core_kws = [k for k in slide_keywords if any(c.isdigit() for c in k) or k.isascii()][:8]
             hits = sum(1 for k in core_kws if k.lower() in combined)
-            matched = hits >= 2
+            matched = hits >= 3
             print(f"  [YouTubeFetcher] {'✓' if matched else '✗'} 자막없음·키워드매칭({hits}/{len(core_kws)}): '{vi.title[:40]}'")
             return matched, 0
 
@@ -871,12 +876,14 @@ def find_verified_video_for_slide(
             f"판단 기준 (아래 조건 중 하나라도 위반하면 match=false):\n"
             f"1. 필수 엔티티가 슬라이드와 같은 맥락으로 자막에 등장해야 함\n"
             f"2. 슬라이드 주제가 영상의 핵심 내용이어야 함 (스쳐 지나가는 언급 X)\n"
-            f"3. ❌ 개념 혼동 금지 예시:\n"
+            f"3. 슬라이드가 특정 사건·발표·프로그램에 관한 것이면 영상도 그 사건을 다뤄야 함\n"
+            f"   (일반적인 관련 주제 영상은 match=false)\n"
+            f"4. ❌ 개념 혼동 금지 예시:\n"
+            f"   - 슬라이드='몰타 ChatGPT Plus 무료 제공 파트너십' → 'ChatGPT Plus 가격 비교'는 match=false\n"
             f"   - 슬라이드='Cloudflare Workers AI 실시간 배포' → 'AI 학습 데이터 필요성'는 match=false\n"
             f"   - 슬라이드='OpenAI 모델 가격' → 'AGI 철학적 토론'은 match=false\n"
-            f"   - 슬라이드='Cloudflare Sandbox 마이크로 VM' → 'AWS Lambda vs 서비스리스'는 match=false\n"
-            f"4. 인트로/광고/자기소개 구간 제외\n"
-            f"5. 슬라이드가 한국어라도 영어 자막에서 동일 의미를 찾으세요\n\n"
+            f"5. 인트로/광고/자기소개 구간 제외\n"
+            f"6. 슬라이드가 한국어라도 영어 자막에서 동일 의미를 찾으세요\n\n"
             f"JSON만 출력 (다른 텍스트 금지):\n"
             f"{{\"match\": true/false, \"start_seconds\": 관련내용 첫 등장 초(정수, 없으면 0), "
             f"\"reason\": \"한 줄 근거\"}}"
