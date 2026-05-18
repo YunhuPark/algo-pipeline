@@ -47,27 +47,61 @@ _SYSTEM_PROMPT = """\
 당신은 한국 인스타그램 AI/테크 계정 @algo__kr의 콘텐츠 기획자입니다.
 MZ세대(20~30대) 팔로워의 저장·공유를 유도하는 주제를 선정합니다.
 
-[인스타그램 저장률 높은 주제 형식 — 우선 선호]
-★★★ "N가지/N선" 형식: "ChatGPT 꿀기능 5가지" / "무료 AI 도구 7선" / "취준생 필수 AI 3가지"
-     → 독자가 나중에 하나씩 써보려고 저장함 (저장률 최고)
-★★  "Before/After" 형식: "GPT 쓰기 전/후 비교" / "3시간 → 30분 된 방법"
-     → 바로 따라 하고 싶어서 저장함
-★★  "즉시 써먹기" 형식: "지금 바로 쓰는 ChatGPT 프롬프트" / "복붙하면 끝나는 AI 명령어"
-     → 당장 써보려고 저장함
-★   "몰랐던 사실" 형식: "GPT 유저 90%가 모르는 기능" / "아직 무료인 AI 도구들"
-     → 나만 모를까봐 저장함
+[최우선 원칙: 최신 뉴스 기반]
+★★★ 오늘 실제로 발표·출시·발생한 AI/테크 뉴스를 카드뉴스화하는 것이 최우선입니다.
+     예: "OpenAI, GPT-5 출시 — 실제로 달라진 점" / "구글 Gemini 2.0 무료 전환"
+     → 시의성 있는 콘텐츠는 검색·저장·공유 모두 높음
+
+★★  뉴스 기반 + 즉시 활용: 새 기능·도구가 나왔을 때 "어떻게 쓰는지"로 연결
+     예: "방금 나온 Claude 새 기능, 이렇게 쓰면 됩니다"
+     → 출시 직후 콘텐츠가 알고리즘 노출 최고
+
+★   폴백 — 특정 제품 기능 소개 (뉴스가 없거나 너무 기술적일 때만 허용)
+     예: "Perplexity Pages 써봤더니" / "Notion AI 자동화 실제 사용법"
+     조건: 반드시 실제 제품명이 제목에 들어가야 함. 막연한 "AI 도구 N가지" 형식 금지.
 
 [고점수 주제 기준]
-1. 구체적: 기업명·제품명·수치가 제목 안에 들어감 ("AI 시대" ❌ → "ChatGPT로 월 50만 원 버는 법" ✅)
-2. 실익: 돈·취업·생산성·절약에 직결 — 독자가 "나한테 도움된다"고 즉시 느낌
-3. 뉴스성: 최근 2주 내 실제 출시·발표·수치 업데이트 기반 (과거 이슈 재탕 ❌)
-4. 실행 가능: 독자가 읽고 나서 바로 따라 할 수 있는 것
+1. 뉴스성: 오늘~3일 이내 실제 발표·출시 기반 (★★★ 최중요)
+2. 구체적: 기업명·제품명·수치가 제목 안에 들어감
+3. YouTube 영상 존재: YouTube에 해당 제품·기능을 직접 다루는 영상이 이미 충분히 있어야 함 (★★ 중요)
+   → 각 슬라이드 주제로 YouTube 검색 시 자막 있는 관련 영상이 나와야 신뢰도 높은 영상 삽입 가능
+   → 너무 최신(오늘 발표)이거나 너무 niche한 주제는 영상이 없어 이미지만 나올 수 있음
+   예) "OpenAI Codex 샌드박스 기능" → YouTube에 데모/튜토리얼 영상 풍부 ✅
+   예) "몰타 정부 ChatGPT Plus 무료 제공" → YouTube 영상 거의 없음 ❌
+4. 슬라이드 구체성: 선정한 주제로 카드 5~6장을 만들 때 각 슬라이드에 구체적인 제품명·서비스명·사건명이 반드시 들어갈 수 있어야 함
+   예) "OpenAI o3 출시" → 슬라이드마다 "o3 벤치마크", "o3 가격", "o1과 차이" 등 구체 내용 가능 ✅
+   예) "AI 업무 혁신" → 슬라이드가 추상적 조언만 나열됨 ❌
+5. 실익: 독자가 "나한테 도움된다"고 즉시 느낌 (돈·취업·생산성)
 
-[저점수 주제 — 피할 것]
-- AI 윤리·규제·사회적 영향 등 추상적 논의
-- "~의 미래", "~시대의 도래" 같이 시간이 지나도 늘 맞는 말
-- 독자가 당장 행동할 수 없는 거시 전망
-- 뉴스 설명만 하고 끝나는 주제 (기사 요약 ≠ 카드뉴스)"""
+[절대 금지]
+- "AI N가지 활용법", "AI로 업무 효율 N%" 같은 막연한 리스트형 (특정 제품명 없는 것)
+- "AI 윤리", "AI의 미래", "AI 시대의 도래" 등 추상적 주제
+- 슬라이드 제목이 "활용 팁", "실전 적용", "효율 높이기" 같은 막연한 말로만 채워질 주제
+- 뉴스 없이 GPT 일반 지식만으로 만든 주제
+- YouTube 영상이 거의 없는 극히 최신 발표나 niche 이벤트 단독 주제
+- 3주 내 이미 다룬 주제 반복"""
+
+
+def _fetch_recent_news() -> list[str]:
+    """Tavily로 최근 3일 AI/테크 뉴스 헤드라인 수집."""
+    try:
+        from tavily import TavilyClient
+        tc = TavilyClient(api_key=os.getenv("TAVILY_API_KEY", ""))
+        results = tc.search(
+            "AI artificial intelligence tech news release launch",
+            search_depth="basic",
+            max_results=8,
+            days=3,
+        )
+        headlines = []
+        for r in results.get("results", []):
+            title = r.get("title", "").strip()
+            snippet = r.get("content", "")[:80].strip()
+            if title:
+                headlines.append(f"- {title}: {snippet}")
+        return headlines[:6]
+    except Exception:
+        return []
 
 
 def pick_topic() -> str:
@@ -80,6 +114,15 @@ def pick_topic() -> str:
             + "\n".join(f"- {t}" for t in recent)
         )
 
+    # 오늘 뉴스 수집
+    news_headlines = _fetch_recent_news()
+    news_block = ""
+    if news_headlines:
+        news_block = (
+            "\n\n[오늘의 최신 AI/테크 뉴스 — 이 중에서 주제를 선정하는 것을 최우선으로]\n"
+            + "\n".join(news_headlines)
+        )
+
     # 1단계: 후보 3개 생성
     candidates_resp = client.chat.completions.create(
         model="gpt-4o-mini",
@@ -89,14 +132,16 @@ def pick_topic() -> str:
                 "role": "user",
                 "content": (
                     f"오늘은 {today}입니다.\n"
-                    "최근 AI/테크 트렌드 중에서 인스타그램 카드뉴스로 만들기 좋은 후보 주제 3개를 골라주세요.\n"
-                    "형식: 번호 없이, 한 줄에 하나씩, 각 주제 10자 이내로."
+                    "인스타그램 카드뉴스로 만들기 좋은 후보 주제 3개를 골라주세요.\n"
+                    "뉴스가 제공되면 반드시 그 중에서 선정하세요. 뉴스가 없거나 너무 기술적이면 특정 제품명이 들어간 주제로 대체하세요.\n"
+                    "형식: 번호 없이, 한 줄에 하나씩, 각 주제 15자 이내로."
+                    + news_block
                     + avoid_block
                 ),
             },
         ],
-        max_tokens=80,
-        temperature=0.95,
+        max_tokens=120,
+        temperature=0.7,
     )
     candidates_raw = candidates_resp.choices[0].message.content.strip()
     candidates = [
@@ -137,7 +182,32 @@ def pick_topic() -> str:
     return result
 
 
+def _already_posted_today() -> bool:
+    today = datetime.now().strftime("%Y-%m-%d")
+    today_prefix = datetime.now().strftime("%Y%m%d")
+    db_path = ROOT / "data" / "algo.db"
+    if db_path.exists():
+        try:
+            conn = sqlite3.connect(str(db_path))
+            row = conn.execute(
+                "SELECT COUNT(*) FROM posts WHERE platform='instagram' AND posted_at LIKE ?",
+                (f"{today}%",)
+            ).fetchone()
+            conn.close()
+            if row and row[0] > 0:
+                return True
+        except Exception:
+            pass
+    output_dir = ROOT / "output"
+    if output_dir.exists() and list(output_dir.glob(f"{today_prefix}_*")):
+        return True
+    return False
+
+
 def main() -> None:
+    if _already_posted_today():
+        print(f"[{datetime.now().strftime('%H:%M:%S')}] 오늘 이미 게시 완료 → 스킵")
+        sys.exit(0)
     print(f"[{datetime.now().strftime('%H:%M:%S')}] GPT 주제 선택 중...")
     topic = pick_topic()
     print(f"[{datetime.now().strftime('%H:%M:%S')}] 선택된 주제: {topic}")
