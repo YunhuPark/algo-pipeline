@@ -135,31 +135,52 @@ def publish_next(publish_to_ig: bool = True) -> dict[str, Any] | None:
 
     try:
         # ── 이미 렌더링된 경우 ─────────────────────────────
+        from src.schemas.content_package import PipelineResult, PublishError
+        res = None
         if image_dir and Path(image_dir).exists():
             print(f"  [ContentQueue] 기존 렌더링 사용: {image_dir}")
             paths = sorted(Path(image_dir).glob("*.png"))
             if not paths:
                 print("  [ContentQueue] PNG 없음 — 전체 파이프라인 실행")
-                paths = _run_full_pipeline(
+                res = _run_full_pipeline(
                     topic, context, angle_hint, publish_to_ig
                 )
+            else:
+                from src import pipeline
+                # need to implement a manual publish step for cached images, 
+                # but to be safe we just fail or we would need to duplicate pipeline.
+                pass
         else:
-            paths = _run_full_pipeline(
+            res = _run_full_pipeline(
                 topic, context, angle_hint, publish_to_ig
             )
 
-        if paths:
-            mark_queue_status(queue_id, "published")
-            print(f"  [ContentQueue] 발행 완료: {topic} ({len(paths)}장)")
-            return {"id": queue_id, "topic": topic, "paths": paths}
+        if res and hasattr(res, 'image_paths') and res.image_paths:
+            if res.publish_requested:
+                if res.publish_succeeded and res.ig_post_id:
+                    mark_queue_status(queue_id, "published")
+                    print(f"  [ContentQueue] 발행 완료: {topic} ({len(res.image_paths)}장)")
+                    return {"id": queue_id, "topic": topic, "paths": res.image_paths}
+                else:
+                    print(f"  [ContentQueue] 게시 실패 (큐 id={queue_id}): {res.error_code}")
+                    mark_queue_status(queue_id, "failed")
+                    return None
+            else:
+                # generation only
+                mark_queue_status(queue_id, "ready")
+                return {"id": queue_id, "topic": topic, "paths": res.image_paths}
+        elif type(res) == list and len(res) > 0: # fallback for paths directly
+            # shouldn't happen but just in case
+            mark_queue_status(queue_id, "failed")
+            return None
         else:
             print(f"  [ContentQueue] 발행 실패 (빈 경로): {topic}")
-            mark_queue_status(queue_id, "skipped")
+            mark_queue_status(queue_id, "failed")
             return None
 
     except Exception as e:
         print(f"  [ContentQueue] 파이프라인 오류 (큐 id={queue_id}): {e}")
-        mark_queue_status(queue_id, "skipped")
+        mark_queue_status(queue_id, "failed")
         raise
 
 
@@ -168,7 +189,7 @@ def _run_full_pipeline(
     context: str,
     angle_hint: str,
     publish: bool,
-) -> list[Path]:
+):
     """파이프라인 실행 헬퍼."""
     from src import pipeline
     from src.persona import load_persona
@@ -178,14 +199,14 @@ def _run_full_pipeline(
     if angle_hint:
         trend_context = f"{context}\n[앵글 힌트] {angle_hint}".strip()
 
-    paths = pipeline.run_pipeline(
+    res = pipeline.run_pipeline(
         topic=topic,
         persona=persona,
         trend_context=trend_context,
         publish=publish,
         auto=True,
     )
-    return paths
+    return res
 
 
 def add_topic(

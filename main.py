@@ -246,7 +246,7 @@ def main() -> None:
         print("\n[알고 Auto] 뉴스 수집 중...")
         sel = collect_and_select()
         print(f"선택 주제: {sel.topic}\n이유: {sel.reason}")
-        run_pipeline(
+        res = run_pipeline(
             topic=sel.topic, trend_context=sel.context,
             num_cards=args.cards, handle=args.handle,
             force_dalle=args.dalle, force_refresh=args.refresh,
@@ -260,6 +260,8 @@ def main() -> None:
             fact_check=not args.no_factcheck,
             make_reels=args.reels,
         )
+        if res and res.publish_requested and not res.publish_succeeded:
+            sys.exit(1)
         return
 
     # ── 수동 모드 ─────────────────────────────────────────
@@ -272,7 +274,7 @@ def main() -> None:
         sys.exit(1)
 
     from src.pipeline import run_pipeline
-    run_pipeline(
+    res = run_pipeline(
         topic=topic,
         num_cards=args.cards, handle=args.handle,
         force_dalle=args.dalle, force_refresh=args.refresh,

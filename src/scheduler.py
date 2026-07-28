@@ -68,13 +68,15 @@ def job_daily_cardnews() -> None:
         if status["pending"] > 0:
             # 큐에서 발행
             _log("  큐에서 다음 항목 발행...")
-            publish_next(publish_to_ig=AUTO_UPLOAD and not DRY_RUN)
+            res = publish_next(publish_to_ig=AUTO_UPLOAD and not DRY_RUN)
+            if not res:
+                raise Exception("큐 발행 실패")
         else:
             # 큐 비어있으면 뉴스 자동 수집
             _log("  큐 없음 → 뉴스 자동 수집...")
             selection = collect_and_select()
             _log(f"  주제: {selection.topic}")
-            pipeline.run_pipeline(
+            res = pipeline.run_pipeline(
                 topic=selection.topic,
                 trend_context=selection.context,
                 publish=AUTO_UPLOAD and not DRY_RUN,
@@ -84,11 +86,17 @@ def job_daily_cardnews() -> None:
                 fact_check=True,
                 auto=True,
             )
+            
+            if res and res.publish_requested and not res.publish_succeeded:
+                raise Exception("파이프라인 실행은 성공했으나 게시 실패")
 
         # 텔레그램 완료 알림
         try:
             from src.telegram_bot import notify
-            notify("✅ 오늘의 알고 카드뉴스 업로드 완료!")
+            if AUTO_UPLOAD and not DRY_RUN:
+                notify("✅ 오늘의 알고 카드뉴스 업로드 완료!")
+            else:
+                notify("✅ 오늘의 알고 카드뉴스 생성 완료 (업로드 생략)!")
         except Exception:
             pass
 
