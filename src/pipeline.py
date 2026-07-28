@@ -17,12 +17,12 @@ import json as _json
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
-from src.schemas.content_package import PipelineResult, PublishError
 
 from src.agents import trend_analyzer, content_creator, image_searcher, design_renderer
 from src.agents import publisher as ig_publisher
 from src.config import NUM_CARDS
 from src.persona import Persona, load_persona, resolve_persona
+from src.schemas.content_package import PipelineResult, PublishError
 
 MAX_RETRY = 6   # 기사 5건 교체 + 팩트체크 재시도를 합산해도 여유있도록
 
@@ -35,22 +35,102 @@ _ANGLE_AUTO_KEYWORDS = [
 ]
 
 
-def run_pipeline(topic, persona=None, trend_context="", auto=False, fact_check=False, publish=False, publish_threads=False, publish_blog=False, template="auto", retries=2) -> PipelineResult | None:
-    from src.schemas.content_package import PipelineResult, PublishError
-    def _run_once(
-        topic, n, h, p,
-        force_dalle, force_refresh, save_script,
-        publish, ig_base_url, trend_context,
-        select_angle, human_approval, auto,
-        template, fact_check,
-        publish_threads, publish_blog,
-        make_reels: bool = False,
-        retry_num: int = 0,
-        notes_state: dict | None = None,
-        ignored_titles: set | None = None,
-        topic_refined: bool = False,
-    ) -> PipelineResult | None:
-        from src.agents.angle_selector import select_angle as pick_angle
+def run_pipeline(
+    topic: str,
+    num_cards: int | None = None,
+    handle: str = "",
+    force_dalle: bool = False,
+    force_refresh: bool = False,
+    save_script: bool = True,
+    persona: Persona | None = None,
+    publish: bool = False,
+    ig_base_url: str = "",
+    trend_context: str = "",
+    select_angle: bool = False,
+    human_approval: bool = False,
+    auto: bool = False,
+    template: str = "auto",       # auto=주제 자동 감지, dark/light/bold/minimal/gradient
+    fact_check: bool = True,      # 팩트체크 레이어 실행 여부
+    publish_threads: bool = False, # Threads 동시 발행
+    publish_blog: bool = False,   # 블로그 동시 발행
+    make_reels: bool = False,     # Reels MP4 생성 여부
+    topic_refined: bool = False,  # 이미 정제된 주제 → Phase 0-R 스킵
+) -> PipelineResult | None:
+    p = persona or load_persona()
+    # 주제에 맞는 페르소나 자동 적용 (tone/색상/이모지/해시태그)
+    p = resolve_persona(topic, p)
+    n = num_cards if num_cards is not None else p.default_count
+    h = handle or p.handle
+
+    notes_state: dict = {"last": ""}  # 팩트체크 실패 이유 (재시도 간 전달용)
+    ignored_titles: set = set()       # 영상 매칭 불가 시 기사 탈락 목록
+    fact_check_retries: int = 0       # 팩트체크 실패로 인한 재시도 횟수
+    MAX_FACT_RETRIES = 2              # 같은 기사에 팩트체크를 최대 2번만 재시도
+
+    for retry in range(MAX_RETRY):
+        prev_ignored = set(ignored_titles)  # 기사 교체 감지용
+
+        res = _run_once(
+            topic=topic, n=n, h=h, p=p,
+            force_dalle=force_dalle,
+            force_refresh=force_refresh,
+            save_script=save_script,
+            publish=publish,
+            ig_base_url=ig_base_url,
+            trend_context=trend_context,
+            select_angle=select_angle,
+            human_approval=human_approval,
+            auto=auto,
+            template=template,
+            fact_check=fact_check,
+            publish_threads=publish_threads,
+            publish_blog=publish_blog,
+            make_reels=make_reels,
+            retry_num=retry,
+            notes_state=notes_state,
+            ignored_titles=ignored_titles,
+            topic_refined=topic_refined,
+        )
+        if res is not None:
+            return res
+
+        # 기사 교체 없이 재시도 = 팩트체크 실패 (같은 기사 재시도)
+        if ignored_titles == prev_ignored:
+            fact_check_retries += 1
+            if fact_check_retries >= MAX_FACT_RETRIES:
+                # 팩트체크 재시도 한도 초과 → 현재 기사 포기하고 다음으로
+                print(f"  ⚠️ 팩트체크 재시도 {MAX_FACT_RETRIES}회 초과 → 이 기사 포기, 다음 기사 시도")
+                if trend_context:
+                    break  # trend_context 고정 모드에서는 기사 교체 불가
+                # notes_state에 저장된 기사 제목으로 ignored_titles 추가
+                failed_title = notes_state.get("last_article_title", "")
+                if failed_title:
+                    ignored_titles.add(failed_title)
+                    print(f"  → '{failed_title[:40]}' 무시 목록 추가")
+                notes_state["last"] = ""
+                notes_state["last_article_title"] = ""
+                fact_check_retries = 0
+        else:
+            fact_check_retries = 0  # 기사 교체 됐으면 카운터 초기화
+
+    print("  ⚠️ 재생성 최대 횟수 초과.")
+    return None
+
+
+def _run_once(
+    topic, n, h, p,
+    force_dalle, force_refresh, save_script,
+    publish, ig_base_url, trend_context,
+    select_angle, human_approval, auto,
+    template, fact_check,
+    publish_threads, publish_blog,
+    make_reels: bool = False,
+    retry_num: int = 0,
+    notes_state: dict | None = None,
+    ignored_titles: set | None = None,
+    topic_refined: bool = False,   # True이면 Phase 0-R 스킵 (이미 정제됨)
+) -> PipelineResult | None:
+    from src.agents.angle_selector import select_angle as pick_angle
     from src.agents.approval import wait_for_approval
     from src.agents.design_templates import get_template, get_template_for_topic
 
@@ -513,30 +593,40 @@ def run_pipeline(topic, persona=None, trend_context="", auto=False, fact_check=F
             print("  업로드 취소.")
             return PipelineResult(image_paths=paths, generation_succeeded=True, publish_requested=publish, publish_succeeded=False, ig_post_id=None, permalink=None, failure_stage=None, error_code=None)
 
-
-    # ── Quality Gate 검사 ────────────────────────────────
-    try:
-        from src.qa.content_quality_gate import validate_content_quality, QualityGateError
-        _q_meta = {
-            "topic": topic,
-            "source_title": _src.title if _src else "",
-            "source_url": _src.url if _src else "",
-            "fact_confirmed": fc_report.confirmed if fc_report else 0,
-            "fact_disputed": fc_report.disputed if fc_report else 0,
-            "fact_unverifiable": fc_report.unverifiable if fc_report else 0,
-        }
-        validate_content_quality(_q_meta, script)
-    except Exception as e:
-        print(f"  ⚠️ Quality Gate 실패: {e}")
-        return PipelineResult(image_paths=paths, generation_succeeded=True, publish_requested=publish, publish_succeeded=False, ig_post_id=None, permalink=None, failure_stage="QUALITY_GATE", error_code=str(e))
-        
-    # ── Phase 6: Instagram 업로드 ─────────────────────────
-
-    ig_post_id = ""
-    _permalink = None
     publish_succeeded = False
+    ig_post_id = None
+    _permalink = None
     failure_stage = None
     error_code = None
+
+    # ── Quality Gate: 발행 전 품질 검사 ─────────────────────
+    if publish and decision == "upload":
+        try:
+            from src.qa.content_quality_gate import validate_content_quality, QualityGateError
+            _src = trend_report.results[0] if trend_report and trend_report.results else None
+            _q_meta = {
+                "topic": topic,
+                "source_title": _src.title if _src else "",
+                "source_url": _src.url if _src else "",
+                "fact_confirmed": fc_report.confirmed if fc_report else 0,
+                "fact_disputed": fc_report.disputed if fc_report else 0,
+                "fact_unverifiable": fc_report.unverifiable if fc_report else 0,
+            }
+            validate_content_quality(_q_meta, script)
+        except Exception as e:
+            print(f"  ⚠️ Quality Gate 실패: {e}")
+            return PipelineResult(
+                image_paths=paths,
+                generation_succeeded=True,
+                publish_requested=publish,
+                publish_succeeded=False,
+                ig_post_id=None,
+                permalink=None,
+                failure_stage="QUALITY_GATE",
+                error_code=str(e),
+            )
+
+    # ── Phase 6: Instagram 업로드 ─────────────────────────
     if publish and decision == "upload":
         print("\n[6] Instagram 업로드 중...")
         try:
@@ -547,15 +637,14 @@ def run_pipeline(topic, persona=None, trend_context="", auto=False, fact_check=F
                 base_url=ig_base_url,
             )
             if not ig_post_id:
-                raise PublishError("Empty ig_post_id returned from publisher")
-            
+                raise PublishError("Empty ig_post_id returned from publisher", "empty_id")
+                
             try:
                 from src.agents.publisher import get_post_permalink
                 _permalink = get_post_permalink(ig_post_id)
                 print(f"  → {_permalink or 'https://www.instagram.com/'}")
-            except Exception as e:
-                print(f"  ⚠️ permalink 조회 실패: {e}")
-            
+            except Exception:
+                print(f"  → post_id: {ig_post_id}")
             from src.db import insert_post
             insert_post(
                 platform="instagram", topic=topic,
@@ -567,11 +656,12 @@ def run_pipeline(topic, persona=None, trend_context="", auto=False, fact_check=F
                 posted_at=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             )
             publish_succeeded = True
+        except PublishError as e:
+            print(f"  ⚠️ Instagram 업로드 실패: {e}")
+            raise
         except Exception as e:
             print(f"  ⚠️ Instagram 업로드 실패: {e}")
-            failure_stage = "PUBLISH"
-            error_code = "PUBLISH_FAILED"
-            raise PublishError(str(e))
+            raise PublishError(f"Unexpected publish error: {e}", "unknown") from e
 
     # ── meta.json 저장 (algo-site 투명성 기능용) ──────────
     try:

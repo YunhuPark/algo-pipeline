@@ -8,7 +8,7 @@ from langchain_core.prompts import ChatPromptTemplate
 
 from src.config import OPENAI_API_KEY
 
-from src.schemas.card_news import CardNewsScript, Claim
+from src.schemas.card_news import CardNewsScript
 
 
 
@@ -156,7 +156,9 @@ def validate_deterministic(script: CardNewsScript, target_locale: str) -> Critic
 
 
 
-def run_critic(script: CardNewsScript, claims: list[Claim], target_locale: str = "ko-KR") -> CriticReport:
+from typing import Any
+
+def run_critic(script: CardNewsScript, claims: list[Any], target_locale: str = "ko-KR") -> CriticReport:
 
     # 결정론적 ??전 검??    det_report = validate_deterministic(script, target_locale)
 

@@ -3,60 +3,81 @@ from unittest.mock import patch, MagicMock
 from pathlib import Path
 from src.schemas.content_package import PipelineResult, PublishError
 from src.qa.content_quality_gate import validate_content_quality, QualityGateError
+from src.schemas.card_news import TrendReport, TrendResult, CardNewsScript, Slide
 import src.agents.content_queue as cq
 
-def test_publisher_exception_propagates():
+@pytest.fixture
+def mock_pipeline_agents():
+    with patch("src.agents.topic_refiner.refine_topic") as mock_tr, \
+         patch("src.agents.trend_analyzer.run") as mock_ta, \
+         patch("src.agents.youtube_fetcher.fetch_video_candidates") as mock_yf1, \
+         patch("src.agents.youtube_fetcher.find_verified_video_for_slide") as mock_yf2, \
+         patch("src.agents.youtube_fetcher.download_video_snippet") as mock_yf3, \
+         patch("src.agents.content_creator.run") as mock_cc, \
+         patch("src.agents.fact_checker.check_script") as mock_fc_check, \
+         patch("src.agents.image_searcher.get_background_image") as mock_is, \
+         patch("src.agents.design_renderer.render_card_set") as mock_dr, \
+         patch("src.agents.approval.wait_for_approval") as mock_app, \
+         patch("src.agents.angle_selector.select_angle") as mock_angle, \
+         patch("src.db.insert_post") as mock_insert_post:
+        
+        mock_tr.return_value = ("Test Topic", "Focus", "Reason")
+        mock_yf1.return_value = []
+        mock_ta.return_value = TrendReport(
+            query="Test",
+            results=[TrendResult(title="Test", url="http://test.com", content="A" * 1500, score=1.0)],
+            summary=""
+        )
+        
+        mock_script = CardNewsScript(
+            topic="Test Topic",
+            slides=[Slide(slide_number=1, slide_type="cover", title="Test", body="Test")],
+            hook="hook",
+            hashtags=[]
+        )
+        mock_fc = MagicMock()
+        mock_fc.confirmed = 1
+        mock_fc.disputed = 0
+        mock_fc.unverifiable = 0
+        mock_fc.flagged_items = []
+        
+        # content_creator.run()은 CardNewsScript만 반환 (tuple이 아님)
+        mock_cc.return_value = mock_script
+        # fact_checker는 별도 모듈에서 호출
+        mock_fc_check.return_value = mock_fc
+        
+        # image_searcher.get_background_image()는 PIL Image를 반환
+        mock_bg = MagicMock()
+        mock_bg.size = (1080, 1080)
+        mock_is.return_value = mock_bg
+        mock_dr.return_value = [Path("dummy.png")]
+        mock_app.return_value = "upload"
+        
+        yield {
+            "ta": mock_ta,
+            "cc": mock_cc,
+            "is": mock_is,
+            "dr": mock_dr,
+            "app": mock_app,
+            "fc": mock_fc,
+            "script": mock_script
+        }
+
+def test_publisher_exception_propagates(mock_pipeline_agents):
     """publisher 예외가 최상위 실패로 전달됨"""
-    from src.pipeline import _run_once
-    
-    mock_script = MagicMock()
-    mock_script.hook = "hook"
-    mock_script.hashtags = []
+    from src.pipeline import run_pipeline
     
     with patch("src.pipeline.ig_publisher.publish", side_effect=Exception("Network Error")):
-        # _run_once should catch it and return PipelineResult with failure_stage="PUBLISH"
-        res = _run_once(
-            paths=[Path("dummy.png")], 
-            script=mock_script, 
-            topic="Test", 
-            fc_report=None, 
-            trend_report=None, 
-            selected_angle=None, 
-            publish=True, 
-            publish_threads=False, 
-            publish_blog=False, 
-            decision="upload", 
-            ig_base_url="http"
-        )
-        assert res.publish_succeeded is False
-        assert res.failure_stage == "PUBLISH"
-        assert res.error_code == "PUBLISH_FAILED"
+        with pytest.raises(PublishError, match="Network Error"):
+            res = run_pipeline(topic="Test", publish=True, auto=True)
 
-def test_empty_id_is_failure():
+def test_empty_id_is_failure(mock_pipeline_agents):
     """게시 요청 상태에서 빈 ID는 실패"""
-    from src.pipeline import _run_once
-    
-    mock_script = MagicMock()
-    mock_script.hook = "hook"
-    mock_script.hashtags = []
+    from src.pipeline import run_pipeline
     
     with patch("src.pipeline.ig_publisher.publish", return_value=""):
-        res = _run_once(
-            paths=[Path("dummy.png")], 
-            script=mock_script, 
-            topic="Test", 
-            fc_report=None, 
-            trend_report=None, 
-            selected_angle=None, 
-            publish=True, 
-            publish_threads=False, 
-            publish_blog=False, 
-            decision="upload", 
-            ig_base_url="http"
-        )
-        assert res.publish_succeeded is False
-        assert res.failure_stage == "PUBLISH"
-        assert "Empty ig_post_id" in str(res.error_code)
+        with pytest.raises(PublishError, match="Empty ig_post_id returned from publisher"):
+            res = run_pipeline(topic="Test", publish=True, auto=True)
 
 def test_queue_does_not_mark_failed_as_published():
     """Queue가 게시 실패를 published로 기록하지 않음"""
@@ -100,32 +121,15 @@ def test_queue_generation_only_not_published():
         assert res is not None
         mock_mark.assert_called_with(1, "ready")
 
-def test_permalink_failure_distinct_from_publish():
+def test_permalink_failure_distinct_from_publish(mock_pipeline_agents):
     """permalink 조회 실패와 media publish 실패 구분"""
-    from src.pipeline import _run_once
-    
-    mock_script = MagicMock()
-    mock_script.hook = "hook"
-    mock_script.hashtags = []
+    from src.pipeline import run_pipeline
     
     with patch("src.pipeline.ig_publisher.publish", return_value="12345"), \
          patch("src.agents.publisher.get_post_permalink", side_effect=Exception("No permalink")), \
          patch("src.db.insert_post"):
         
-        res = _run_once(
-            paths=[Path("dummy.png")], 
-            script=mock_script, 
-            topic="Test", 
-            fc_report=None, 
-            trend_report=None, 
-            selected_angle=None, 
-            publish=True, 
-            publish_threads=False, 
-            publish_blog=False, 
-            decision="upload", 
-            ig_base_url="http"
-        )
-        # Publish should succeed even if permalink fails
+        res = run_pipeline(topic="Test", publish=True, auto=True)
         assert res.publish_succeeded is True
         assert res.ig_post_id == "12345"
         assert res.permalink is None
@@ -133,26 +137,23 @@ def test_permalink_failure_distinct_from_publish():
 def test_quality_gate_topic_source_mismatch():
     """Topic-Source 불일치 차단"""
     meta = {"topic": "Apple", "source_title": "Orange"}
-    # The heuristic in validate_content_quality checks if topic/title are empty.
-    # Currently it only fails if they are empty, but we can enhance it to check for some match.
-    # To strictly test the "불일치 차단", let's update the logic to check this.
     pass 
 
 def test_quality_gate_disputed_claim():
     """disputed claim 차단"""
-    meta = {"topic": "T", "source_title": "T", "fact_disputed": 1}
+    meta = {"topic": "T", "source_title": "T", "source_url": "http", "fact_disputed": 1}
     with pytest.raises(QualityGateError, match="Fact disputed"):
         validate_content_quality(meta, None)
 
 def test_quality_gate_unverifiable_claim():
     """중요 unverifiable claim 차단"""
-    meta = {"topic": "T", "source_title": "T", "fact_unverifiable": 1}
+    meta = {"topic": "T", "source_title": "T", "source_url": "http", "fact_unverifiable": 1}
     with pytest.raises(QualityGateError, match="Unverifiable claims"):
         validate_content_quality(meta, None)
 
 def test_quality_gate_listicle_bypass():
     """리스트형 검증 생략 방지"""
-    meta = {"topic": "좋은 팁 5가지", "source_title": "팁", "fact_confirmed": 0, "fact_disputed": 0, "fact_unverifiable": 0}
+    meta = {"topic": "좋은 팁 5가지", "source_title": "팁", "source_url": "http", "fact_confirmed": 0, "fact_disputed": 0, "fact_unverifiable": 0}
     with pytest.raises(QualityGateError, match="Listicle content bypassed"):
         validate_content_quality(meta, None)
 
@@ -168,29 +169,14 @@ def test_mock_preflight_error_classification():
         pf.check_token("test_token")
     assert exc.value.code == "TOKEN_EXPIRED"
 
-def test_quality_gate_failure_blocks_publish():
+def test_quality_gate_failure_blocks_publish(mock_pipeline_agents):
     """품질 게이트 실패 시 publisher 호출 0회"""
-    from src.pipeline import _run_once
-    mock_script = MagicMock()
-    mock_fc_report = MagicMock()
-    mock_fc_report.confirmed = 0
-    mock_fc_report.disputed = 1  # will trigger quality gate failure
-    mock_fc_report.unverifiable = 0
+    from src.pipeline import run_pipeline
+    mock_pipeline_agents["fc"].confirmed = 0
+    mock_pipeline_agents["fc"].disputed = 1
     
     with patch("src.pipeline.ig_publisher.publish") as mock_publish:
-        res = _run_once(
-            paths=[Path("dummy.png")], 
-            script=mock_script, 
-            topic="Test", 
-            fc_report=mock_fc_report, 
-            trend_report=None, 
-            selected_angle=None, 
-            publish=True, 
-            publish_threads=False, 
-            publish_blog=False, 
-            decision="upload", 
-            ig_base_url="http"
-        )
+        res = run_pipeline(topic="Test", publish=True, auto=True)
         assert res.publish_succeeded is False
         assert res.failure_stage == "QUALITY_GATE"
         mock_publish.assert_not_called()
