@@ -118,3 +118,8 @@ NUM_CARDS=6
 | 포트폴리오 사이트 | Next.js 15 + Vercel |
 | 자동화 | Windows Task Scheduler |
 | 이미지 서빙 | ngrok + proxy_router |
+
+## Security & Quality Updates (2026-07-28)
+- **Fail-Closed Publishing**: Pipeline uses `PipelineResult` to ensure true publish completion before reporting success.
+- **Quality Gate Enforced**: `validate_content_quality` blocks unverifiable or inconsistent claims before calling publisher.
+- **API Preflight**: `src/api/preflight.py` prevents execution with invalid tokens.

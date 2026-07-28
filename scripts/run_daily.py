@@ -232,9 +232,25 @@ def main() -> None:
     _log(f"완료 (exit={result.returncode})")
 
     if result.returncode == 0:
-        _notify("알고 카드뉴스 발행 완료 ✅", f"'{topic}' 카드뉴스가 인스타에 올라갔습니다.")
+        # Check meta.json for actual publish success
+        import json, glob
+        meta_files = sorted(glob.glob(str(ROOT / "output" / "*" / "meta.json")))
+        published = False
+        if meta_files:
+            try:
+                with open(meta_files[-1], "r", encoding="utf-8") as fm:
+                    meta = json.load(fm)
+                    if meta.get("ig_post_id"):
+                        published = True
+            except:
+                pass
+        
+        if published:
+            _notify("알고 카드뉴스 발행 완료 ✅", f"'{topic}' 카드뉴스가 인스타에 올라갔습니다.")
+        else:
+            _notify("알고 카드뉴스 생성 완료 ✅", f"'{topic}' 파이프라인 생성 완료 (업로드 생략/미요청).")
     else:
-        _notify("알고 카드뉴스 실패 ❌", f"'{topic}' 파이프라인 오류 (exit={result.returncode}). 로그 확인 필요.")
+        _notify("알고 카드뉴스 실패 ❌", f"'{topic}' 파이프라인/게시 오류 (exit={result.returncode}). 로그 확인 필요.")
 
     sys.exit(result.returncode)
 
