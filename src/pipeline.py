@@ -55,6 +55,7 @@ def run_pipeline(
     publish_blog: bool = False,   # 블로그 동시 발행
     make_reels: bool = False,     # Reels MP4 생성 여부
     topic_refined: bool = False,  # 이미 정제된 주제 → Phase 0-R 스킵
+    source_lineage: "SourceLineage | None" = None, # 큐 또는 일일 뉴스 수집에서 넘어온 뉴스 출처 정보
 ) -> PipelineResult | None:
     p = persona or load_persona()
     # 주제에 맞는 페르소나 자동 적용 (tone/색상/이모지/해시태그)
@@ -90,6 +91,7 @@ def run_pipeline(
             notes_state=notes_state,
             ignored_titles=ignored_titles,
             topic_refined=topic_refined,
+            source_lineage=source_lineage,
         )
         if res is not None:
             return res
@@ -129,6 +131,7 @@ def _run_once(
     notes_state: dict | None = None,
     ignored_titles: set | None = None,
     topic_refined: bool = False,   # True이면 Phase 0-R 스킵 (이미 정제됨)
+    source_lineage: "SourceLineage | None" = None,
 ) -> PipelineResult | None:
     from src.agents.angle_selector import select_angle as pick_angle
     from src.agents.approval import wait_for_approval
@@ -152,7 +155,7 @@ def _run_once(
     # ⚠️ 주의: 정제 후에도 TrendAnalyzer(Phase 1)는 반드시 실행해야 함.
     #    → Phase 1이 실제 기사 전문 + 영상 후보 검색을 담당하기 때문.
     #    → article_content를 trend_context로 쓰면 Phase 1이 스킵됨 → 내용 부실 + 영상 없음.
-    if not topic_refined and not trend_context and retry_num == 0:
+    if not topic_refined and not trend_context and not source_lineage and retry_num == 0:
         print("\n[0-R] 주제 정제 중...")
         try:
             from src.agents.topic_refiner import refine_topic
@@ -185,9 +188,23 @@ def _run_once(
         )
 
     # ── Phase 1: Trend Analyzer ──────────────────────────
-    if trend_context:
+    from src.schemas.card_news import TrendReport, TrendResult
+    trend_report: TrendReport | None = None
+
+    if source_lineage:
+        print("\n[1] Source Lineage 주입...")
+        trend_report = TrendReport(
+            query=source_lineage.topic,
+            results=[TrendResult(
+                title=source_lineage.source_title,
+                url=source_lineage.source_url,
+                content=source_lineage.context,
+                score=1.0
+            )],
+            summary=source_lineage.context,
+        )
+    elif trend_context:
         print("\n[1] 뉴스 컨텍스트 주입...")
-        from src.schemas.card_news import TrendReport, TrendResult
         trend_report = TrendReport(
             query=topic,
             results=[TrendResult(title=topic, url="", content=trend_context, score=1.0)],
@@ -605,7 +622,7 @@ def _run_once(
             from src.qa.content_quality_gate import validate_content_quality, QualityGateError
             _src = trend_report.results[0] if trend_report and trend_report.results else None
             _q_meta = {
-                "topic": topic,
+                "topic": script.topic,
                 "source_title": _src.title if _src else "",
                 "source_url": _src.url if _src else "",
                 "fact_confirmed": fc_report.confirmed if fc_report else 0,
@@ -647,7 +664,7 @@ def _run_once(
                 print(f"  → post_id: {ig_post_id}")
             from src.db import insert_post
             insert_post(
-                platform="instagram", topic=topic,
+                platform="instagram", topic=script.topic,
                 post_id=ig_post_id,
                 angle=selected_angle.angle if selected_angle else "",
                 hook=script.hook,
@@ -667,7 +684,7 @@ def _run_once(
     try:
         _src = trend_report.results[0] if trend_report and trend_report.results else None
         _meta = {
-            "topic": topic,
+            "topic": script.topic,
             "source_title": _src.title if _src else "",
             "source_url": _src.url if _src else "",
             "angle": selected_angle.angle if selected_angle else "",
@@ -679,6 +696,9 @@ def _run_once(
             "permalink": _permalink if ig_post_id and "_permalink" in dir() else "",
             "posted_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         }
+        if source_lineage and source_lineage.article_id:
+            _meta["article_id"] = source_lineage.article_id
+
         (paths[0].parent / "meta.json").write_text(
             _json.dumps(_meta, ensure_ascii=False, indent=2), encoding="utf-8"
         )
