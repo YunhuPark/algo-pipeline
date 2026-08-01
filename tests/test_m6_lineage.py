@@ -67,7 +67,7 @@ def test_run_daily_news_collection_failure(mock_db):
         mock_exit.assert_called_with(1)
         mock_pipeline.assert_not_called()
 
-def test_pipeline_meta_and_folder_name(mock_db, tmp_path):
+def test_pipeline_metadata_and_folder_name(mock_db, tmp_path):
     """입력 topic과 script.topic이 다를 때 metadata와 DB에는 script.topic 저장, output 폴더명과 일치"""
     from src.pipeline import run_pipeline
     with patch("src.agents.content_creator.run") as mock_cc_run, \
