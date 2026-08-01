@@ -20,3 +20,12 @@
 * Verified via `test_publish_pipeline.py` that `publisher` exception propagates properly, and empty `ig_post_id` counts as a failure.
 * Tests verify Topic-Source mismatch and disputed claims are blocked by `QualityGateError`.
 * Database remains unaltered.
+
+## 5. Topic-Source Lineage & Hallucination Fix (2026-08-01)
+* **Issue**: `scripts/run_daily.py` independently generated an arbitrary topic via `_pick_topic()` when the queue was empty, causing a disconnect between the stated topic and the actual news source content, resulting in hallucinatory scripts.
+* **Remediation**: 
+    1. Removed `_pick_topic()` logic completely.
+    2. Enforced fail-closed behavior if `collect_and_select()` fails.
+    3. Introduced `SourceLineage` in `schemas/card_news.py` to firmly bind the canonical `topic`, `source_title`, `source_url`, and `context`.
+    4. Updated `src/pipeline.py` to prioritize `source_lineage` and explicitly write the canonical topic to `meta.json` and database entries.
+* **Verification**: `tests/test_m6_lineage.py` confirms that the correct lineage propagates to metadata, folder names, and database without live API calls, and that execution fails cleanly on empty data. All 70 offline regression tests passed.

@@ -14,8 +14,6 @@ import shutil
 
 ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(ROOT))
-sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
-sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
 
 from dotenv import load_dotenv
 load_dotenv(ROOT / ".env")
@@ -69,112 +67,7 @@ def _queue_pending() -> bool:
         return False
 
 
-def _recent_topics(days: int = 21) -> list[str]:
-    import sqlite3 as _sql
-    db_path = ROOT / "data" / "algo.db"
-    if not db_path.exists():
-        return []
-    try:
-        conn = _sql.connect(str(db_path))
-        rows = conn.execute(
-            "SELECT topic FROM posts WHERE platform='instagram' "
-            "AND posted_at >= date('now', ?) ORDER BY id DESC",
-            (f"-{days} days",),
-        ).fetchall()
-        conn.close()
-        return [r[0] for r in rows if r[0]]
-    except Exception:
-        return []
-
-
-_PICK_SYSTEM = (
-    "당신은 한국 인스타그램 AI/테크 계정 @algo__kr의 콘텐츠 기획자입니다.\n"
-    "MZ세대(20~30대) 팔로워의 저장·공유를 유도하는 주제를 선정합니다.\n\n"
-    "[인스타그램 저장률 높은 주제 형식 — 우선 선호]\n"
-    "★★★ 'N가지/N선' 형식: 'ChatGPT 꿀기능 5가지' / '무료 AI 도구 7선' / '취준생 필수 AI 3가지'\n"
-    "     → 독자가 나중에 하나씩 써보려고 저장함 (저장률 최고)\n"
-    "★★  'Before/After' 형식: 'GPT 쓰기 전/후 비교' / '3시간 → 30분 된 방법'\n"
-    "     → 바로 따라 하고 싶어서 저장함\n"
-    "★★  '즉시 써먹기' 형식: '지금 바로 쓰는 ChatGPT 프롬프트' / '복붙하면 끝나는 AI 명령어'\n"
-    "     → 당장 써보려고 저장함\n\n"
-    "[고점수 주제 기준]\n"
-    "1. 구체적: 기업명·제품명·수치가 제목 안에 들어감\n"
-    "2. 실익: 돈·취업·생산성·절약에 직결\n"
-    "3. 뉴스성: 최근 2주 내 실제 출시·발표·수치 업데이트 기반\n"
-    "4. 실행 가능: 독자가 읽고 나서 바로 따라 할 수 있는 것\n\n"
-    "[저점수 주제 — 피할 것]\n"
-    "- AI 윤리·규제·사회적 영향 등 추상적 논의\n"
-    "- '~의 미래', '~시대의 도래' 같이 언제나 맞는 말\n"
-    "- 독자가 당장 행동할 수 없는 거시 전망\n"
-    "- 뉴스 설명만 하고 끝나는 주제 (기사 요약 ≠ 카드뉴스)"
-)
-
-
-def _pick_topic() -> str:
-    from openai import OpenAI
-    client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-    today = datetime.now().strftime("%Y년 %m월 %d일")
-    recent = _recent_topics()
-    avoid_block = ""
-    if recent:
-        avoid_block = (
-            "\n\n[최근 3주 게시 주제 — 반드시 피할 것]\n"
-            + "\n".join(f"- {t}" for t in recent)
-        )
-
-    # 1단계: 후보 3개 생성
-    cand_resp = client.chat.completions.create(
-        model="gpt-4o-mini",
-        messages=[
-            {"role": "system", "content": _PICK_SYSTEM},
-            {
-                "role": "user",
-                "content": (
-                    f"오늘은 {today}입니다.\n"
-                    "최근 AI/테크 트렌드 중에서 인스타그램 카드뉴스로 만들기 좋은 후보 주제 3개를 골라주세요.\n"
-                    "형식: 번호 없이, 한 줄에 하나씩, 각 주제 10자 이내로."
-                    + avoid_block
-                ),
-            },
-        ],
-        max_tokens=80,
-        temperature=0.95,
-    )
-    candidates = [
-        line.strip().strip('"').strip("'").lstrip("123456789.-) ")
-        for line in cand_resp.choices[0].message.content.strip().splitlines()
-        if line.strip()
-    ][:3]
-
-    if len(candidates) == 1:
-        return candidates[0]
-
-    candidates_text = "\n".join(f"{i+1}. {t}" for i, t in enumerate(candidates))
-
-    # 2단계: 기준별 평가 후 최고 선택
-    pick_resp = client.chat.completions.create(
-        model="gpt-4o-mini",
-        messages=[
-            {"role": "system", "content": _PICK_SYSTEM},
-            {
-                "role": "user",
-                "content": (
-                    f"다음 주제 후보 중 인스타그램 저장·공유율이 가장 높을 것으로 예상되는 것 1개를 골라주세요.\n\n"
-                    f"{candidates_text}\n\n"
-                    "평가 기준: 구체성(기업명·수치) > 실익(돈·취업·생산성) > 뉴스성 > 놀라움 > 실행가능성\n"
-                    "선택한 주제만 그대로 출력. 설명 없이."
-                ),
-            },
-        ],
-        max_tokens=30,
-        temperature=0.3,
-    )
-    result = pick_resp.choices[0].message.content.strip().strip('"').strip("'")
-    result = result.lstrip("123456789.-) ").strip()
-
-    if not any(result in c or c in result for c in candidates):
-        return candidates[0]
-    return result
+# _pick_topic removed to prevent hallucination
 
 
 def _is_pipeline_running() -> bool:
@@ -211,21 +104,57 @@ def main() -> None:
         _log("파이프라인 이미 실행 중 (락파일 존재) → 종료")
         return
     try:
+        class MockResult:
+            returncode = 1
+        result = MockResult()
+        
         if _queue_pending():
             _log("큐에서 발행")
-            result = subprocess.run(
+            proc = subprocess.run(
                 [sys.executable, str(ROOT / "main.py"), "--queue-publish"],
                 cwd=str(ROOT),
             )
             topic = "큐 항목"
+            result.returncode = proc.returncode
         else:
-            _log("큐 비어있음 — GPT 주제 선택")
-            topic = _pick_topic()
-            _log(f"선택된 주제: {topic}")
-            result = subprocess.run(
-                [sys.executable, str(ROOT / "main.py"), topic, "--publish"],
-                cwd=str(ROOT),
-            )
+            _log("큐 비어있음 — 실제 뉴스 수집 후 실행")
+            from src.agents.news_collector import collect_and_select
+            from src.schemas.card_news import SourceLineage
+            from src.pipeline import run_pipeline
+            
+            try:
+                news = collect_and_select()
+                topic = news.topic
+                _log(f"선택된 주제: {topic}")
+                
+                source_title = news.source_items[0].title if news.source_items else topic
+                source_url = news.source_items[0].url if news.source_items else ""
+                
+                lineage = SourceLineage(
+                    topic=topic,
+                    source_title=source_title,
+                    source_url=source_url,
+                    context=news.context,
+                )
+                
+                res = run_pipeline(
+                    topic=topic,
+                    publish=True,
+                    source_lineage=lineage,
+                    auto=True,
+                )
+                
+                if res and res.generation_succeeded:
+                    # 게시 실패 시에도 exit code는 1로 처리하되, 실패 원인을 로그로 남김.
+                    result.returncode = 0 if res.publish_succeeded else 1
+                else:
+                    result.returncode = 1
+                    
+            except Exception as e:
+                _log(f"뉴스 수집/선택 실패: {e} (fail-closed)")
+                result.returncode = 1
+                topic = "알 수 없는 주제"
+                
     finally:
         LOCK_FILE.unlink(missing_ok=True)
 
@@ -256,4 +185,8 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    if sys.stdout.encoding and sys.stdout.encoding.lower() != "utf-8" and hasattr(sys.stdout, "buffer"):
+        sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
+    if sys.stderr.encoding and sys.stderr.encoding.lower() != "utf-8" and hasattr(sys.stderr, "buffer"):
+        sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
     main()

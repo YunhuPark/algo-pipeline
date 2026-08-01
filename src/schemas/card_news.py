@@ -45,6 +45,13 @@ class TrendResult(BaseModel):
     content: str
     score: float = 0.0
 
+class SourceLineage(BaseModel):
+    """뉴스 수집 결과의 Topic, 출처, 컨텍스트를 하나로 묶은 식별자"""
+    topic: str
+    source_title: str
+    source_url: str
+    context: str
+    article_id: str = ""
 
 class TrendReport(BaseModel):
     """Trend Analyzer가 반환하는 최종 분석 보고서"""
