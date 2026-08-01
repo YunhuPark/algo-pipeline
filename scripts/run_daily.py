@@ -184,9 +184,26 @@ def main() -> None:
     sys.exit(result.returncode)
 
 
+def configure_console_encoding() -> None:
+    """UTF-8 강제 설정 (Windows 환경 호환성 및 테스트 안정성 확보)"""
+    import io
+    
+    # pytest capture나 runpy 등에서 안전하도록 reconfigure 우선 시도
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            try:
+                stream.reconfigure(encoding="utf-8", errors="replace")
+                continue
+            except (TypeError, io.UnsupportedOperation):
+                pass
+                
+        # fallback: buffer가 있는 경우 TextIOWrapper로 덮어쓰기
+        if getattr(stream, "encoding", "").lower() != "utf-8" and hasattr(stream, "buffer"):
+            if stream is sys.stdout:
+                sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
+            else:
+                sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
+
 if __name__ == "__main__":
-    if sys.stdout.encoding and sys.stdout.encoding.lower() != "utf-8" and hasattr(sys.stdout, "buffer"):
-        sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
-    if sys.stderr.encoding and sys.stderr.encoding.lower() != "utf-8" and hasattr(sys.stderr, "buffer"):
-        sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
+    configure_console_encoding()
     main()
