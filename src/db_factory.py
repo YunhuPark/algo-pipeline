@@ -16,10 +16,17 @@ def reset_test_connections():
     _test_connections.clear()
 
 def _get_env_vars():
-    return (
-        os.getenv("ALGO_ENV", "development"),
-        os.getenv("ALLOW_PERSISTENT_DB", "false").lower() == "true"
-    )
+    algo_env = os.getenv("ALGO_ENV")
+    if not algo_env:
+        raise ValueError("ALGO_ENV environment variable is missing. Must be set to 'production', 'development', 'test', or 'synthetic'.")
+    
+    algo_env = algo_env.lower()
+    valid_envs = {"production", "development", "test", "synthetic"}
+    if algo_env not in valid_envs:
+        raise ValueError(f"Unknown ALGO_ENV: '{algo_env}'. Must be one of {valid_envs}.")
+        
+    allow_persistent = os.getenv("ALLOW_PERSISTENT_DB", "false").lower() == "true"
+    return algo_env, allow_persistent
 
 class DatabaseContaminationError(Exception):
     pass
@@ -29,10 +36,6 @@ def get_connection(db_path: str | Path, **kwargs) -> sqlite3.Connection:
     Factory function for all SQLite connections.
     Prevents tests and synthetic scripts from modifying production-like databases unless explicitly allowed.
     """
-    import sys
-    from pathlib import Path
-    with open("C:/projects/cardnews/connection_trace.txt", "a", encoding="utf-8") as f:
-        f.write(f"CONNECT_TRACE:{Path(db_path).resolve()}\n")
     try:
         resolved_path = Path(db_path).resolve()
         db_name = resolved_path.name.lower()
@@ -55,12 +58,21 @@ def get_connection(db_path: str | Path, **kwargs) -> sqlite3.Connection:
         is_prod_db = db_name in ("algo.db", "tracking.db")
         
     algo_env, allow_persistent = _get_env_vars()
+    if os.environ.get("PYTEST_CURRENT_TEST") and "test_db_contamination_blocked" in os.environ.get("PYTEST_CURRENT_TEST", ""):
+        print(f"DEBUG_ALWAYS: is_prod_db={is_prod_db}, allow_persistent={allow_persistent}, algo_env={algo_env}, resolved_path={resolved_path}, prod_tracking={prod_tracking}")
+
     
     if algo_env in ("test", "synthetic"):
         if is_prod_db and not allow_persistent:
             raise DatabaseContaminationError(
                 f"[{algo_env}] Attempted to access production DB '{db_name}'. "
                 "Use an in-memory DB or provide a distinct path for tests."
+            )
+    elif algo_env in ("production", "development"):
+        if not is_prod_db and str(db_path) != ":memory:" and not allow_persistent:
+            raise DatabaseContaminationError(
+                f"[{algo_env}] Attempted to access non-production DB '{db_path}'. "
+                "Production/Development must use the official persistent paths."
             )
         if algo_env == "test":
             uri = kwargs.get('uri', False)

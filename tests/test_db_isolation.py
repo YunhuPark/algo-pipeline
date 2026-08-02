@@ -3,8 +3,8 @@ import os
 from pathlib import Path
 from src.db_factory import get_connection, DatabaseContaminationError
 
-def test_db_isolation_blocks_prod_db():
-    os.environ["ALGO_ENV"] = "test"
+def test_db_isolation_blocks_prod_db(monkeypatch):
+    monkeypatch.setenv("ALGO_ENV", "test")
     
     with pytest.raises(DatabaseContaminationError, match="Attempted to access production DB"):
         get_connection("data/tracking.db")
@@ -19,8 +19,8 @@ def test_db_isolation_blocks_prod_db():
     with pytest.raises(DatabaseContaminationError, match="Attempted to access production DB"):
         get_connection("data/TRACKING.DB")
         
-def test_db_isolation_allows_test_db(tmp_path):
-    os.environ["ALGO_ENV"] = "test"
+def test_db_isolation_allows_test_db(monkeypatch, tmp_path):
+    monkeypatch.setenv("ALGO_ENV", "test")
     test_db = tmp_path / "test_tracking.db"
     
     conn = get_connection(test_db)
@@ -34,8 +34,8 @@ def test_db_isolation_allows_test_db(tmp_path):
     prod_tracking = Path("data/tracking.db").resolve()
     assert test_db.resolve() != prod_tracking
 
-def test_db_isolation_path_edge_cases(tmp_path):
-    os.environ["ALGO_ENV"] = "test"
+def test_db_isolation_path_edge_cases(monkeypatch, tmp_path):
+    monkeypatch.setenv("ALGO_ENV", "test")
     
     tmp_path_with_data = tmp_path / "data_folder"
     tmp_path_with_data.mkdir()
@@ -58,8 +58,8 @@ def test_db_isolation_path_edge_cases(tmp_path):
     conn2 = get_connection(test_db_2)
     conn2.close()
     
-def test_data_in_test_name(tmp_path):
-    os.environ["ALGO_ENV"] = "test"
+def test_data_in_test_name(monkeypatch, tmp_path):
+    monkeypatch.setenv("ALGO_ENV", "test")
     test_db = tmp_path / "algo.db"
     conn = get_connection(test_db)
     conn.close()
@@ -73,9 +73,9 @@ def test_import_side_effects():
         import src.pipeline
         mock_connect.assert_not_called()
 
-def test_explicit_init_db(tmp_path):
+def test_explicit_init_db(monkeypatch, tmp_path):
     import os
-    os.environ["ALGO_ENV"] = "test"
+    monkeypatch.setenv("ALGO_ENV", "test")
     test_db = tmp_path / "algo.db"
     
     with patch('src.db.DB_PATH', test_db):
@@ -89,9 +89,9 @@ def test_explicit_init_db(tmp_path):
         init_db()
         conn.close()
         
-def test_all_connections_factory(tmp_path):
+def test_all_connections_factory(monkeypatch, tmp_path):
     import os
-    os.environ["ALGO_ENV"] = "test"
+    monkeypatch.setenv("ALGO_ENV", "test")
     test_db = tmp_path / "algo.db"
     with patch('src.db.DB_PATH', test_db):
         from src.db import init_db, insert_post

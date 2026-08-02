@@ -18,7 +18,7 @@ sys.path.insert(0, str(ROOT))
 from dotenv import load_dotenv
 load_dotenv(ROOT / ".env")
 
-import sqlite3
+from src.db_factory import get_connection
 
 from openai import OpenAI
 
@@ -31,7 +31,7 @@ def _recent_topics(days: int = 21) -> list[str]:
     if not db_path.exists():
         return []
     try:
-        conn = sqlite3.connect(str(db_path))
+        conn = get_connection(str(db_path))
         rows = conn.execute(
             "SELECT topic FROM posts WHERE platform='instagram' "
             "AND posted_at >= date('now', ?) ORDER BY id DESC",
@@ -188,7 +188,7 @@ def _already_posted_today() -> bool:
     db_path = ROOT / "data" / "algo.db"
     if db_path.exists():
         try:
-            conn = sqlite3.connect(str(db_path))
+            conn = get_connection(str(db_path))
             row = conn.execute(
                 "SELECT COUNT(*) FROM posts WHERE platform='instagram' AND posted_at LIKE ?",
                 (f"{today}%",)
