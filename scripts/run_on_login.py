@@ -122,10 +122,11 @@ def already_posted_today() -> bool:
     # 1) DB 확인
     try:
         from src.db import init_db
+        from src.db_factory import get_connection
         init_db()
         db_path = ROOT / "data" / "algo.db"
         if db_path.exists():
-            conn = sqlite3.connect(str(db_path))
+            conn = get_connection(db_path)
             row = conn.execute(
                 "SELECT COUNT(*) FROM posts WHERE platform='instagram' AND posted_at LIKE ?",
                 (f"{today}%",)
