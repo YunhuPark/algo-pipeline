@@ -15,6 +15,8 @@ from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 
+from src.db_factory import get_connection
+
 DB_PATH = Path("data/algo.db")
 
 
@@ -83,7 +85,7 @@ def init_db() -> None:
 @contextmanager
 def _conn():
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_connection(DB_PATH)
     conn.row_factory = sqlite3.Row
     try:
         yield conn
@@ -274,4 +276,4 @@ def get_recent_article_urls(days: int = 7) -> set[str]:
 
 
 # ── 초기화 실행 ───────────────────────────────────────────
-init_db()
+# init_db() was removed to prevent module-level side effects.

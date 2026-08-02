@@ -28,6 +28,7 @@ def _conn():
             # 차단 기준: 대상 경로가 운영 DB와 정확히 일치하거나, 운영 data 디렉터리 내부에 있는 경우
             # (os.path.samefile 혹은 Path.resolve() 사용. symlink 완벽 판별은 OS 환경에 따라 한계가 있을 수 있음)
             if target_path == prod_tracking or target_path == prod_algo or prod_dir in target_path.parents:
+                print(f"DEBUG: target_path={target_path}, prod_tracking={prod_tracking}, prod_dir={prod_dir}")
                 raise RuntimeError("Test environment must not connect to production data/*.db!")
         except RuntimeError:
             raise
