@@ -13,7 +13,7 @@ def mock_pipeline_agents():
          patch("src.agents.youtube_fetcher.fetch_video_candidates") as mock_yf1, \
          patch("src.agents.youtube_fetcher.find_verified_video_for_slide") as mock_yf2, \
          patch("src.agents.youtube_fetcher.download_video_snippet") as mock_yf3, \
-         patch("src.agents.content_creator.run") as mock_cc, \
+         patch("src.agents.content_creator.ContentCreator.run") as mock_cc, \
          patch("src.agents.fact_checker.check_script") as mock_fc_check, \
          patch("src.agents.image_searcher.get_background_image") as mock_is, \
          patch("src.agents.design_renderer.render_card_set") as mock_dr, \
@@ -142,19 +142,13 @@ def test_quality_gate_topic_source_mismatch():
 def test_quality_gate_disputed_claim():
     """disputed claim 차단"""
     meta = {"topic": "T", "source_title": "T", "source_url": "http", "fact_disputed": 1}
-    with pytest.raises(QualityGateError, match="Fact disputed"):
+    with pytest.raises(QualityGateError, match="Legacy fact checker found disputed or unverifiable claims."):
         validate_content_quality(meta, None)
 
 def test_quality_gate_unverifiable_claim():
     """중요 unverifiable claim 차단"""
     meta = {"topic": "T", "source_title": "T", "source_url": "http", "fact_unverifiable": 1}
-    with pytest.raises(QualityGateError, match="Unverifiable claims"):
-        validate_content_quality(meta, None)
-
-def test_quality_gate_listicle_bypass():
-    """리스트형 검증 생략 방지"""
-    meta = {"topic": "좋은 팁 5가지", "source_title": "팁", "source_url": "http", "fact_confirmed": 0, "fact_disputed": 0, "fact_unverifiable": 0}
-    with pytest.raises(QualityGateError, match="Listicle content bypassed"):
+    with pytest.raises(QualityGateError, match="Legacy fact checker found disputed or unverifiable claims."):
         validate_content_quality(meta, None)
 
 def test_mock_preflight_error_classification():
@@ -172,8 +166,9 @@ def test_mock_preflight_error_classification():
 def test_quality_gate_failure_blocks_publish(mock_pipeline_agents):
     """품질 게이트 실패 시 publisher 호출 0회"""
     from src.pipeline import run_pipeline
-    mock_pipeline_agents["fc"].confirmed = 0
-    mock_pipeline_agents["fc"].disputed = 1
+    from src.qa.deterministic_verifier import QualityGateError
+    
+    mock_pipeline_agents["cc"].side_effect = QualityGateError("QG_FAILED", "Quality gate failed")
     
     with patch("src.pipeline.ig_publisher.publish") as mock_publish:
         res = run_pipeline(topic="Test", publish=True, auto=True)

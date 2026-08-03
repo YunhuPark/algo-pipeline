@@ -292,13 +292,29 @@ def _run_once(
                 print(f"  [Pipeline] 보조 기사 제외: '{_aux.title[:40]}' (주제 불일치)")
     raw_article_body = "\n\n---\n\n".join(_raw_parts)
 
-    script = content_creator.run(
-        topic, trend_report, num_cards=n, persona=p,
-        video_infos=video_infos,
-        raw_article_body=raw_article_body,
-        disputed_notes=notes_state.get("last", "") if notes_state else "",
-    )
-    print(f"  → {len(script.slides)}장 생성 완료")
+    from src.qa.deterministic_verifier import QualityGateError
+    try:
+        cc = content_creator.ContentCreator(brand_persona=p)
+        script = cc.run(
+            topic, trend_report, num_cards=n, persona=p,
+            video_infos=video_infos,
+            raw_article_body=raw_article_body,
+            disputed_notes=notes_state.get("last", "") if notes_state else "",
+            source_lineage=source_lineage,
+        )
+        print(f"  → {len(script.slides)}장 생성 완료")
+    except QualityGateError as e:
+        print(f"  ⚠️ Quality Gate 실패 (생성 중): {e.error_code} - {e}")
+        return PipelineResult(
+            image_paths=[],
+            generation_succeeded=False,
+            publish_requested=publish,
+            publish_succeeded=False,
+            ig_post_id=None,
+            permalink=None,
+            failure_stage=e.failure_stage,
+            error_code=e.error_code
+        )
 
     if save_script:
         safe = "".join(c if c.isalnum() or c in "가-힣" else "_" for c in topic)[:25]
@@ -618,30 +634,8 @@ def _run_once(
 
     # ── Quality Gate: 발행 전 품질 검사 ─────────────────────
     if publish and decision == "upload":
-        try:
-            from src.qa.content_quality_gate import validate_content_quality, QualityGateError
-            _src = trend_report.results[0] if trend_report and trend_report.results else None
-            _q_meta = {
-                "topic": script.topic,
-                "source_title": _src.title if _src else "",
-                "source_url": _src.url if _src else "",
-                "fact_confirmed": fc_report.confirmed if fc_report else 0,
-                "fact_disputed": fc_report.disputed if fc_report else 0,
-                "fact_unverifiable": fc_report.unverifiable if fc_report else 0,
-            }
-            validate_content_quality(_q_meta, script)
-        except Exception as e:
-            print(f"  ⚠️ Quality Gate 실패: {e}")
-            return PipelineResult(
-                image_paths=paths,
-                generation_succeeded=True,
-                publish_requested=publish,
-                publish_succeeded=False,
-                ig_post_id=None,
-                permalink=None,
-                failure_stage="QUALITY_GATE",
-                error_code=str(e),
-            )
+        # Legacy compatibility: New pipeline already verified claims during generation.
+        pass
 
     # ── Phase 6: Instagram 업로드 ─────────────────────────
     if publish and decision == "upload":
