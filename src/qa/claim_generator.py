@@ -17,8 +17,8 @@ _CLAIM_SYSTEM_PROMPT = """
       "claim_text": "원문에서 추출한 구체적 주장 문장",
       "claim_type": "factual" | "numerical" | "attributed_statement" | "inference" | "opinion" | "cta",
       "entities": ["언급된 고유명사", "회사명", "인명"],
-      "numbers": ["수치", "비율", "금액", "3개", "15%"],
-      "dates": ["날짜", "연도"],
+      "numbers": [{{"raw_text": "3개", "normalized_value": 3.0, "unit": "개", "qualifier": "", "subject": ""}}],
+      "dates": [{{"raw_text": "2026년 7월", "normalized_date": "2026-07", "precision": "month", "is_relative": false, "reference_date": ""}}],
       "evidence_ids": ["이 주장을 뒷받침하는 원문 단락의 ID"]
     }}
   ]
@@ -33,7 +33,12 @@ _CLAIM_SYSTEM_PROMPT = """
 
 class ClaimGenerator:
     def __init__(self, llm=None):
-        self.llm = llm or ChatOpenAI(model="gpt-4o", temperature=0.2, max_retries=1)
+        self.llm = llm or ChatOpenAI(
+            model="gpt-4o", 
+            temperature=0.2, 
+            max_retries=1,
+            model_kwargs={"response_format": {"type": "json_object"}}
+        )
         self.prompt = ChatPromptTemplate.from_messages([
             ("system", _CLAIM_SYSTEM_PROMPT),
             ("human", "원문:\n{evidence}"),
@@ -51,10 +56,24 @@ class ClaimGenerator:
         response = chain.invoke({"evidence": evidence_text})
         
         content = response.content.strip()
-        if content.startswith("```json"):
-            content = content[7:-3].strip()
+        
+        # Strip markdown formatting robustly
+        if content.startswith("```"):
+            lines = content.splitlines()
+            if lines and lines[0].startswith("```"):
+                lines = lines[1:]
+            if lines and lines[-1].startswith("```"):
+                lines = lines[:-1]
+            content = "\n".join(lines).strip()
             
-        data = json.loads(content)
+        try:
+            data = json.loads(content)
+        except json.JSONDecodeError as e:
+            raise ValueError(f"Failed to parse claim JSON: {e}")
+            
+        if not isinstance(data, dict):
+            raise ValueError("Expected JSON root to be an object")
+            
         claims = []
         for c in data.get("claims", []):
             claim = Claim(
