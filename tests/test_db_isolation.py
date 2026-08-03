@@ -77,29 +77,29 @@ def test_explicit_init_db(monkeypatch, tmp_path):
     import os
     monkeypatch.setenv("ALGO_ENV", "test")
     test_db = tmp_path / "algo.db"
+    monkeypatch.setenv("ALGO_DB_PATH", str(test_db))
     
-    with patch('src.db.DB_PATH', test_db):
-        from src.db import init_db
-        init_db()
-        
-        conn = get_connection(test_db)
-        cursor = conn.cursor()
-        cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='posts'")
-        assert cursor.fetchone() is not None
-        init_db()
-        conn.close()
+    from src.db import init_db
+    init_db()
+    
+    conn = get_connection(test_db)
+    cursor = conn.cursor()
+    cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='posts'")
+    assert cursor.fetchone() is not None
+    init_db()
+    conn.close()
         
 def test_all_connections_factory(monkeypatch, tmp_path):
     import os
     monkeypatch.setenv("ALGO_ENV", "test")
     test_db = tmp_path / "algo.db"
-    with patch('src.db.DB_PATH', test_db):
-        from src.db import init_db, insert_post
-        init_db()
-        insert_post('instagram', 'Test Topic', 'post_123')
-        
-        conn = get_connection(test_db)
-        cursor = conn.cursor()
-        cursor.execute("SELECT * FROM posts WHERE post_id='post_123'")
-        assert cursor.fetchone() is not None
-        conn.close()
+    monkeypatch.setenv("ALGO_DB_PATH", str(test_db))
+
+    from src.db import init_db, insert_post
+    init_db()
+    insert_post('instagram', 'Test Topic', 'post_123')
+    conn = get_connection(test_db)
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM posts WHERE post_id='post_123'")
+    assert cursor.fetchone() is not None
+    conn.close()

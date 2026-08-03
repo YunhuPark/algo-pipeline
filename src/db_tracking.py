@@ -14,29 +14,40 @@ from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 
-TRACKING_DB_PATH = Path("data/tracking.db")
+def resolve_tracking_db_path(settings=None) -> Path:
+    if settings and hasattr(settings, "TRACKING_DB_PATH"):
+        return Path(settings.TRACKING_DB_PATH)
+    env_path = os.environ.get("TRACKING_DB_PATH")
+    algo_env = os.environ.get("ALGO_ENV", "production").lower()
+    if algo_env in ("test", "synthetic"):
+        if not env_path:
+            raise RuntimeError(f"[{algo_env}] TRACKING_DB_PATH must be explicitly injected via env or settings.")
+        return Path(env_path)
+    return Path(env_path) if env_path else Path("data/tracking.db")
 
 @contextmanager
-def _conn():
+def _conn(db_path: Path | None = None):
+    target_path = db_path or resolve_tracking_db_path()
+    
     if os.environ.get("ALGO_ENV") == "test":
         try:
-            target_path = TRACKING_DB_PATH.resolve()
+            target_path_resolved = target_path.resolve()
             prod_tracking = Path("data/tracking.db").resolve()
             prod_algo = Path("data/algo.db").resolve()
             prod_dir = Path("data").resolve()
             
             # 차단 기준: 대상 경로가 운영 DB와 정확히 일치하거나, 운영 data 디렉터리 내부에 있는 경우
             # (os.path.samefile 혹은 Path.resolve() 사용. symlink 완벽 판별은 OS 환경에 따라 한계가 있을 수 있음)
-            if target_path == prod_tracking or target_path == prod_algo or prod_dir in target_path.parents:
-                print(f"DEBUG: target_path={target_path}, prod_tracking={prod_tracking}, prod_dir={prod_dir}")
+            if target_path_resolved == prod_tracking or target_path_resolved == prod_algo or prod_dir in target_path_resolved.parents:
+                print(f"DEBUG: target_path={target_path_resolved}, prod_tracking={prod_tracking}, prod_dir={prod_dir}")
                 raise RuntimeError("Test environment must not connect to production data/*.db!")
         except RuntimeError:
             raise
         except Exception:
             pass
             
-    TRACKING_DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    conn = get_connection(str(TRACKING_DB_PATH), timeout=30)
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+    conn = get_connection(str(target_path), timeout=30)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA synchronous=NORMAL")
@@ -50,9 +61,10 @@ def _conn():
     finally:
         conn.close()
 
-def init_tracking_db() -> None:
-    TRACKING_DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    with _conn() as conn:
+def init_tracking_db(db_path: Path | None = None) -> None:
+    target_path = db_path or resolve_tracking_db_path()
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+    with _conn(target_path) as conn:
         conn.executescript("""
         CREATE TABLE IF NOT EXISTS content_runs (
             run_id      TEXT PRIMARY KEY,
@@ -223,22 +235,6 @@ def init_tracking_db() -> None:
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
 
-        CREATE TABLE IF NOT EXISTS a_b_experiments (
-            experiment_id TEXT PRIMARY KEY,
-            status TEXT NOT NULL,
-            primary_metric TEXT,
-            guardrails TEXT,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        );
-
-        CREATE TABLE IF NOT EXISTS experiment_assignments (
-            assignment_id TEXT PRIMARY KEY,
-            experiment_id TEXT NOT NULL,
-            assignment_unit_id TEXT NOT NULL,
-            assigned_variant TEXT NOT NULL,
-            assigned_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        );
-
         CREATE TABLE IF NOT EXISTS run_reconciliation_events (
             reconciliation_id TEXT PRIMARY KEY,
             run_id TEXT NOT NULL,
@@ -250,7 +246,9 @@ def init_tracking_db() -> None:
             reconciler_version TEXT
         );
         """)
-
+    
+    from src.analytics.db_experiments import init_experiment_db
+    init_experiment_db(target_path)
 
 # ── API ───────────────────────────────────────────────────
 

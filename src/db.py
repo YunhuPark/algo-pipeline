@@ -10,6 +10,7 @@ SQLite 데이터베이스 — 알고 Agent 영구 저장소
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 from contextlib import contextmanager
 from datetime import datetime
@@ -17,13 +18,23 @@ from pathlib import Path
 
 from src.db_factory import get_connection
 
-DB_PATH = Path("data/algo.db")
 
+def resolve_algo_db_path(settings=None) -> Path:
+    if settings and hasattr(settings, "ALGO_DB_PATH"):
+        return Path(settings.ALGO_DB_PATH)
+    env_path = os.environ.get("ALGO_DB_PATH")
+    algo_env = os.environ.get("ALGO_ENV", "production").lower()
+    if algo_env in ("test", "synthetic"):
+        if not env_path:
+            raise RuntimeError(f"[{algo_env}] ALGO_DB_PATH must be explicitly injected via env or settings.")
+        return Path(env_path)
+    return Path(env_path) if env_path else Path("data/algo.db")
 
-def init_db() -> None:
+def init_db(db_path: Path | None = None) -> None:
     """DB 및 테이블 초기화 (최초 1회)."""
-    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    with _conn() as conn:
+    target_path = db_path or resolve_algo_db_path()
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+    with _conn(target_path) as conn:
         # 기존 DB 마이그레이션: status 컬럼 없으면 추가
         try:
             conn.execute("ALTER TABLE posts ADD COLUMN status TEXT DEFAULT 'active'")
@@ -83,9 +94,10 @@ def init_db() -> None:
 
 
 @contextmanager
-def _conn():
-    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    conn = get_connection(DB_PATH)
+def _conn(db_path: Path | None = None):
+    target_path = db_path or resolve_algo_db_path()
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+    conn = get_connection(target_path)
     conn.row_factory = sqlite3.Row
     try:
         yield conn
