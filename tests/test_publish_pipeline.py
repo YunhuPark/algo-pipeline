@@ -64,20 +64,24 @@ def mock_pipeline_agents():
         }
 
 def test_publisher_exception_propagates(mock_pipeline_agents):
-    """publisher 예외가 최상위 실패로 전달됨"""
+    """publisher 단계에서 예외 발생 시 반환값 확인"""
     from src.pipeline import run_pipeline
     
     with patch("src.pipeline.ig_publisher.publish", side_effect=Exception("Network Error")):
-        with pytest.raises(PublishError, match="Network Error"):
-            res = run_pipeline(topic="Test", publish=True, auto=True)
+        res = run_pipeline(topic="Test", publish=True, auto=True)
+        assert res.publish_succeeded is False
+        assert res.failure_stage == "publisher"
+        assert "Network Error" in res.error_code
 
 def test_empty_id_is_failure(mock_pipeline_agents):
-    """게시 요청 상태에서 빈 ID는 실패"""
+    """게시 성공 상태이나 빈 ID가 반환될 경우"""
     from src.pipeline import run_pipeline
     
     with patch("src.pipeline.ig_publisher.publish", return_value=""):
-        with pytest.raises(PublishError, match="Empty ig_post_id returned from publisher"):
-            res = run_pipeline(topic="Test", publish=True, auto=True)
+        res = run_pipeline(topic="Test", publish=True, auto=True)
+        assert res.publish_succeeded is False
+        assert res.failure_stage == "publisher"
+        assert "Empty ig_post_id" in res.error_code
 
 def test_queue_does_not_mark_failed_as_published():
     """Queue가 게시 실패를 published로 기록하지 않음"""

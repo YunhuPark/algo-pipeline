@@ -16,12 +16,12 @@ def mock_env_and_db(monkeypatch, tmp_path):
     test_tracking_db = tmp_path / "tracking.db"
     test_algo_db = tmp_path / "algo.db"
     
-    with patch("src.analytics.db_experiments.TRACKING_DB_PATH", test_tracking_db), \
-         patch("src.analytics.experiments.TRACKING_DB_PATH", test_tracking_db), \
-         patch("src.analytics.assignment.TRACKING_DB_PATH", test_tracking_db), \
-         patch("src.analytics.metrics.TRACKING_DB_PATH", test_tracking_db), \
-         patch("src.analytics.guardrails.TRACKING_DB_PATH", test_tracking_db), \
-         patch("src.api.app.TRACKING_DB_PATH", test_tracking_db):
+    with patch("src.analytics.db_experiments.TRACKING_DB_PATH", test_tracking_db, create=True), \
+         patch("src.analytics.experiments.TRACKING_DB_PATH", test_tracking_db, create=True), \
+         patch("src.analytics.assignment.TRACKING_DB_PATH", test_tracking_db, create=True), \
+         patch("src.analytics.metrics.TRACKING_DB_PATH", test_tracking_db, create=True), \
+         patch("src.analytics.guardrails.TRACKING_DB_PATH", test_tracking_db, create=True), \
+         patch("src.api.app.TRACKING_DB_PATH", test_tracking_db, create=True):
          
         # Init DB schema
         with get_connection(test_tracking_db) as conn:

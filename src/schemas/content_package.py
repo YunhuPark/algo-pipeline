@@ -1,6 +1,6 @@
 from pydantic import BaseModel, Field
 from typing import Literal, Optional, List, Any
-from .card_news import CardNewsScript, TrendReport
+from .card_news import CardNewsScript, Claim, TrendReport
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -56,7 +56,7 @@ class ContentPackage(BaseModel):
     trend_report: Optional[TrendReport] = None
     
     # 2. Fact Check
-    extracted_claims: List[Any] = Field(default_factory=list)
+    extracted_claims: List[Claim] = Field(default_factory=list)
     fact_check_report: Optional[Any] = None  # FactCheckReport
     
     # 3. Draft
