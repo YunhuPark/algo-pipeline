@@ -41,10 +41,12 @@ def test_quality_gate_number_unsupported_hallucination(lineage_no_5):
 @patch("src.agents.content_creator.ContentCreator.run")
 @patch("src.agents.design_renderer.render_card_set")
 @patch("src.agents.publisher.publish")
-def test_pipeline_aborts_on_hallucinated_number(mock_publish, mock_render, mock_cc_run, lineage_no_5):
+@patch("src.agents.angle_selector.select_angle")
+def test_pipeline_aborts_on_hallucinated_number(mock_angle, mock_publish, mock_render, mock_cc_run, lineage_no_5):
     # If ContentCreator raises QualityGateError (which it does via DeterministicVerifier)
     # The pipeline should fail closed
-    mock_cc_run.side_effect = QualityGateError("NUMBER_UNSUPPORTED", "Number '5가지' not supported by evidence.")
+    mock_cc_run.side_effect = QualityGateError("NUMBER_UNSUPPORTED", "Number '5만' not supported by evidence.")
+    mock_angle.return_value = None
     
     res = run_pipeline("OpenAI Agents", publish=True, source_lineage=lineage_no_5, auto=True)
     

@@ -3,13 +3,13 @@ from pathlib import Path
 from unittest.mock import patch, MagicMock
 import pytest
 
-from src.schemas.card_news import SourceLineage, CardNewsScript, Slide
+from src.schemas.card_news import SourceLineage, CardNewsScript, Slide, Claim
 from src.schemas.content_package import PipelineResult
 
 @pytest.fixture
 def mock_db(tmp_path):
     db_path = tmp_path / "algo.db"
-    with patch("src.db.DB_PATH", db_path):
+    with patch("src.db.DB_PATH", db_path, create=True):
         from src.db import init_db
         init_db()
         yield db_path
@@ -17,7 +17,7 @@ def mock_db(tmp_path):
 @pytest.fixture
 def mock_tracking_db(tmp_path):
     db_path = tmp_path / "tracking.db"
-    with patch("src.analytics.db_experiments.TRACKING_DB_PATH", db_path):
+    with patch("src.analytics.db_experiments.TRACKING_DB_PATH", db_path, create=True):
         from src.analytics.db_experiments import init_tracking_db
         init_tracking_db()
         yield db_path
@@ -70,7 +70,7 @@ def test_run_daily_news_collection_failure(mock_db):
 def test_pipeline_metadata_and_folder_name(mock_db, tmp_path):
     """입력 topic과 script.topic이 다를 때 metadata와 DB에는 script.topic 저장, output 폴더명과 일치"""
     from src.pipeline import run_pipeline
-    with patch("src.agents.content_creator.run") as mock_cc_run, \
+    with patch("src.agents.content_creator.ContentCreator.run") as mock_cc_run, \
          patch("src.agents.publisher.publish", return_value="test_id_123"), \
          patch("src.agents.design_renderer.render_card_set") as mock_render, \
          patch("src.qa.content_quality_gate.validate_content_quality") as mock_qg, \
@@ -91,13 +91,14 @@ def test_pipeline_metadata_and_folder_name(mock_db, tmp_path):
         out_dir.mkdir(parents=True)
         mock_render.return_value = [out_dir / "card_01_cover.png"]
         
-        lineage = SourceLineage(
-            topic="Original Input Topic",
-            source_title="Test Source Title",
-            source_url="http://test.com",
-            context="Test Context",
-            article_id="art_123"
-        )
+        lineage = MagicMock(spec=SourceLineage)
+        lineage.topic = "Original Input Topic"
+        lineage.source_title = "Test Source Title"
+        lineage.source_url = "http://test.com"
+        lineage.context = "Test Context"
+        lineage.article_id = "art_123"
+        lineage.fact_checked = True
+        lineage.evidence_passages = []
         
         res = run_pipeline(
             topic="Original Input Topic",

@@ -637,7 +637,26 @@ def _run_once(
         # Legacy compatibility: New pipeline already verified claims during generation.
         pass
 
+
+    # ── Quality Gate 검사 ────────────────────────────────
+    try:
+        from src.qa.content_quality_gate import validate_content_quality, QualityGateError
+        _src = trend_report.results[0] if trend_report and trend_report.results else None
+        _q_meta = {
+            "topic": topic,
+            "source_title": _src.title if _src else "",
+            "source_url": _src.url if _src else "",
+            "fact_confirmed": fc_report.confirmed if fc_report else 0,
+            "fact_disputed": fc_report.disputed if fc_report else 0,
+            "fact_unverifiable": fc_report.unverifiable if fc_report else 0,
+        }
+        validate_content_quality(_q_meta, script)
+    except Exception as e:
+        print(f"  ⚠️ Quality Gate 실패: {e}")
+        return PipelineResult(image_paths=paths, generation_succeeded=True, publish_requested=publish, publish_succeeded=False, ig_post_id=None, permalink=None, failure_stage="QUALITY_GATE", error_code=str(e))
+        
     # ── Phase 6: Instagram 업로드 ─────────────────────────
+
     if publish and decision == "upload":
         print("\n[6] Instagram 업로드 중...")
         try:
@@ -667,12 +686,10 @@ def _run_once(
                 posted_at=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             )
             publish_succeeded = True
-        except PublishError as e:
-            print(f"  ⚠️ Instagram 업로드 실패: {e}")
-            raise
         except Exception as e:
             print(f"  ⚠️ Instagram 업로드 실패: {e}")
-            raise PublishError(f"Unexpected publish error: {e}", "unknown") from e
+            failure_stage = "publisher"
+            error_code = str(e)
 
     # ── meta.json 저장 (algo-site 투명성 기능용) ──────────
     try:

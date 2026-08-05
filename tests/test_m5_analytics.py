@@ -1,7 +1,8 @@
 import os
 import pytest
 from datetime import datetime, timedelta
-from src.analytics.db_experiments import TRACKING_DB_PATH, init_experiment_db
+from src.analytics.db_experiments import init_experiment_db
+from src.db_tracking import resolve_tracking_db_path
 from src.analytics.feedback import log_editorial_feedback
 from src.analytics.import_snapshot import import_performance_snapshot
 from src.analytics.benchmark import run_benchmark

@@ -6,8 +6,8 @@ import time
 def test_instrumentation_fields(monkeypatch, tmp_path):
     monkeypatch.setenv("ALGO_ENV", "test")
     
-    from src.db_tracking import TRACKING_DB_PATH
-    db_path = TRACKING_DB_PATH
+    from src.db_tracking import resolve_tracking_db_path
+    db_path = resolve_tracking_db_path()
     
     run_id = start_run(topic="Fake Instrumentation Test")
     assert run_id is not None
