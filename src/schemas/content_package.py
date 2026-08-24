@@ -3,6 +3,7 @@ from typing import Literal, Optional, List, Any
 from .card_news import CardNewsScript, Claim, TrendReport
 from dataclasses import dataclass
 from pathlib import Path
+from .queue_schemas import PublishAttemptState
 
 class PublishError(Exception):
     pass
@@ -17,6 +18,8 @@ class PipelineResult:
     permalink: str | None
     failure_stage: str | None
     error_code: str | None
+    publish_attempt_state: PublishAttemptState = PublishAttemptState.NOT_ATTEMPTED
+    publish_attempt_id: str | None = None
 
 PipelineStatus = Literal[
     "CANDIDATE",

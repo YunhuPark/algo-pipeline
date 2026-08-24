@@ -245,7 +245,14 @@ def dequeue_next() -> sqlite3.Row | None:
         row = conn.execute(
             """SELECT * FROM queue
                WHERE status = 'pending'
-                 AND publish_error_code IS NULL
+                 AND (
+                       publish_error_code IS NULL OR publish_error_code IN (
+                           'NETWORK_TIMEOUT_BEFORE_PUBLISH',
+                           'RATE_LIMITED_BEFORE_PUBLISH',
+                           'TEMPORARY_UPSTREAM_UNAVAILABLE',
+                           'PIPELINE_PRE_PUBLISH_TRANSIENT'
+                       )
+                 )
                  AND ig_post_id IS NULL
                  AND publish_attempt_id IS NULL
                  AND publish_attempt_state = 'NOT_ATTEMPTED'
@@ -287,6 +294,51 @@ def mark_queue_error(
             f"UPDATE queue SET {', '.join(assignments)} WHERE id=?",
             tuple(params),
         )
+
+
+def start_publish_attempt(queue_id: int, attempt_id: str, started_at: str) -> None:
+    with _conn() as conn:
+        cur = conn.execute(
+            """UPDATE queue
+               SET publish_attempt_id=?, publish_started_at=?,
+                   publish_attempt_state='STARTED', publish_error_code='PUBLISH_IN_PROGRESS'
+               WHERE id=? AND status='pending' AND ig_post_id IS NULL
+                 AND publish_attempt_id IS NULL
+                 AND publish_attempt_state='NOT_ATTEMPTED'""",
+            (attempt_id, started_at, queue_id),
+        )
+        if cur.rowcount != 1:
+            raise RuntimeError("publish attempt precondition failed")
+
+
+def store_queue_ig_post_id(queue_id: int, attempt_id: str, ig_post_id: str) -> None:
+    if not ig_post_id.strip():
+        raise ValueError("ig_post_id must not be blank")
+    with _conn() as conn:
+        existing = conn.execute(
+            "SELECT ig_post_id, publish_attempt_id FROM queue WHERE id=?", (queue_id,)
+        ).fetchone()
+        if existing is None or existing["publish_attempt_id"] != attempt_id:
+            raise RuntimeError("publish attempt mismatch")
+        if existing["ig_post_id"] not in (None, ig_post_id):
+            raise RuntimeError("refusing to overwrite a different ig_post_id")
+        conn.execute(
+            """UPDATE queue SET ig_post_id=?, publish_attempt_state='REMOTE_ID_CONFIRMED'
+               WHERE id=? AND publish_attempt_id=?""",
+            (ig_post_id, queue_id, attempt_id),
+        )
+
+
+def complete_queue_publish(queue_id: int, attempt_id: str, ig_post_id: str) -> None:
+    with _conn() as conn:
+        cur = conn.execute(
+            """UPDATE queue SET status='published', publish_error_code=NULL,
+                   publish_attempt_state='REMOTE_ID_CONFIRMED'
+               WHERE id=? AND publish_attempt_id=? AND ig_post_id=?""",
+            (queue_id, attempt_id, ig_post_id),
+        )
+        if cur.rowcount != 1:
+            raise RuntimeError("publish completion precondition failed")
 
 
 def get_queue(status: str | None = None) -> list[sqlite3.Row]:
