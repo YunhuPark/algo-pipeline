@@ -17,13 +17,20 @@ from pathlib import Path
 from typing import Any
 
 from src.db import (
-    enqueue,
+    enqueue_v2,
     dequeue_next,
+    mark_queue_error,
     mark_queue_status,
     queue_count,
     get_queue,
 )
-from src.agents.news_collector import collect_and_select
+from src.schemas.queue_schemas import CollectionMethod, QueueMetadataV2
+
+
+def _collect_news():
+    from src.agents.news_collector import collect_and_select
+
+    return collect_and_select()
 
 
 # ── 공개 함수 ──────────────────────────────────────────────
@@ -48,21 +55,7 @@ def bulk_generate(
     ids: list[int] = []
 
     if topics:
-        # 직접 지정된 주제 사용
-        for i in range(min(count, len(topics))):
-            row_id = enqueue(
-                topic=topics[i],
-                context="",
-                angle_hint="",
-            )
-            ids.append(row_id)
-            print(f"  [ContentQueue] 큐 추가 ({i+1}/{count}): {topics[i]}")
-
-        # 주제가 count보다 적으면 나머지는 뉴스 수집으로 채우기
-        remaining = count - len(topics)
-        if remaining > 0 and auto_news:
-            print(f"  [ContentQueue] 부족한 {remaining}개를 뉴스에서 수집합니다...")
-            ids.extend(_fill_from_news(remaining))
+        raise ValueError("직접 주제는 출처 attestation이 없어 Queue V2에 등록할 수 없습니다.")
 
     elif auto_news:
         ids.extend(_fill_from_news(count))
@@ -82,7 +75,7 @@ def _fill_from_news(count: int) -> list[int]:
     for i in range(count):
         try:
             print(f"  [ContentQueue] 뉴스 수집 중 ({i+1}/{count})...")
-            news = collect_and_select()
+            news = _collect_news()
 
             # 중복 주제 회피
             topic = news.topic
@@ -90,10 +83,28 @@ def _fill_from_news(count: int) -> list[int]:
                 topic = f"{topic} (심화)"
             seen_topics.add(topic)
 
-            row_id = enqueue(
+            evidence = [
+                {
+                    "title": item.title,
+                    "url": item.url,
+                    "source": item.source,
+                    "summary": item.summary,
+                }
+                for item in news.source_items
+                if item.title.strip() and item.url.strip()
+            ]
+            if not evidence:
+                raise ValueError("뉴스 출처 evidence가 없어 enqueue를 차단합니다.")
+            metadata = QueueMetadataV2(
                 topic=topic,
+                source_title=evidence[0]["title"],
+                source_url=evidence[0]["url"],
                 context=news.context,
-                angle_hint="",
+                evidence=evidence,
+            )
+            row_id = enqueue_v2(
+                metadata,
+                CollectionMethod.NEWS_COLLECTOR,
             )
             ids.append(row_id)
             print(f"  [ContentQueue] 뉴스 큐 추가: {topic}")
@@ -117,9 +128,6 @@ def publish_next(publish_to_ig: bool = True) -> dict[str, Any] | None:
     Returns:
         {"id": queue_id, "topic": topic, "paths": [Path, ...]} or None
     """
-    from src import pipeline
-    from src.persona import load_persona
-
     row = dequeue_next()
     if row is None:
         print("  [ContentQueue] 대기 중인 큐가 없습니다.")
@@ -130,6 +138,14 @@ def publish_next(publish_to_ig: bool = True) -> dict[str, Any] | None:
     context = row["context"] or ""
     angle_hint = row["angle_hint"] or ""
     image_dir = row["image_dir"] or ""
+
+    error = _validate_queue_row(row)
+    if error:
+        mark_queue_error(queue_id, error, increment_retry=False, preserve_attempt=True)
+        print(f"  [ContentQueue] 게시 차단: {error} (큐 id={queue_id})")
+        return None
+
+    from src import pipeline
 
     print(f"\n  [ContentQueue] 발행 시작: '{topic}' (큐 id={queue_id})")
 
@@ -225,15 +241,33 @@ def add_topic(
     Returns:
         생성된 queue row id
     """
-    row_id = enqueue(
-        topic=topic,
-        context=context,
-        angle_hint="",
-        scheduled_at=scheduled_at,
-    )
-    sched_label = f" (예약: {scheduled_at})" if scheduled_at else ""
-    print(f"  [ContentQueue] 추가: '{topic}'{sched_label} → id={row_id}")
-    return row_id
+    raise ValueError("Queue V2는 검증된 출처 evidence가 필수이며 직접 주제 등록을 지원하지 않습니다.")
+
+
+def _validate_queue_row(row: Any) -> str | None:
+    import json
+    import hashlib
+
+    method = row["collection_method"] if "collection_method" in row.keys() else None
+    if method == CollectionMethod.LEGACY_UNVERIFIED.value:
+        return "LEGACY_UNSUPPORTED"
+    if method not in {CollectionMethod.NEWS_COLLECTOR.value, CollectionMethod.MANUAL_VERIFIED.value}:
+        return "UNPUBLISHABLE_METHOD"
+    if row["metadata_schema_version"] != 2:
+        return "MISSING_SCHEMA_VERSION"
+    try:
+        raw = row["metadata_json"]
+        data = json.loads(raw)
+        metadata = QueueMetadataV2.model_validate(data)
+    except Exception:
+        return "JSON_PARSE_ERROR"
+    canonical = metadata.canonical_json()
+    actual = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    if actual != row["lineage_hash"]:
+        return "HASH_MISMATCH"
+    if metadata.topic != row["topic"] or metadata.context != (row["context"] or ""):
+        return "METHOD_MISMATCH"
+    return None
 
 
 def get_status() -> dict[str, Any]:

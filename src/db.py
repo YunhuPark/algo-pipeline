@@ -17,6 +17,7 @@ from datetime import datetime
 from pathlib import Path
 
 from src.db_factory import get_connection
+from src.schemas.queue_schemas import CollectionMethod, QueueMetadataV2
 
 
 def resolve_algo_db_path(settings=None) -> Path:
@@ -102,6 +103,9 @@ def _conn(db_path: Path | None = None):
     try:
         yield conn
         conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
     finally:
         conn.close()
 
@@ -198,12 +202,54 @@ def enqueue(
         return cur.lastrowid
 
 
+def enqueue_v2(
+    metadata: QueueMetadataV2,
+    collection_method: CollectionMethod,
+    *,
+    angle_hint: str = "",
+    scheduled_at: str | None = None,
+) -> int:
+    """Insert an attested queue row. The Queue V2 migration must already be applied."""
+    if collection_method in {
+        CollectionMethod.LEGACY_UNVERIFIED,
+        CollectionMethod.TEST_FIXTURE,
+        CollectionMethod.SYNTHETIC,
+    } and os.environ.get("ALGO_ENV", "production").lower() == "production":
+        raise ValueError(f"{collection_method.value} cannot be enqueued in production")
+
+    with _conn() as conn:
+        cur = conn.execute(
+            """INSERT INTO queue (
+                   topic, context, angle_hint, metadata_json, collection_method,
+                   lineage_hash, metadata_schema_version, scheduled_at,
+                   publish_attempt_state
+               ) VALUES (?,?,?,?,?,?,?,?,?)""",
+            (
+                metadata.topic,
+                metadata.context,
+                angle_hint,
+                metadata.canonical_json(),
+                collection_method.value,
+                metadata.lineage_hash(),
+                metadata.schema_version,
+                scheduled_at,
+                "NOT_ATTEMPTED",
+            ),
+        )
+        return int(cur.lastrowid)
+
+
 def dequeue_next() -> sqlite3.Row | None:
     """다음 발행 대기 항목 (scheduled_at 기준, NULL이면 우선)."""
     with _conn() as conn:
         row = conn.execute(
             """SELECT * FROM queue
                WHERE status = 'pending'
+                 AND publish_error_code IS NULL
+                 AND ig_post_id IS NULL
+                 AND publish_attempt_id IS NULL
+                 AND publish_attempt_state = 'NOT_ATTEMPTED'
+                 AND retry_count < 3
                  AND (scheduled_at IS NULL OR scheduled_at <= datetime('now','localtime'))
                ORDER BY scheduled_at ASC NULLS FIRST, id ASC
                LIMIT 1""",
@@ -214,6 +260,33 @@ def dequeue_next() -> sqlite3.Row | None:
 def mark_queue_status(queue_id: int, status: str) -> None:
     with _conn() as conn:
         conn.execute("UPDATE queue SET status=? WHERE id=?", (status, queue_id))
+
+
+def mark_queue_error(
+    queue_id: int,
+    error_code: str,
+    *,
+    increment_retry: bool = False,
+    preserve_attempt: bool = True,
+) -> None:
+    assignments = ["publish_error_code=?"]
+    params: list[object] = [error_code]
+    if increment_retry:
+        assignments.append("retry_count=retry_count+1")
+    if not preserve_attempt:
+        assignments.extend(
+            [
+                "publish_attempt_id=NULL",
+                "publish_started_at=NULL",
+                "publish_attempt_state='NOT_ATTEMPTED'",
+            ]
+        )
+    params.append(queue_id)
+    with _conn() as conn:
+        conn.execute(
+            f"UPDATE queue SET {', '.join(assignments)} WHERE id=?",
+            tuple(params),
+        )
 
 
 def get_queue(status: str | None = None) -> list[sqlite3.Row]:
