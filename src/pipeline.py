@@ -17,12 +17,14 @@ import json as _json
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
+from typing import Callable
 
 from src.agents import trend_analyzer, content_creator, image_searcher, design_renderer
 from src.agents import publisher as ig_publisher
 from src.config import NUM_CARDS
 from src.persona import Persona, load_persona, resolve_persona
 from src.schemas.content_package import PipelineResult, PublishError
+from src.schemas.queue_schemas import PublishAttemptState
 
 MAX_RETRY = 6   # 기사 5건 교체 + 팩트체크 재시도를 합산해도 여유있도록
 
@@ -56,6 +58,9 @@ def run_pipeline(
     make_reels: bool = False,     # Reels MP4 생성 여부
     topic_refined: bool = False,  # 이미 정제된 주제 → Phase 0-R 스킵
     source_lineage: "SourceLineage | None" = None, # 큐 또는 일일 뉴스 수집에서 넘어온 뉴스 출처 정보
+    publish_attempt_id: str | None = None,
+    before_publish: Callable[[str], None] | None = None,
+    on_remote_id: Callable[[str, str], None] | None = None,
 ) -> PipelineResult | None:
     p = persona or load_persona()
     # 주제에 맞는 페르소나 자동 적용 (tone/색상/이모지/해시태그)
@@ -92,6 +97,9 @@ def run_pipeline(
             ignored_titles=ignored_titles,
             topic_refined=topic_refined,
             source_lineage=source_lineage,
+            publish_attempt_id=publish_attempt_id,
+            before_publish=before_publish,
+            on_remote_id=on_remote_id,
         )
         if res is not None:
             return res
@@ -132,6 +140,9 @@ def _run_once(
     ignored_titles: set | None = None,
     topic_refined: bool = False,   # True이면 Phase 0-R 스킵 (이미 정제됨)
     source_lineage: "SourceLineage | None" = None,
+    publish_attempt_id: str | None = None,
+    before_publish=None,
+    on_remote_id=None,
 ) -> PipelineResult | None:
     from src.agents.angle_selector import select_angle as pick_angle
     from src.agents.approval import wait_for_approval
@@ -631,6 +642,7 @@ def _run_once(
     _permalink = None
     failure_stage = None
     error_code = None
+    attempt_state = PublishAttemptState.NOT_ATTEMPTED
 
     # ── Quality Gate: 발행 전 품질 검사 ─────────────────────
     if publish and decision == "upload":
@@ -659,6 +671,25 @@ def _run_once(
 
     if publish and decision == "upload":
         print("\n[6] Instagram 업로드 중...")
+        if publish_attempt_id and before_publish:
+            try:
+                before_publish(publish_attempt_id)
+                attempt_state = PublishAttemptState.STARTED
+            except Exception as e:
+                return PipelineResult(
+                    image_paths=paths,
+                    generation_succeeded=True,
+                    publish_requested=True,
+                    publish_succeeded=False,
+                    ig_post_id=None,
+                    permalink=None,
+                    failure_stage="PRE_PUBLISH_PERSISTENCE",
+                    error_code="LOCAL_ATTEMPT_PERSISTENCE_ERROR",
+                    publish_attempt_state=PublishAttemptState.NOT_ATTEMPTED,
+                    publish_attempt_id=publish_attempt_id,
+                )
+        else:
+            attempt_state = PublishAttemptState.STARTED
         try:
             ig_post_id = ig_publisher.publish(
                 image_paths=paths,
@@ -667,7 +698,18 @@ def _run_once(
                 base_url=ig_base_url,
             )
             if not ig_post_id:
+                attempt_state = PublishAttemptState.UNKNOWN
                 raise PublishError("Empty ig_post_id returned from publisher", "empty_id")
+            attempt_state = PublishAttemptState.REMOTE_ID_CONFIRMED
+            if publish_attempt_id and on_remote_id:
+                try:
+                    on_remote_id(publish_attempt_id, ig_post_id)
+                except Exception:
+                    attempt_state = PublishAttemptState.UNKNOWN
+                    raise PublishError(
+                        "Remote publish succeeded but ig_post_id persistence failed",
+                        "REMOTE_PUBLISH_PERSISTENCE_UNCERTAIN",
+                    )
                 
             try:
                 from src.agents.publisher import get_post_permalink
@@ -689,7 +731,13 @@ def _run_once(
         except Exception as e:
             print(f"  ⚠️ Instagram 업로드 실패: {e}")
             failure_stage = "publisher"
-            error_code = str(e)
+            if attempt_state != PublishAttemptState.NOT_ATTEMPTED:
+                attempt_state = PublishAttemptState.UNKNOWN
+            error_code = (
+                "UNCERTAIN_EMPTY_POST_ID"
+                if "Empty ig_post_id" in str(e)
+                else "REMOTE_PUBLISH_PERSISTENCE_UNCERTAIN"
+            )
 
     # ── meta.json 저장 (algo-site 투명성 기능용) ──────────
     try:
@@ -766,4 +814,4 @@ def _run_once(
     except Exception:
         pass
 
-    return PipelineResult(image_paths=paths, generation_succeeded=True, publish_requested=publish, publish_succeeded=publish_succeeded, ig_post_id=ig_post_id, permalink=_permalink, failure_stage=failure_stage, error_code=error_code)
+    return PipelineResult(image_paths=paths, generation_succeeded=True, publish_requested=publish, publish_succeeded=publish_succeeded, ig_post_id=ig_post_id, permalink=_permalink, failure_stage=failure_stage, error_code=error_code, publish_attempt_state=attempt_state, publish_attempt_id=publish_attempt_id)

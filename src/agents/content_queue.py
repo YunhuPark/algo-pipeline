@@ -13,18 +13,31 @@ ContentQueue — 콘텐츠 큐 관리
 from __future__ import annotations
 
 from datetime import datetime
+from datetime import timezone
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 from src.db import (
     enqueue_v2,
     dequeue_next,
     mark_queue_error,
+    start_publish_attempt,
+    store_queue_ig_post_id,
+    complete_queue_publish,
     mark_queue_status,
     queue_count,
     get_queue,
 )
-from src.schemas.queue_schemas import CollectionMethod, QueueMetadataV2
+from src.schemas.queue_schemas import CollectionMethod, PublishAttemptState, QueueMetadataV2
+
+
+RETRYABLE_PRE_PUBLISH_ERRORS = {
+    "NETWORK_TIMEOUT_BEFORE_PUBLISH",
+    "RATE_LIMITED_BEFORE_PUBLISH",
+    "TEMPORARY_UPSTREAM_UNAVAILABLE",
+    "PIPELINE_PRE_PUBLISH_TRANSIENT",
+}
 
 
 def _collect_news():
@@ -145,7 +158,17 @@ def publish_next(publish_to_ig: bool = True) -> dict[str, Any] | None:
         print(f"  [ContentQueue] 게시 차단: {error} (큐 id={queue_id})")
         return None
 
-    from src import pipeline
+    attempt_id = str(uuid4()) if publish_to_ig else None
+
+    def before_publish(value: str) -> None:
+        start_publish_attempt(
+            queue_id,
+            value,
+            datetime.now(timezone.utc).isoformat(),
+        )
+
+    def on_remote_id(value: str, post_id: str) -> None:
+        store_queue_ig_post_id(queue_id, value, post_id)
 
     print(f"\n  [ContentQueue] 발행 시작: '{topic}' (큐 id={queue_id})")
 
@@ -159,27 +182,37 @@ def publish_next(publish_to_ig: bool = True) -> dict[str, Any] | None:
             if not paths:
                 print("  [ContentQueue] PNG 없음 — 전체 파이프라인 실행")
                 res = _run_full_pipeline(
-                    topic, context, angle_hint, publish_to_ig
+                    topic, context, angle_hint, publish_to_ig,
+                    attempt_id, before_publish, on_remote_id,
                 )
             else:
-                from src import pipeline
                 # need to implement a manual publish step for cached images, 
                 # but to be safe we just fail or we would need to duplicate pipeline.
                 pass
         else:
             res = _run_full_pipeline(
-                topic, context, angle_hint, publish_to_ig
+                topic, context, angle_hint, publish_to_ig,
+                attempt_id, before_publish, on_remote_id,
             )
 
         if res and hasattr(res, 'image_paths') and res.image_paths:
             if res.publish_requested:
                 if res.publish_succeeded and res.ig_post_id:
-                    mark_queue_status(queue_id, "published")
+                    complete_queue_publish(queue_id, attempt_id, res.ig_post_id)
                     print(f"  [ContentQueue] 발행 완료: {topic} ({len(res.image_paths)}장)")
                     return {"id": queue_id, "topic": topic, "paths": res.image_paths}
                 else:
                     print(f"  [ContentQueue] 게시 실패 (큐 id={queue_id}): {res.error_code}")
-                    mark_queue_status(queue_id, "failed")
+                    retryable = (
+                        res.publish_attempt_state == PublishAttemptState.NOT_ATTEMPTED
+                        and res.error_code in RETRYABLE_PRE_PUBLISH_ERRORS
+                    )
+                    mark_queue_error(
+                        queue_id,
+                        res.error_code or "UNKNOWN_PIPELINE_ERROR",
+                        increment_retry=retryable,
+                        preserve_attempt=not retryable,
+                    )
                     return None
             else:
                 # generation only
@@ -187,16 +220,16 @@ def publish_next(publish_to_ig: bool = True) -> dict[str, Any] | None:
                 return {"id": queue_id, "topic": topic, "paths": res.image_paths}
         elif type(res) == list and len(res) > 0: # fallback for paths directly
             # shouldn't happen but just in case
-            mark_queue_status(queue_id, "failed")
+            mark_queue_error(queue_id, "UNKNOWN_PIPELINE_ERROR")
             return None
         else:
             print(f"  [ContentQueue] 발행 실패 (빈 경로): {topic}")
-            mark_queue_status(queue_id, "failed")
+            mark_queue_error(queue_id, "EMPTY_PIPELINE_RESULT")
             return None
 
     except Exception as e:
         print(f"  [ContentQueue] 파이프라인 오류 (큐 id={queue_id}): {e}")
-        mark_queue_status(queue_id, "failed")
+        mark_queue_error(queue_id, "UNKNOWN_PIPELINE_EXCEPTION")
         raise
 
 
@@ -205,6 +238,9 @@ def _run_full_pipeline(
     context: str,
     angle_hint: str,
     publish: bool,
+    publish_attempt_id: str | None = None,
+    before_publish=None,
+    on_remote_id=None,
 ):
     """파이프라인 실행 헬퍼."""
     from src import pipeline
@@ -221,6 +257,9 @@ def _run_full_pipeline(
         trend_context=trend_context,
         publish=publish,
         auto=True,
+        publish_attempt_id=publish_attempt_id,
+        before_publish=before_publish,
+        on_remote_id=on_remote_id,
     )
     return res
 
