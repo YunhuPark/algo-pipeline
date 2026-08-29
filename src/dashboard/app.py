@@ -32,7 +32,7 @@ from flask import Flask, request, redirect, url_for, send_file, Response, stream
 
 from src.db import (
     get_posts, get_analytics, get_queue,
-    enqueue, mark_queue_status, queue_count,
+    mark_queue_status, queue_count,
 )
 
 app = Flask(__name__)
@@ -918,26 +918,9 @@ def queue_page():
       <div>
         <div class="panel" style="margin-bottom:16px">
           <div class="panel-header">
-            <div class="panel-title">주제 직접 추가</div>
+            <div class="panel-title">검증되지 않은 주제 등록 차단</div>
           </div>
-          <form method="post" action="/queue/add">
-            <div class="input-group">
-              <label class="input-label">주제</label>
-              <input name="topic" placeholder="예: AI 트렌드, GPT-5 발표" required>
-            </div>
-            <div class="input-group">
-              <label class="input-label">예약 시간 (선택)</label>
-              <input name="scheduled_at" type="datetime-local">
-            </div>
-            <button type="submit" class="btn btn-primary" style="width:100%">큐에 추가</button>
-          </form>
-        </div>
-        <div class="panel" style="margin-bottom:16px">
-          <div class="panel-header">
-            <div class="panel-title">GPT 주제 추천</div>
-          </div>
-          <p class="panel-sub" style="margin-bottom:14px">GPT가 오늘의 AI/테크 트렌드 주제 5개를 추천합니다. 원하는 것만 골라서 큐에 추가하세요.</p>
-          <a href="/queue/suggest" class="btn btn-primary" style="width:100%;display:block;text-align:center;text-decoration:none">✨ 주제 추천받기</a>
+          <p class="panel-sub">Queue V2는 출처 URL과 evidence가 검증된 항목만 허용합니다. 직접 입력과 GPT 추천 주제는 발행 큐에 추가할 수 없습니다.</p>
         </div>
         <div class="panel">
           <div class="panel-header">
@@ -959,12 +942,10 @@ def queue_page():
 
 @app.route("/queue/add", methods=["POST"])
 def queue_add():
-    topic = request.form.get("topic", "").strip()
-    scheduled_at = request.form.get("scheduled_at", "").strip() or None
-    if not topic:
-        return redirect(url_for("queue_page", err="주제를 입력하세요."))
-    enqueue(topic=topic, scheduled_at=scheduled_at)
-    return redirect(url_for("queue_page", msg=f"'{topic}' 큐에 추가됨"))
+    return redirect(url_for(
+        "queue_page",
+        err="Queue V2는 검증된 출처 evidence가 필요해 직접 주제 등록을 차단합니다.",
+    ))
 
 
 @app.route("/queue/skip/<int:qid>", methods=["POST"])
@@ -986,80 +967,18 @@ def queue_generate():
 
 @app.route("/queue/suggest")
 def queue_suggest():
-    """GPT로 주제 5개 추천 → 선택해서 큐에 추가"""
-    from datetime import datetime
-    from openai import OpenAI
-    import os
-    client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-    today = datetime.now().strftime("%Y년 %m월 %d일")
-    resp = client.chat.completions.create(
-        model="gpt-4o-mini",
-        messages=[
-            {
-                "role": "system",
-                "content": (
-                    "당신은 한국 인스타그램 AI/테크 계정 @algo__kr의 콘텐츠 기획자입니다. "
-                    "MZ세대가 흥미로워할 AI, 테크, 스타트업 관련 카드뉴스 주제를 추천합니다."
-                ),
-            },
-            {
-                "role": "user",
-                "content": (
-                    f"오늘은 {today}입니다. "
-                    "인스타그램 카드뉴스로 만들기 좋은 AI/테크 트렌드 주제 5개를 추천해주세요. "
-                    "각 줄에 주제 하나씩, 번호 없이, 15자 이내로 써주세요."
-                ),
-            },
-        ],
-        max_tokens=200,
-        temperature=0.85,
-    )
-    raw = resp.choices[0].message.content.strip()
-    topics = [t.strip().strip("-").strip() for t in raw.splitlines() if t.strip()][:5]
-
-    cards = "".join(
-        f"""<div style="display:flex;align-items:center;gap:12px;padding:14px 16px;
-            background:var(--bg-card);border:1px solid var(--border);border-radius:10px;margin-bottom:10px">
-          <input type="checkbox" name="topics" value="{t}" id="t{i}"
-            style="width:18px;height:18px;accent-color:var(--accent);cursor:pointer">
-          <label for="t{i}" style="font-size:15px;font-weight:500;cursor:pointer;flex:1">{t}</label>
-        </div>"""
-        for i, t in enumerate(topics)
-    )
-
-    body = f"""
-    <div style="max-width:560px;margin:0 auto">
-      <div class="panel">
-        <div class="panel-header">
-          <div class="panel-title">GPT 주제 추천</div>
-          <span class="badge badge-pending">오늘의 AI 트렌드</span>
-        </div>
-        <p class="panel-sub" style="margin-bottom:18px">원하는 주제를 선택해서 큐에 추가하세요.</p>
-        <form method="post" action="/queue/suggest/add">
-          {cards}
-          <div style="display:flex;gap:10px;margin-top:20px">
-            <button type="submit" class="btn btn-primary" style="flex:1">선택한 주제 큐에 추가</button>
-            <a href="/queue/suggest" class="btn btn-secondary" style="flex:1;text-align:center;text-decoration:none">다시 추천받기</a>
-          </div>
-        </form>
-      </div>
-      <div style="text-align:center;margin-top:12px">
-        <a href="/queue" style="color:var(--muted);font-size:13px">← 큐 관리로 돌아가기</a>
-      </div>
-    </div>"""
-    return _page("GPT 주제 추천", "/queue", body)
+    return redirect(url_for(
+        "queue_page",
+        err="GPT 추천 주제는 검증된 출처 evidence가 없어 Queue V2 등록을 차단합니다.",
+    ))
 
 
 @app.route("/queue/suggest/add", methods=["POST"])
 def queue_suggest_add():
-    from src.db import enqueue
-    topics = request.form.getlist("topics")
-    if not topics:
-        return redirect(url_for("queue_suggest"))
-    for t in topics:
-        if t.strip():
-            enqueue(topic=t.strip())
-    return redirect(url_for("queue_page", msg=f"{len(topics)}개 주제가 큐에 추가됐습니다"))
+    return redirect(url_for(
+        "queue_page",
+        err="GPT 추천 주제의 레거시 큐 등록 경로가 비활성화되었습니다.",
+    ))
 
 
 # ── /analytics 성과 분석 ──────────────────────────────────
