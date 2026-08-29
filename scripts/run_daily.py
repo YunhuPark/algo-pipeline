@@ -86,6 +86,7 @@ def _is_pipeline_running() -> bool:
 def _try_acquire_lock() -> bool:
     """락파일 원자적 획득 시도. 성공하면 True."""
     import os
+    LOCK_FILE.parent.mkdir(parents=True, exist_ok=True)
     try:
         with open(LOCK_FILE, "x") as f:
             f.write(str(os.getpid()))
