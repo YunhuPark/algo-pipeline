@@ -1,7 +1,10 @@
 import json
-from typing import List, Dict, Optional
+import os
+from typing import Any, Callable, List
+
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_openai import ChatOpenAI
+
 from src.schemas.card_news import Claim, SourceLineage, SemanticCriticResult
 from src.qa.deterministic_verifier import QualityGateError
 
@@ -24,17 +27,31 @@ _CRITIC_SYSTEM_PROMPT = """
 """
 
 class SemanticCritic:
-    def __init__(self, llm=None):
-        # Allow injecting an LLM (e.g. mock for testing)
-        self.llm = llm or ChatOpenAI(model="gpt-4o", temperature=0.0, max_retries=1, request_timeout=15.0)
+    def __init__(self, llm=None, llm_factory: Callable[[], Any] | None = None):
+        self._llm = llm
+        self._llm_factory = llm_factory or self._build_default_llm
         self.prompt = ChatPromptTemplate.from_messages([
             ("system", _CRITIC_SYSTEM_PROMPT),
             ("human", "원문(Evidence):\n{evidence}\n\n주장(Claim):\n{claim}"),
         ])
-        
+
+    @staticmethod
+    def _build_default_llm():
+        return ChatOpenAI(
+            model=os.getenv("LLM_MODEL", "gpt-4o"),
+            temperature=0.0,
+            max_retries=1,
+            request_timeout=15.0,
+            model_kwargs={"response_format": {"type": "json_object"}},
+        )
+
+    def _get_llm(self):
+        if self._llm is None:
+            self._llm = self._llm_factory()
+        return self._llm
+
     def critique_claim(self, claim: Claim, lineage: SourceLineage) -> SemanticCriticResult:
-        # If there's no evidence and it's factual, we should fail it
-        if claim.claim_type in ("factual", "numerical", "attributed_statement") and not claim.evidence_ids:
+        if not claim.evidence_ids:
             return SemanticCriticResult(
                 claim_id=claim.claim_id,
                 verdict="insufficient_evidence",
@@ -44,16 +61,33 @@ class SemanticCritic:
             )
             
         evidence_map = {ev.evidence_id: ev for ev in lineage.evidence_passages}
-        evidence_text = "\n".join([evidence_map[ev_id].text for ev_id in claim.evidence_ids if ev_id in evidence_map])
+        unknown_ids = [ev_id for ev_id in claim.evidence_ids if ev_id not in evidence_map]
+        if unknown_ids:
+            raise QualityGateError(
+                "EVIDENCE_ID_UNKNOWN",
+                f"Semantic critic received unknown evidence IDs: {unknown_ids}",
+                claim.claim_id,
+            )
+        evidence_text = "\n".join(evidence_map[ev_id].text for ev_id in claim.evidence_ids)
         
         try:
-            chain = self.prompt | self.llm
+            chain = self.prompt | self._get_llm()
             response = chain.invoke({"evidence": evidence_text, "claim": claim.claim_text})
             
             # OpenAI sometimes wraps json in markdown
-            content = response.content.strip()
-            if content.startswith("```json"):
-                content = content[7:-3].strip()
+            content = getattr(response, "content", None)
+            if not isinstance(content, str) or not content.strip():
+                raise ValueError("Semantic critic returned empty or non-text content")
+            content = content.strip()
+            if content.startswith("```"):
+                lines = content.splitlines()
+                if (
+                    len(lines) < 3
+                    or lines[-1].strip() != "```"
+                    or lines[0].strip().lower() not in {"```", "```json"}
+                ):
+                    raise ValueError("Semantic critic returned an invalid Markdown fence")
+                content = "\n".join(lines[1:-1]).strip()
             
             data = json.loads(content)
             
@@ -88,11 +122,15 @@ def run_semantic_critic(claims: List[Claim], lineage: SourceLineage, llm=None) -
     Run the semantic critic on all verified claims.
     If a claim is not supported, raises QualityGateError.
     """
-    critic = SemanticCritic(llm=llm)
+    if not claims:
+        raise QualityGateError("CLAIMS_EMPTY", "Semantic critic requires at least one claim.")
+
     for claim in claims:
         if claim.verification_status != "verified":
             raise QualityGateError("UNVERIFIED_CLAIM_PASSED_TO_CRITIC", "Deterministic verifier failed or skipped, cannot run critic.", claim.claim_id)
-            
+
+    critic = SemanticCritic(llm=llm)
+    for claim in claims:
         res = critic.critique_claim(claim, lineage)
         if res.verdict != "supported":
             code = "CLAIM_CONTRADICTED" if res.verdict == "contradicted" else "CLAIM_INSUFFICIENT_EVIDENCE"

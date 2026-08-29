@@ -107,6 +107,7 @@ def pipeline_seams(tmp_path, monkeypatch):
          patch("src.agents.publisher.get_post_permalink", return_value="https://instagram.test/p/123"), \
          patch("subprocess.run"):
         creator.return_value.run.return_value = script
+        creator.return_value.last_fact_check_report = fact_report
         yield script, out_dir
 
 def test_pipeline_metadata_and_folder_name(mock_db, pipeline_seams):

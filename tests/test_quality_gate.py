@@ -59,6 +59,59 @@ def test_legacy_lineage_fails(mock_lineage):
         DeterministicVerifier.verify_claims([], mock_lineage)
     assert exc.value.error_code == "LEGACY_LINEAGE_UNVERIFIED"
 
+
+def test_empty_claims_fail_closed(mock_lineage):
+    with pytest.raises(QualityGateError) as exc:
+        DeterministicVerifier.verify_claims([], mock_lineage)
+    assert exc.value.error_code == "CLAIMS_EMPTY"
+
+
+def test_duplicate_claim_ids_fail_closed(mock_lineage):
+    claims = [
+        Claim(
+            claim_id="duplicate",
+            claim_text=text,
+            claim_type="factual",
+            evidence_ids=["e1"],
+        )
+        for text in ("첫 번째 주장", "두 번째 주장")
+    ]
+    with pytest.raises(QualityGateError) as exc:
+        DeterministicVerifier.verify_claims(claims, mock_lineage)
+    assert exc.value.error_code == "CLAIM_ID_DUPLICATE"
+
+
+def test_numerical_claim_requires_normalized_numbers(mock_lineage):
+    claim = Claim(
+        claim_id="c-number",
+        claim_text="3개 기업이 참여했다.",
+        claim_type="numerical",
+        evidence_ids=["e3"],
+    )
+    with pytest.raises(QualityGateError) as exc:
+        DeterministicVerifier.verify_claims([claim], mock_lineage)
+    assert exc.value.error_code == "NUMBERS_MISSING"
+
+
+def test_cta_must_be_last_and_evidence_bound(mock_lineage):
+    claims = [
+        Claim(
+            claim_id="cta",
+            claim_text="원문을 확인해 보세요.",
+            claim_type="cta",
+            evidence_ids=["e1"],
+        ),
+        Claim(
+            claim_id="fact",
+            claim_text="OpenAI는 새로운 모델을 발표했다.",
+            claim_type="factual",
+            evidence_ids=["e1"],
+        ),
+    ]
+    with pytest.raises(QualityGateError) as exc:
+        DeterministicVerifier.verify_claims(claims, mock_lineage)
+    assert exc.value.error_code == "CTA_ORDER_INVALID"
+
 def test_claude_hallucination(mock_lineage):
     claim = Claim(
         claim_id="c1",
@@ -70,6 +123,20 @@ def test_claude_hallucination(mock_lineage):
     with pytest.raises(QualityGateError) as exc:
         DeterministicVerifier.verify_claims([claim], mock_lineage)
     assert exc.value.error_code == "ENTITY_UNSUPPORTED"
+
+
+def test_english_entity_with_korean_particle_is_supported(mock_lineage):
+    claim = Claim(
+        claim_id="c-openai",
+        claim_text="OpenAI는 최근 새로운 모델을 발표했다.",
+        claim_type="factual",
+        entities=["OpenAI"],
+        evidence_ids=["e1"],
+    )
+
+    DeterministicVerifier.verify_claims([claim], mock_lineage)
+
+    assert claim.verification_status == "verified"
 
 def test_number_3_vs_13(mock_lineage):
     # 3개 기업 vs 13개 기업

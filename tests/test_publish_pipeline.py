@@ -54,7 +54,7 @@ def mock_pipeline_agents(monkeypatch, tmp_path):
         # content_creator.run()은 CardNewsScript만 반환 (tuple이 아님)
         mock_cc = mock_cc_cls.return_value.run
         mock_cc.return_value = mock_script
-        # fact_checker는 별도 모듈에서 호출
+        mock_cc_cls.return_value.last_fact_check_report = mock_fc
         mock_fc_check.return_value = mock_fc
         
         # image_searcher.get_background_image()는 PIL Image를 반환
@@ -68,12 +68,38 @@ def mock_pipeline_agents(monkeypatch, tmp_path):
         yield {
             "ta": mock_ta,
             "cc": mock_cc,
+            "cc_instance": mock_cc_cls.return_value,
             "is": mock_is,
             "dr": mock_dr,
             "app": mock_app,
             "fc": mock_fc,
+            "fc_check": mock_fc_check,
             "script": mock_script
         }
+
+
+def test_pipeline_does_not_call_deprecated_fact_checker(mock_pipeline_agents):
+    """Claim 기반 검증 후 deprecated fact_checker를 다시 호출하지 않는다."""
+    from src.pipeline import run_pipeline
+
+    result = run_pipeline(topic="Test", publish=False, auto=True)
+
+    assert result.generation_succeeded is True
+    mock_pipeline_agents["fc_check"].assert_not_called()
+
+
+def test_pipeline_fails_closed_without_fact_check_report(mock_pipeline_agents):
+    """ContentCreator가 검증 보고서를 남기지 않으면 렌더·게시 전에 차단한다."""
+    from src.pipeline import run_pipeline
+
+    mock_pipeline_agents["cc_instance"].last_fact_check_report = None
+    with patch("src.pipeline.ig_publisher.publish") as publisher:
+        result = run_pipeline(topic="Test", publish=True, auto=True)
+
+    assert result.generation_succeeded is False
+    assert result.failure_stage == "QUALITY_GATE"
+    assert result.error_code == "FACT_CHECK_REPORT_MISSING"
+    publisher.assert_not_called()
 
 def test_publisher_exception_propagates(mock_pipeline_agents):
     """원격 호출 예외는 재시도 가능한 실패로 추측하지 않고 uncertain으로 보존한다."""
