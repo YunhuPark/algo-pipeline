@@ -83,16 +83,36 @@ class DeterministicVerifier:
         """
         if not lineage.is_verified_ready:
             raise QualityGateError("LEGACY_LINEAGE_UNVERIFIED", "Cannot verify legacy lineage for new generation.")
-            
+        if not lineage.evidence_passages:
+            raise QualityGateError("EVIDENCE_MISSING", "Verified lineage contains no evidence passages.")
+        if not claims:
+            raise QualityGateError("CLAIMS_EMPTY", "At least one claim is required for verification.")
+
+        claim_ids = [claim.claim_id for claim in claims]
+        if len(claim_ids) != len(set(claim_ids)):
+            raise QualityGateError("CLAIM_ID_DUPLICATE", "Claim IDs must be unique.")
+
+        cta_indexes = [index for index, claim in enumerate(claims) if claim.claim_type == "cta"]
+        if len(cta_indexes) > 1:
+            raise QualityGateError("CTA_COUNT_INVALID", "At most one CTA claim is allowed.")
+        if cta_indexes and cta_indexes[0] != len(claims) - 1:
+            raise QualityGateError("CTA_ORDER_INVALID", "CTA claim must be the final claim.")
+
         # Map evidence by ID
         evidence_map = {ev.evidence_id: ev for ev in lineage.evidence_passages}
         
         for claim in claims:
             # 1. Verification of evidence constraints
-            if claim.claim_type in ("factual", "numerical", "attributed_statement"):
-                if not claim.evidence_ids:
-                    raise QualityGateError("EVIDENCE_MISSING", f"Claim {claim.claim_id} of type {claim.claim_type} requires evidence_ids.", claim.claim_id)
-                    
+            if not claim.evidence_ids:
+                raise QualityGateError("EVIDENCE_MISSING", f"Claim {claim.claim_id} of type {claim.claim_type} requires evidence_ids.", claim.claim_id)
+
+            if claim.claim_type == "numerical" and not claim.numbers:
+                raise QualityGateError(
+                    "NUMBERS_MISSING",
+                    f"Numerical claim {claim.claim_id} must declare normalized numbers.",
+                    claim.claim_id,
+                )
+
             for ev_id in claim.evidence_ids:
                 if ev_id not in evidence_map:
                     raise QualityGateError("EVIDENCE_ID_UNKNOWN", f"Evidence ID {ev_id} not found in lineage.", claim.claim_id)
@@ -118,9 +138,10 @@ class DeterministicVerifier:
                 allowed_forms = [norm_ent] + ALLOWED_ALIASES.get(norm_ent, [])
                 found = False
                 for form in allowed_forms:
-                    # Token boundary matching to avoid partial match (e.g. "AI" in "OpenAI", "Meta" in "Metadata")
-                    pattern = r'(?:\b|_)' + re.escape(form) + r'(?:\b|_)'
-                    # For Korean, boundary \b might not work perfectly without spaces, so we fallback to naive inclusion for hangul, but strict for english
+                    # ASCII boundaries block partial matches ("Meta" in "metadata")
+                    # while allowing Korean particles attached to an English entity
+                    # ("OpenAI는", "Google이").
+                    pattern = r'(?<![a-z0-9])' + re.escape(form) + r'(?![a-z0-9])'
                     if re.search(r'[a-zA-Z]', form):
                         if re.search(pattern, norm_evidence_text):
                             found = True
