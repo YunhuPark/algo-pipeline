@@ -42,6 +42,14 @@ def test_enqueue_v2_and_dequeue(queue_db):
     assert row["lineage_hash"] == metadata().lineage_hash()
 
 
+def test_queue_metadata_builds_verified_source_lineage():
+    lineage = metadata().to_source_lineage(CollectionMethod.NEWS_COLLECTOR)
+    assert lineage.is_verified_ready is True
+    assert lineage.collection_method == "NEWS_COLLECTOR"
+    assert lineage.evidence_passages[0].article_id == lineage.article_id
+    assert lineage.evidence_passages[0].content_hash == lineage.content_hash
+
+
 def test_legacy_quarantine_keeps_status_and_retry(queue_db):
     with sqlite3.connect(queue_db) as conn:
         row_id = conn.execute("INSERT INTO queue(topic) VALUES ('legacy')").lastrowid
@@ -112,7 +120,9 @@ def _result(*, succeeded=False, post_id=None, state=PublishAttemptState.NOT_ATTE
 def test_attempt_is_committed_before_remote_and_id_is_committed_before_published(queue_db):
     row_id = db.enqueue_v2(metadata(), CollectionMethod.NEWS_COLLECTOR)
 
-    def simulate(topic, context, angle, publish, attempt_id, before_publish, on_remote_id):
+    def simulate(topic, context, angle, publish, attempt_id, before_publish, on_remote_id, source_lineage):
+        assert source_lineage.is_verified_ready is True
+        assert source_lineage.collection_method == "NEWS_COLLECTOR"
         before_publish(attempt_id)
         with sqlite3.connect(queue_db) as conn:
             conn.row_factory = sqlite3.Row
@@ -142,7 +152,8 @@ def test_attempt_is_committed_before_remote_and_id_is_committed_before_published
 def test_uncertain_remote_result_is_never_retried(queue_db, error):
     row_id = db.enqueue_v2(metadata(), CollectionMethod.NEWS_COLLECTOR)
 
-    def simulate(topic, context, angle, publish, attempt_id, before_publish, on_remote_id):
+    def simulate(topic, context, angle, publish, attempt_id, before_publish, on_remote_id, source_lineage):
+        assert source_lineage.is_verified_ready is True
         before_publish(attempt_id)
         return _result(state=PublishAttemptState.UNKNOWN, error=error)
 

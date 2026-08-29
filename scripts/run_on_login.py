@@ -183,8 +183,8 @@ def _try_acquire_lock() -> bool:
 
 def startup() -> None:
     """초기 기동 (DB 초기화) 및 파이프라인 실행."""
-    from src.db import init_db
-    init_db()
+    from src.queue_runtime import prepare_queue_runtime
+    prepare_queue_runtime()
     
     if already_posted_today():
         _log("오늘 이미 게시 완료 → 종료")
@@ -198,8 +198,14 @@ def startup() -> None:
             _log("큐에서 발행")
             cmd = [sys.executable, str(ROOT / "main.py"), "--queue-publish", "--publish"]
         else:
-            _log("GPT 주제 선택 후 생성")
-            cmd = [sys.executable, str(ROOT / "scripts" / "pick_topic.py")]
+            _log("검증된 뉴스 수집 후 Queue V2 등록")
+            queued = subprocess.run(
+                [sys.executable, str(ROOT / "main.py"), "--queue", "1"],
+                cwd=str(ROOT),
+            )
+            if queued.returncode != 0:
+                raise RuntimeError("Queue V2 뉴스 등록 실패")
+            cmd = [sys.executable, str(ROOT / "main.py"), "--queue-publish", "--publish"]
 
         result = subprocess.run(cmd, cwd=str(ROOT))
     finally:

@@ -97,6 +97,9 @@ def _try_acquire_lock() -> bool:
 def main() -> None:
     _log("=== 알고 일일 자동화 시작 ===")
 
+    from src.queue_runtime import prepare_queue_runtime
+    prepare_queue_runtime()
+
     # stale 락파일 정리
     _is_pipeline_running()
 
@@ -108,52 +111,21 @@ def main() -> None:
             returncode = 1
         result = MockResult()
         
-        if _queue_pending():
-            _log("큐에서 발행")
-            proc = subprocess.run(
-                [sys.executable, str(ROOT / "main.py"), "--queue-publish"],
+        if not _queue_pending():
+            _log("큐 비어있음 — 검증된 뉴스 수집 후 Queue V2 등록")
+            queued = subprocess.run(
+                [sys.executable, str(ROOT / "main.py"), "--queue", "1"],
                 cwd=str(ROOT),
             )
-            topic = "큐 항목"
-            result.returncode = proc.returncode
-        else:
-            _log("큐 비어있음 — 실제 뉴스 수집 후 실행")
-            from src.agents.news_collector import collect_and_select
-            from src.schemas.card_news import SourceLineage
-            from src.pipeline import run_pipeline
-            
-            try:
-                news = collect_and_select()
-                topic = news.topic
-                _log(f"선택된 주제: {topic}")
-                
-                source_title = news.source_items[0].title if news.source_items else topic
-                source_url = news.source_items[0].url if news.source_items else ""
-                
-                lineage = SourceLineage(
-                    topic=topic,
-                    source_title=source_title,
-                    source_url=source_url,
-                    context=news.context,
-                )
-                
-                res = run_pipeline(
-                    topic=topic,
-                    publish=True,
-                    source_lineage=lineage,
-                    auto=True,
-                )
-                
-                if res and res.generation_succeeded:
-                    # 게시 실패 시에도 exit code는 1로 처리하되, 실패 원인을 로그로 남김.
-                    result.returncode = 0 if res.publish_succeeded else 1
-                else:
-                    result.returncode = 1
-                    
-            except Exception as e:
-                _log(f"뉴스 수집/선택 실패: {e} (fail-closed)")
-                result.returncode = 1
-                topic = "알 수 없는 주제"
+            if queued.returncode != 0:
+                raise RuntimeError("Queue V2 뉴스 등록 실패")
+        _log("Queue V2에서 발행")
+        proc = subprocess.run(
+            [sys.executable, str(ROOT / "main.py"), "--queue-publish", "--publish"],
+            cwd=str(ROOT),
+        )
+        topic = "큐 항목"
+        result.returncode = proc.returncode
                 
     finally:
         LOCK_FILE.unlink(missing_ok=True)

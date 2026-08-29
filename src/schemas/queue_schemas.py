@@ -58,3 +58,30 @@ class QueueMetadataV2(BaseModel):
     def lineage_hash(self) -> str:
         return hashlib.sha256(self.canonical_json().encode("utf-8")).hexdigest()
 
+    def to_source_lineage(self, collection_method: CollectionMethod):
+        """Build the verified pipeline lineage from the attested queue payload."""
+        from .card_news import EvidencePassage, SourceLineage
+
+        content_hash = hashlib.sha256(self.context.encode("utf-8")).hexdigest()
+        article_id = hashlib.sha256(
+            f"{self.source_url}\n{content_hash}".encode("utf-8")
+        ).hexdigest()
+        evidence = EvidencePassage(
+            evidence_id=f"ev-{content_hash[:16]}",
+            article_id=article_id,
+            text=self.context,
+            source_url=self.source_url,
+            content_hash=content_hash,
+        )
+        return SourceLineage(
+            schema_version="2.0",
+            topic=self.topic,
+            source_title=self.source_title,
+            source_url=self.source_url,
+            context=self.context,
+            article_id=article_id,
+            content_hash=content_hash,
+            collection_method=collection_method.value,
+            source_material_level="partial_article",
+            evidence_passages=[evidence],
+        )

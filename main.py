@@ -23,7 +23,6 @@
  큐 관리
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   python main.py --queue 5             # 뉴스 5개 미리 생성해서 큐에 쌓기
-  python main.py --queue-add "AI 트렌드" # 단일 주제 큐에 추가
   python main.py --queue-publish       # 큐 맨 앞 항목 즉시 발행
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -75,7 +74,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--dry-run",        action="store_true", help="시뮬레이션 (실제 업로드 안함)")
     # 큐
     p.add_argument("--queue",          type=int, metavar="N", help="N개 미리 생성해서 큐에 쌓기")
-    p.add_argument("--queue-add",      metavar="TOPIC",       help="단일 주제 큐에 추가")
+    p.add_argument("--queue-add",      metavar="TOPIC",       help="비활성화: 검증된 출처 없는 직접 등록 차단")
     p.add_argument("--queue-publish",  action="store_true",   help="큐 다음 항목 즉시 발행")
     # 분석 & 관리
     p.add_argument("--dashboard",      action="store_true",   help="웹 대시보드 시작")
@@ -111,6 +110,8 @@ def main() -> None:
 
     # ── 웹 대시보드 ───────────────────────────────────────
     if args.dashboard:
+        from src.queue_runtime import prepare_queue_runtime
+        prepare_queue_runtime()
         port = 5001
         print(f"웹 대시보드 시작: http://localhost:{port}")
         from src.dashboard.app import app
@@ -137,99 +138,44 @@ def main() -> None:
         return
 
     # ── 큐 관리 ───────────────────────────────────────────
-    if args.queue:
+    if args.queue is not None:
+        if args.queue < 1:
+            print("--queue는 1 이상의 정수여야 합니다.")
+            sys.exit(2)
+        from src.queue_runtime import prepare_queue_runtime
+        prepare_queue_runtime()
         from src.agents.content_queue import bulk_generate, get_status
         print(f"\n큐에 {args.queue}개 자동 생성 중...")
-        bulk_generate(count=args.queue, auto_news=True)
+        ids = bulk_generate(count=args.queue, auto_news=True)
+        if not ids:
+            print("검증된 뉴스가 없어 Queue V2 등록에 실패했습니다.")
+            sys.exit(1)
         st = get_status()
         print(f"큐 현황: 대기 {st['pending']}개 / 발행됨 {st['published']}개")
         return
 
     if args.queue_add:
-        from src.agents.content_queue import add_topic, get_status
-        add_topic(args.queue_add)
-        print(f"큐에 추가됨: '{args.queue_add}'")
-        st = get_status()
-        print(f"큐 현황: 대기 {st['pending']}개")
-        return
+        print("Queue V2는 검증된 출처 evidence가 필요해 --queue-add를 차단합니다.")
+        sys.exit(2)
 
     if args.queue_publish:
+        from src.queue_runtime import prepare_queue_runtime
+        prepare_queue_runtime()
         from src.agents.content_queue import publish_next
-        publish_next(publish_to_ig=args.publish and not args.dry_run)
+        result = publish_next(publish_to_ig=args.publish and not args.dry_run)
+        if result is None:
+            sys.exit(1)
         return
 
     # ── 기존 폴더 바로 업로드 ────────────────────────────
     if args.upload_dir:
-        import json
-        from pathlib import Path
-        from src.agents import publisher as ig_publisher
-
-        root = Path(__file__).parent
-        folder = root / "output" / args.upload_dir
-        if not folder.exists():
-            # output/ prefix 없이 절대경로로도 허용
-            folder = Path(args.upload_dir)
-        if not folder.exists():
-            print(f"폴더를 찾을 수 없습니다: {args.upload_dir}")
-            sys.exit(1)
-
-        script_path = folder / "script.json"
-        if not script_path.exists():
-            print(f"script.json 없음: {script_path}")
-            sys.exit(1)
-
-        script_data = json.loads(script_path.read_text(encoding="utf-8"))
-        hook = script_data.get("hook", "")
-        hashtags = script_data.get("hashtags", [])
-        image_paths = sorted(folder.glob("card_*.png"))
-
-        if not image_paths:
-            print("업로드할 카드 이미지(card_*.png)가 없습니다.")
-            sys.exit(1)
-
-        print(f"\n[upload-dir] {folder.name}")
-        print(f"  이미지 {len(image_paths)}장  |  hook: {hook[:40]}")
-        print("  Instagram 업로드 중...")
-
-        try:
-            post_id = ig_publisher.publish(
-                image_paths=image_paths,
-                hook=hook,
-                hashtags=hashtags,
-                base_url=args.ig_url,
-            )
-            from src.agents.publisher import get_post_permalink
-            permalink = get_post_permalink(post_id)
-            print(f"  완료! → {permalink or post_id}")
-
-            # DB 저장 (대시보드 반영)
-            from src.db import insert_post
-            from datetime import datetime
-            insert_post(
-                platform="instagram",
-                topic=script_data.get("topic", folder.name),
-                post_id=post_id,
-                angle="",
-                hook=hook,
-                hashtags=hashtags,
-                image_dir=str(folder),
-                posted_at=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            )
-
-            # meta.json 업데이트
-            meta_path = folder / "meta.json"
-            if meta_path.exists():
-                meta = json.loads(meta_path.read_text(encoding="utf-8"))
-                meta["ig_post_id"] = post_id
-                meta["permalink"] = permalink
-                meta_path.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
-        except Exception as e:
-            print(f"  업로드 실패: {e}")
-            sys.exit(1)
-        return
+        print("--upload-dir 직접 발행은 durable publish attempt를 우회하므로 차단합니다.")
+        sys.exit(2)
 
     # ── 에이전트 루프 ─────────────────────────────────────
     if args.agent:
+        from src.queue_runtime import prepare_queue_runtime
+        prepare_queue_runtime()
         if args.dry_run:   os.environ["AGENT_DRY_RUN"]    = "true"
         if not args.publish: os.environ["AGENT_AUTO_UPLOAD"] = "false"
         if args.threads:   os.environ["AGENT_THREADS"]    = "true"
@@ -241,26 +187,16 @@ def main() -> None:
 
     # ── 자동 모드 (1회) ───────────────────────────────────
     if args.auto:
-        from src.agents.news_collector import collect_and_select
-        from src.pipeline import run_pipeline
-        print("\n[알고 Auto] 뉴스 수집 중...")
-        sel = collect_and_select()
-        print(f"선택 주제: {sel.topic}\n이유: {sel.reason}")
-        res = run_pipeline(
-            topic=sel.topic, trend_context=sel.context,
-            num_cards=args.cards, handle=args.handle,
-            force_dalle=args.dalle, force_refresh=args.refresh,
-            publish=args.publish and not args.dry_run,
-            publish_threads=args.threads and not args.dry_run,
-            publish_blog=args.blog and not args.dry_run,
-            ig_base_url=args.ig_url,
-            select_angle=args.angle,
-            human_approval=args.approve or args.publish,
-            template=args.template,
-            fact_check=not args.no_factcheck,
-            make_reels=args.reels,
-        )
-        if res and res.publish_requested and not res.publish_succeeded:
+        from src.queue_runtime import prepare_queue_runtime
+        from src.agents.content_queue import bulk_generate, publish_next
+        prepare_queue_runtime()
+        print("\n[알고 Auto] 검증된 뉴스 수집 → Queue V2 등록 중...")
+        ids = bulk_generate(count=1, auto_news=True)
+        if not ids:
+            print("검증된 뉴스가 없어 큐 등록을 중단합니다.")
+            sys.exit(1)
+        res = publish_next(publish_to_ig=args.publish and not args.dry_run)
+        if res is None:
             sys.exit(1)
         return
 
@@ -272,6 +208,10 @@ def main() -> None:
     else:
         print("주제를 입력하세요.\n  예: python main.py \"AI 트렌드\"\n  또는: python main.py --auto")
         sys.exit(1)
+
+    if args.publish:
+        print("직접 주제 발행은 Queue V2 lineage와 durable attempt를 우회하므로 차단합니다.")
+        sys.exit(2)
 
     from src.pipeline import run_pipeline
     res = run_pipeline(

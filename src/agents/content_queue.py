@@ -152,11 +152,14 @@ def publish_next(publish_to_ig: bool = True) -> dict[str, Any] | None:
     angle_hint = row["angle_hint"] or ""
     image_dir = row["image_dir"] or ""
 
-    error = _validate_queue_row(row)
+    metadata, error = _load_queue_metadata(row)
     if error:
         mark_queue_error(queue_id, error, increment_retry=False, preserve_attempt=True)
         print(f"  [ContentQueue] 게시 차단: {error} (큐 id={queue_id})")
         return None
+    assert metadata is not None
+    collection_method = CollectionMethod(row["collection_method"])
+    source_lineage = metadata.to_source_lineage(collection_method)
 
     attempt_id = str(uuid4()) if publish_to_ig else None
 
@@ -183,7 +186,7 @@ def publish_next(publish_to_ig: bool = True) -> dict[str, Any] | None:
                 print("  [ContentQueue] PNG 없음 — 전체 파이프라인 실행")
                 res = _run_full_pipeline(
                     topic, context, angle_hint, publish_to_ig,
-                    attempt_id, before_publish, on_remote_id,
+                    attempt_id, before_publish, on_remote_id, source_lineage,
                 )
             else:
                 # need to implement a manual publish step for cached images, 
@@ -192,7 +195,7 @@ def publish_next(publish_to_ig: bool = True) -> dict[str, Any] | None:
         else:
             res = _run_full_pipeline(
                 topic, context, angle_hint, publish_to_ig,
-                attempt_id, before_publish, on_remote_id,
+                attempt_id, before_publish, on_remote_id, source_lineage,
             )
 
         if res and hasattr(res, 'image_paths') and res.image_paths:
@@ -241,6 +244,7 @@ def _run_full_pipeline(
     publish_attempt_id: str | None = None,
     before_publish=None,
     on_remote_id=None,
+    source_lineage=None,
 ):
     """파이프라인 실행 헬퍼."""
     from src import pipeline
@@ -257,6 +261,7 @@ def _run_full_pipeline(
         trend_context=trend_context,
         publish=publish,
         auto=True,
+        source_lineage=source_lineage,
         publish_attempt_id=publish_attempt_id,
         before_publish=before_publish,
         on_remote_id=on_remote_id,
@@ -283,30 +288,39 @@ def add_topic(
     raise ValueError("Queue V2는 검증된 출처 evidence가 필수이며 직접 주제 등록을 지원하지 않습니다.")
 
 
-def _validate_queue_row(row: Any) -> str | None:
+def _load_queue_metadata(row: Any) -> tuple[QueueMetadataV2 | None, str | None]:
     import json
     import hashlib
 
     method = row["collection_method"] if "collection_method" in row.keys() else None
     if method == CollectionMethod.LEGACY_UNVERIFIED.value:
-        return "LEGACY_UNSUPPORTED"
+        return None, "LEGACY_UNSUPPORTED"
     if method not in {CollectionMethod.NEWS_COLLECTOR.value, CollectionMethod.MANUAL_VERIFIED.value}:
-        return "UNPUBLISHABLE_METHOD"
+        return None, "UNPUBLISHABLE_METHOD"
     if row["metadata_schema_version"] != 2:
-        return "MISSING_SCHEMA_VERSION"
+        return None, "MISSING_SCHEMA_VERSION"
     try:
         raw = row["metadata_json"]
         data = json.loads(raw)
         metadata = QueueMetadataV2.model_validate(data)
     except Exception:
-        return "JSON_PARSE_ERROR"
+        return None, "JSON_PARSE_ERROR"
     canonical = metadata.canonical_json()
     actual = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
     if actual != row["lineage_hash"]:
-        return "HASH_MISMATCH"
+        return None, "HASH_MISMATCH"
     if metadata.topic != row["topic"] or metadata.context != (row["context"] or ""):
-        return "METHOD_MISMATCH"
-    return None
+        return None, "METHOD_MISMATCH"
+    try:
+        metadata.to_source_lineage(CollectionMethod(method))
+    except Exception:
+        return None, "INVALID_SOURCE_LINEAGE"
+    return metadata, None
+
+
+def _validate_queue_row(row: Any) -> str | None:
+    """Compatibility wrapper for callers that only need the error code."""
+    return _load_queue_metadata(row)[1]
 
 
 def get_status() -> dict[str, Any]:
