@@ -48,3 +48,18 @@ def test_gpt_suggestion_routes_never_enqueue_or_call_openai():
 
 def test_verified_news_route_keeps_v2_bulk_ingestion():
     assert "bulk_generate" in _calls("queue_generate")
+
+
+def test_direct_dashboard_publish_endpoint_fails_closed():
+    from src.dashboard.app import app
+
+    response = app.test_client().post(
+        "/publish_now",
+        json={"dir_name": "legacy-output", "caption": "unsafe"},
+    )
+    payload = response.get_json()
+
+    assert response.status_code == 409
+    assert payload["success"] is False
+    assert payload["error_code"] == "UNSAFE_DIRECT_PUBLISH_BLOCKED"
+    assert "ig_publish" not in _calls("publish_now")
