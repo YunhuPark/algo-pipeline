@@ -1,18 +1,18 @@
 import json
-from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch, MagicMock
 import pytest
 
-from src.schemas.card_news import SourceLineage, CardNewsScript, Slide, Claim
-from src.schemas.content_package import PipelineResult
+from src.schemas.card_news import EvidencePassage, SourceLineage, CardNewsScript, Slide
 
 @pytest.fixture
-def mock_db(tmp_path):
+def mock_db(tmp_path, monkeypatch):
     db_path = tmp_path / "algo.db"
-    with patch("src.db.DB_PATH", db_path, create=True):
-        from src.db import init_db
-        init_db()
-        yield db_path
+    monkeypatch.setenv("ALGO_ENV", "test")
+    monkeypatch.setenv("ALGO_DB_PATH", str(db_path))
+    from src.db import init_db
+    init_db(db_path)
+    yield db_path
 
 @pytest.fixture
 def mock_tracking_db(tmp_path):
@@ -22,88 +22,102 @@ def mock_tracking_db(tmp_path):
         init_tracking_db()
         yield db_path
 
-def test_run_daily_empty_queue_news_success(mock_db, tmp_path):
-    """큐가 비었을 때 실제 선택 기사의 topic/source가 함께 전달됨 & 뉴스가 없으면 파이프라인이 실행되지 않음"""
+def test_run_daily_empty_queue_routes_through_queue_cli(mock_db, tmp_path):
+    """빈 큐 자동화는 Queue V2 등록 후 durable publish CLI만 호출한다."""
+    lock_file = tmp_path / "logs" / "pipeline.lock"
     with patch("scripts.run_daily._queue_pending", return_value=False), \
+         patch("scripts.run_daily._try_acquire_lock", return_value=True), \
+         patch("scripts.run_daily.LOCK_FILE", lock_file), \
          patch("scripts.run_daily._notify"), \
-         patch("src.agents.news_collector.collect_and_select") as mock_collect, \
-         patch("src.pipeline.run_pipeline") as mock_pipeline:
-         
-        from src.agents.news_collector import NewsSelection, NewsItem
-        mock_collect.return_value = NewsSelection(
-            topic="Test Topic",
-            reason="Test",
-            context="Test Context",
-            source_items=[NewsItem(title="Test Source Title", url="http://test.com", source="Test Source", summary="Test Summary")]
-        )
-        mock_pipeline.return_value = PipelineResult(
-            image_paths=[], generation_succeeded=True, publish_requested=True,
-            publish_succeeded=True, ig_post_id="123", permalink="", failure_stage=None, error_code=None
-        )
-        
+         patch("src.queue_runtime.prepare_queue_runtime"), \
+         patch("scripts.run_daily.subprocess.run", side_effect=[
+             SimpleNamespace(returncode=0),
+             SimpleNamespace(returncode=0),
+         ]) as run:
         from scripts.run_daily import main
         with patch("sys.exit") as mock_exit:
             main()
-            
+
         mock_exit.assert_called_with(0)
-        mock_pipeline.assert_called_once()
-        kwargs = mock_pipeline.call_args.kwargs
-        assert kwargs["topic"] == "Test Topic"
-        assert kwargs["source_lineage"].source_title == "Test Source Title"
-        assert kwargs["source_lineage"].source_url == "http://test.com"
-        assert kwargs["source_lineage"].context == "Test Context"
+        assert run.call_args_list[0].args[0][-2:] == ["--queue", "1"]
+        assert run.call_args_list[1].args[0][-2:] == ["--queue-publish", "--publish"]
 
-def test_run_daily_news_collection_failure(mock_db):
-    """뉴스 수집 실패 시 가상 topic이 생성되지 않음 (fail-closed)"""
+def test_run_daily_queue_ingestion_failure_is_fail_closed(mock_db, tmp_path):
+    """Queue V2 등록 실패 시 publisher CLI를 호출하지 않는다."""
+    lock_file = tmp_path / "logs" / "pipeline.lock"
     with patch("scripts.run_daily._queue_pending", return_value=False), \
+         patch("scripts.run_daily._try_acquire_lock", return_value=True), \
+         patch("scripts.run_daily.LOCK_FILE", lock_file), \
          patch("scripts.run_daily._notify"), \
-         patch("src.agents.news_collector.collect_and_select", side_effect=Exception("API Error")), \
-         patch("src.pipeline.run_pipeline") as mock_pipeline:
-         
+         patch("src.queue_runtime.prepare_queue_runtime"), \
+         patch("scripts.run_daily.subprocess.run", return_value=SimpleNamespace(returncode=1)) as run:
         from scripts.run_daily import main
-        with patch("sys.exit") as mock_exit:
+        with pytest.raises(RuntimeError, match="Queue V2 뉴스 등록 실패"):
             main()
-            
-        mock_exit.assert_called_with(1)
-        mock_pipeline.assert_not_called()
 
-def test_pipeline_metadata_and_folder_name(mock_db, tmp_path):
+        run.assert_called_once()
+
+
+def _lineage(topic="Original Input Topic"):
+    evidence = EvidencePassage(
+        evidence_id="ev-1",
+        article_id="art-123",
+        text="Test Context",
+        source_url="http://test.com",
+        content_hash="content-hash",
+    )
+    return SourceLineage(
+        schema_version="2.0",
+        topic=topic,
+        source_title="Test Source Title",
+        source_url="http://test.com",
+        context="Test Context",
+        article_id="art-123",
+        content_hash="content-hash",
+        collection_method="NEWS_COLLECTOR",
+        source_material_level="partial_article",
+        evidence_passages=[evidence],
+    )
+
+
+@pytest.fixture
+def pipeline_seams(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    script = CardNewsScript(
+        topic="Refined Script Topic",
+        hook="Test Hook",
+        slides=[Slide(slide_number=1, slide_type="cover", title="T", body="B")],
+        hashtags=["#test"],
+    )
+    out_dir = tmp_path / "20260728_1200_Refined_Script_Topic"
+    out_dir.mkdir(parents=True)
+    background = MagicMock()
+    background.size = (1080, 1080)
+    fact_report = SimpleNamespace(
+        confirmed=1,
+        disputed=0,
+        unverifiable=0,
+        flagged_items=[],
+    )
+    with patch("src.pipeline.content_creator.ContentCreator") as creator, \
+         patch("src.pipeline.image_searcher.get_background_image", return_value=background), \
+         patch("src.pipeline.design_renderer.render_card_set", return_value=[out_dir / "card_01_cover.png"]), \
+         patch("src.agents.fact_checker.check_script", return_value=fact_report), \
+         patch("src.agents.youtube_fetcher.fetch_video_candidates", return_value=[]), \
+         patch("src.agents.publisher.get_post_permalink", return_value="https://instagram.test/p/123"), \
+         patch("subprocess.run"):
+        creator.return_value.run.return_value = script
+        yield script, out_dir
+
+def test_pipeline_metadata_and_folder_name(mock_db, pipeline_seams):
     """입력 topic과 script.topic이 다를 때 metadata와 DB에는 script.topic 저장, output 폴더명과 일치"""
     from src.pipeline import run_pipeline
-    with patch("src.agents.content_creator.ContentCreator.run") as mock_cc_run, \
-         patch("src.agents.publisher.publish", return_value="test_id_123"), \
-         patch("src.agents.design_renderer.render_card_set") as mock_render, \
-         patch("src.qa.content_quality_gate.validate_content_quality") as mock_qg, \
-         patch("src.agents.youtube_fetcher.fetch_video_candidates", return_value=[]), \
-         patch("src.config.OUTPUT_DIR", tmp_path):
-         
-        # mock content creator to return a different topic
-        script = CardNewsScript(
-            topic="Refined Script Topic",
-            hook="Test Hook",
-            slides=[Slide(slide_number=1, slide_type="cover", title="T", body="B", emoji="", accent="")],
-            hashtags=["#test"]
-        )
-        mock_cc_run.return_value = script
-        
-        # mock design renderer to save files in a specific dir based on script.topic
-        out_dir = tmp_path / "20260728_1200_Refined_Script_Topic"
-        out_dir.mkdir(parents=True)
-        mock_render.return_value = [out_dir / "card_01_cover.png"]
-        
-        lineage = MagicMock(spec=SourceLineage)
-        lineage.topic = "Original Input Topic"
-        lineage.source_title = "Test Source Title"
-        lineage.source_url = "http://test.com"
-        lineage.context = "Test Context"
-        lineage.article_id = "art_123"
-        lineage.fact_checked = True
-        lineage.evidence_passages = []
-        
+    _, out_dir = pipeline_seams
+    with patch("src.pipeline.ig_publisher.publish", return_value="test_id_123"):
         res = run_pipeline(
             topic="Original Input Topic",
             publish=True,
-            source_lineage=lineage,
+            source_lineage=_lineage(),
             auto=True
         )
         
@@ -124,37 +138,17 @@ def test_pipeline_metadata_and_folder_name(mock_db, tmp_path):
         assert meta_data["topic"] == "Refined Script Topic"
         assert meta_data["source_title"] == "Test Source Title"
         assert meta_data["source_url"] == "http://test.com"
-        assert meta_data["article_id"] == "art_123"
+        assert meta_data["article_id"] == "art-123"
 
-def test_pipeline_quality_gate_failure(mock_db, tmp_path):
+def test_pipeline_quality_gate_failure(mock_db, pipeline_seams):
     """기존 Quality Gate 실패 시 publisher 미호출 확인"""
     from src.pipeline import run_pipeline
-    with patch("src.agents.content_creator.run") as mock_cc_run, \
-         patch("src.agents.publisher.publish") as mock_publish, \
-         patch("src.agents.design_renderer.render_card_set") as mock_render, \
-         patch("src.qa.content_quality_gate.validate_content_quality", side_effect=Exception("QG Error")), \
-         patch("src.agents.youtube_fetcher.fetch_video_candidates", return_value=[]), \
-         patch("src.config.OUTPUT_DIR", tmp_path):
-         
-        script = CardNewsScript(
-            topic="QG Fail Topic", hook="Hook",
-            slides=[Slide(slide_number=1, slide_type="cover", title="T", body="B", emoji="", accent="")],
-            hashtags=["#test"]
-        )
-        mock_cc_run.return_value = script
-        
-        out_dir = tmp_path / "QG_FAIL_DIR"
-        out_dir.mkdir(parents=True)
-        mock_render.return_value = [out_dir / "card_01_cover.png"]
-        
-        lineage = SourceLineage(
-            topic="Input", source_title="S", source_url="U", context="C"
-        )
-        
+    with patch("src.pipeline.ig_publisher.publish") as mock_publish, \
+         patch("src.qa.content_quality_gate.validate_content_quality", side_effect=Exception("QG Error")):
         res = run_pipeline(
             topic="Input",
             publish=True,
-            source_lineage=lineage,
+            source_lineage=_lineage("Input"),
             auto=True
         )
         
