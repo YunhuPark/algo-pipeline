@@ -4,8 +4,10 @@ from unittest.mock import MagicMock, patch
 import pytest
 from pathlib import Path
 from src.schemas.content_package import PipelineResult
-from src.qa.content_quality_gate import validate_content_quality, QualityGateError
+from src.qa.deterministic_verifier import QualityGateError
+from src.qa.publish_quality_gate import validate_publish_quality
 from src.schemas.card_news import TrendReport, TrendResult, CardNewsScript, Slide
+from src.schemas.fact_check import FactCheckReport
 from src.schemas.queue_schemas import CollectionMethod, PublishAttemptState, QueueMetadataV2
 import src.agents.content_queue as cq
 
@@ -41,15 +43,18 @@ def mock_pipeline_agents(monkeypatch, tmp_path):
         
         mock_script = CardNewsScript(
             topic="Test Topic",
-            slides=[Slide(slide_number=1, slide_type="cover", title="Test", body="Test")],
+            slides=[
+                Slide(slide_number=1, slide_type="cover", title="Test", body="Test"),
+                Slide(slide_number=2, slide_type="content", title="Fact", body="Verified fact"),
+                Slide(slide_number=3, slide_type="cta", title="Source", body="Read the source"),
+            ],
             hook="hook",
             hashtags=[]
         )
-        mock_fc = MagicMock()
-        mock_fc.confirmed = 1
-        mock_fc.disputed = 0
-        mock_fc.unverifiable = 0
-        mock_fc.flagged_items = []
+        mock_fc = FactCheckReport(
+            confirmed_claim_ids=["claim-1"],
+            confirmed=1,
+        )
         
         # content_creator.run()은 CardNewsScript만 반환 (tuple이 아님)
         mock_cc = mock_cc_cls.return_value.run
@@ -98,7 +103,7 @@ def test_pipeline_fails_closed_without_fact_check_report(mock_pipeline_agents):
 
     assert result.generation_succeeded is False
     assert result.failure_stage == "QUALITY_GATE"
-    assert result.error_code == "FACT_CHECK_REPORT_MISSING"
+    assert result.error_code == "FACT_CHECK_REPORT_INVALID"
     publisher.assert_not_called()
 
 def test_publisher_exception_propagates(mock_pipeline_agents):
@@ -158,6 +163,19 @@ def _attested_row() -> dict:
         "metadata_json": canonical,
         "lineage_hash": hashlib.sha256(canonical.encode("utf-8")).hexdigest(),
     }
+
+
+def _quality_script() -> CardNewsScript:
+    return CardNewsScript(
+        topic="검증 주제",
+        hook="검증된 훅",
+        slides=[
+            Slide(slide_number=1, slide_type="cover", title="표지", body="표지 본문"),
+            Slide(slide_number=2, slide_type="content", title="근거", body="검증된 본문"),
+            Slide(slide_number=3, slide_type="cta", title="확인", body="원문을 확인하세요"),
+        ],
+        hashtags=["#검증"],
+    )
 
 def test_queue_does_not_mark_failed_as_published():
     """원격 상태가 불확실하면 published 전환 없이 attempt를 보존한다."""
@@ -226,15 +244,25 @@ def test_permalink_failure_distinct_from_publish(mock_pipeline_agents):
 
 def test_quality_gate_disputed_claim():
     """disputed claim 차단"""
-    meta = {"topic": "T", "source_title": "T", "source_url": "http", "fact_disputed": 1}
-    with pytest.raises(QualityGateError, match="Legacy fact checker found disputed or unverifiable claims."):
-        validate_content_quality(meta, None)
+    report = FactCheckReport(
+        confirmed_claim_ids=["claim-1"],
+        confirmed=1,
+        disputed=1,
+    )
+    with pytest.raises(QualityGateError) as exc:
+        validate_publish_quality(report, _quality_script())
+    assert exc.value.error_code == "CLAIM_CONTRADICTED"
 
 def test_quality_gate_unverifiable_claim():
     """중요 unverifiable claim 차단"""
-    meta = {"topic": "T", "source_title": "T", "source_url": "http", "fact_unverifiable": 1}
-    with pytest.raises(QualityGateError, match="Legacy fact checker found disputed or unverifiable claims."):
-        validate_content_quality(meta, None)
+    report = FactCheckReport(
+        confirmed_claim_ids=["claim-1"],
+        confirmed=1,
+        unverifiable=1,
+    )
+    with pytest.raises(QualityGateError) as exc:
+        validate_publish_quality(report, _quality_script())
+    assert exc.value.error_code == "CLAIM_INSUFFICIENT_EVIDENCE"
 
 def test_mock_preflight_error_classification():
     """Mock preflight 오류 분류"""
