@@ -123,3 +123,38 @@ def test_content_creator_rejects_legacy_lineage_before_claim_generation(lineage)
 
     assert exc.value.error_code == "LEGACY_LINEAGE_UNVERIFIED"
     assert generator.calls == 0
+
+
+def test_content_creator_clears_stale_report_before_next_run(lineage):
+    claim = Claim(
+        claim_id="claim-1",
+        claim_text="OpenAI는 새로운 모델을 발표했다.",
+        claim_type="factual",
+        entities=["OpenAI"],
+        evidence_ids=["evidence-1"],
+        source_url=lineage.source_url,
+    )
+    generator = StubClaimGenerator([claim])
+    creator = ContentCreator(
+        brand_persona=MagicMock(),
+        claim_generator=generator,
+        semantic_llm=supported_critic(),
+    )
+
+    creator.run(
+        topic=lineage.topic,
+        trend_report=TrendReport(query=lineage.topic, results=[]),
+        source_lineage=lineage,
+    )
+    assert creator.last_fact_check_report is not None
+
+    generator.claims = []
+    with pytest.raises(QualityGateError) as exc:
+        creator.run(
+            topic=lineage.topic,
+            trend_report=TrendReport(query=lineage.topic, results=[]),
+            source_lineage=lineage,
+        )
+
+    assert exc.value.error_code == "CLAIMS_EMPTY"
+    assert creator.last_fact_check_report is None

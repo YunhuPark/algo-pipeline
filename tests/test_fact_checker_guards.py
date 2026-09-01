@@ -6,7 +6,7 @@ from src.qa import content_quality_gate
 from src.qa.deterministic_verifier import QualityGateError
 from src.qa.publish_quality_gate import validate_publish_quality
 from src.schemas.card_news import CardNewsScript, Slide
-from src.schemas.fact_check import FactCheckReport
+from src.schemas.fact_check import FactCheckItem, FactCheckReport
 
 
 @pytest.fixture
@@ -61,6 +61,35 @@ def test_fact_check_report_requires_auditable_claim_ids():
             confirmed=2,
             confirmed_claim_ids=["duplicate", "duplicate"],
         )
+
+
+def test_fact_check_report_requires_auditable_flagged_items():
+    with pytest.raises(ValidationError):
+        FactCheckReport(
+            confirmed=1,
+            confirmed_claim_ids=["confirmed-1"],
+            disputed=1,
+        )
+
+    with pytest.raises(ValidationError):
+        FactCheckReport(
+            confirmed=1,
+            confirmed_claim_ids=["same-claim"],
+            disputed=1,
+            flagged_items=[
+                FactCheckItem(
+                    claim_id="same-claim",
+                    claim="충돌 주장",
+                    verdict="disputed",
+                    note="원문과 모순",
+                )
+            ],
+        )
+
+
+def test_fact_check_report_forbids_unknown_fields():
+    with pytest.raises(ValidationError):
+        FactCheckReport.model_validate({"schema_version": "2.0", "bypass": True})
 
 
 def test_publish_gate_requires_v2_report_and_verified_claim(script):

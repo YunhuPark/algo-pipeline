@@ -7,7 +7,7 @@ from src.schemas.content_package import PipelineResult
 from src.qa.deterministic_verifier import QualityGateError
 from src.qa.publish_quality_gate import validate_publish_quality
 from src.schemas.card_news import TrendReport, TrendResult, CardNewsScript, Slide
-from src.schemas.fact_check import FactCheckReport
+from src.schemas.fact_check import FactCheckItem, FactCheckReport
 from src.schemas.queue_schemas import CollectionMethod, PublishAttemptState, QueueMetadataV2
 import src.agents.content_queue as cq
 
@@ -248,6 +248,14 @@ def test_quality_gate_disputed_claim():
         confirmed_claim_ids=["claim-1"],
         confirmed=1,
         disputed=1,
+        flagged_items=[
+            FactCheckItem(
+                claim_id="claim-2",
+                claim="원문과 모순된 주장",
+                verdict="disputed",
+                note="원문은 반대 내용을 명시함",
+            )
+        ],
     )
     with pytest.raises(QualityGateError) as exc:
         validate_publish_quality(report, _quality_script())
@@ -259,6 +267,14 @@ def test_quality_gate_unverifiable_claim():
         confirmed_claim_ids=["claim-1"],
         confirmed=1,
         unverifiable=1,
+        flagged_items=[
+            FactCheckItem(
+                claim_id="claim-2",
+                claim="근거가 부족한 주장",
+                verdict="unverifiable",
+                note="연결된 evidence가 없음",
+            )
+        ],
     )
     with pytest.raises(QualityGateError) as exc:
         validate_publish_quality(report, _quality_script())

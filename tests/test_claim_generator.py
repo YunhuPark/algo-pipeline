@@ -106,3 +106,16 @@ def test_claim_generator_rejects_duplicate_ids(lineage):
     with pytest.raises(ClaimGenerationError) as exc:
         generator.generate_claims(lineage)
     assert exc.value.error_code == "CLAIM_ID_DUPLICATE"
+
+
+def test_claim_generator_factory_failure_is_fail_closed(lineage):
+    def fail_factory():
+        raise RuntimeError("provider unavailable")
+
+    generator = ClaimGenerator(llm_factory=fail_factory)
+
+    with pytest.raises(ClaimGenerationError) as exc:
+        generator.generate_claims(lineage)
+
+    assert exc.value.error_code == "CLAIM_GENERATION_FAILED"
+    assert "provider unavailable" not in str(exc.value)

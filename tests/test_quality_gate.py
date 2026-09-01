@@ -316,6 +316,25 @@ def test_semantic_critic_supported_does_not_override(mock_lineage):
     with pytest.raises(QualityGateError):
         run_semantic_critic([claim], mock_lineage, llm=mock_llm)
 
+
+def test_semantic_critic_factory_failure_is_fail_closed(mock_lineage):
+    claim = Claim(
+        claim_id="c1",
+        claim_text="OpenAI는 모델을 발표했다.",
+        claim_type="factual",
+        evidence_ids=["e1"],
+        verification_status="verified",
+    )
+
+    def fail_factory():
+        raise TimeoutError("provider timeout")
+
+    critic = SemanticCritic(llm_factory=fail_factory)
+    with pytest.raises(QualityGateError) as exc:
+        critic.critique_claim(claim, mock_lineage)
+
+    assert exc.value.error_code == "CRITIC_PARSE_ERROR"
+
 # --- SCRIPT ASSEMBLER TESTS ---
 def test_script_assembler(mock_lineage):
     claim = Claim(
