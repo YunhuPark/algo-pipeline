@@ -17,8 +17,8 @@ def test_http_socket_blocked():
         
         try:
             import httpx
-            client = httpx.Client()
-            client.request("GET", "http://example.com")
+            with httpx.Client(trust_env=False) as client:
+                client.request("GET", "http://example.com")
         except Exception as e:
             assert str(e) == "HTTP blocked"
             
