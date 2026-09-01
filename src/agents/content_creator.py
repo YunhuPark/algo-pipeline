@@ -11,11 +11,11 @@ from typing import Optional
 
 from src.schemas.card_news import CardNewsScript, TrendReport, SourceLineage
 from src.persona import load_persona, Persona
-from src.agents.fact_checker import FactCheckReport
 from src.qa.claim_generator import ClaimGenerator
 from src.qa.deterministic_verifier import DeterministicVerifier, QualityGateError
 from src.qa.semantic_critic import run_semantic_critic
 from src.qa.script_assembler import ScriptAssembler
+from src.schemas.fact_check import FactCheckReport
 
 
 def _is_listicle_topic(topic: str) -> bool:
@@ -67,6 +67,7 @@ class ContentCreator:
         run_semantic_critic(claims, source_lineage, llm=self.semantic_llm)
 
         self.last_fact_check_report = FactCheckReport(
+            confirmed_claim_ids=[claim.claim_id for claim in claims],
             confirmed=len(claims),
             disputed=0,
             unverifiable=0,

@@ -314,11 +314,8 @@ def _run_once(
             source_lineage=source_lineage,
         )
         fc_report = cc.last_fact_check_report
-        if fc_report is None:
-            raise QualityGateError(
-                "FACT_CHECK_REPORT_MISSING",
-                "ContentCreator completed without a fact-check report.",
-            )
+        from src.qa.publish_quality_gate import validate_publish_quality
+        validate_publish_quality(fc_report, script)
         print(f"  → {len(script.slides)}장 생성 완료")
     except QualityGateError as e:
         print(f"  ⚠️ Quality Gate 실패 (생성 중): {e.error_code} - {e}")
@@ -628,22 +625,16 @@ def _run_once(
         pass
 
 
-    # ── Quality Gate 검사 ────────────────────────────────
+    # ── Quality Gate 재검사 (publisher 직전 defense-in-depth) ──────
     try:
-        from src.qa.content_quality_gate import validate_content_quality, QualityGateError
-        _src = trend_report.results[0] if trend_report and trend_report.results else None
-        _q_meta = {
-            "topic": topic,
-            "source_title": _src.title if _src else "",
-            "source_url": _src.url if _src else "",
-            "fact_confirmed": fc_report.confirmed if fc_report else 0,
-            "fact_disputed": fc_report.disputed if fc_report else 0,
-            "fact_unverifiable": fc_report.unverifiable if fc_report else 0,
-        }
-        validate_content_quality(_q_meta, script)
+        from src.qa.publish_quality_gate import validate_publish_quality
+        validate_publish_quality(fc_report, script)
+    except QualityGateError as e:
+        print(f"  ⚠️ Quality Gate 실패: {e}")
+        return PipelineResult(image_paths=paths, generation_succeeded=True, publish_requested=publish, publish_succeeded=False, ig_post_id=None, permalink=None, failure_stage="QUALITY_GATE", error_code=e.error_code)
     except Exception as e:
         print(f"  ⚠️ Quality Gate 실패: {e}")
-        return PipelineResult(image_paths=paths, generation_succeeded=True, publish_requested=publish, publish_succeeded=False, ig_post_id=None, permalink=None, failure_stage="QUALITY_GATE", error_code=str(e))
+        return PipelineResult(image_paths=paths, generation_succeeded=True, publish_requested=publish, publish_succeeded=False, ig_post_id=None, permalink=None, failure_stage="QUALITY_GATE", error_code="PUBLISH_QUALITY_GATE_ERROR")
         
     # ── Phase 6: Instagram 업로드 ─────────────────────────
 

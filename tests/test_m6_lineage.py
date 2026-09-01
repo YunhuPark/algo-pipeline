@@ -4,6 +4,7 @@ from unittest.mock import patch, MagicMock
 import pytest
 
 from src.schemas.card_news import EvidencePassage, SourceLineage, CardNewsScript, Slide
+from src.schemas.fact_check import FactCheckReport
 
 @pytest.fixture
 def mock_db(tmp_path, monkeypatch):
@@ -86,14 +87,19 @@ def pipeline_seams(tmp_path, monkeypatch):
     script = CardNewsScript(
         topic="Refined Script Topic",
         hook="Test Hook",
-        slides=[Slide(slide_number=1, slide_type="cover", title="T", body="B")],
+        slides=[
+            Slide(slide_number=1, slide_type="cover", title="T", body="B"),
+            Slide(slide_number=2, slide_type="content", title="Fact", body="Verified fact"),
+            Slide(slide_number=3, slide_type="cta", title="Source", body="Read source"),
+        ],
         hashtags=["#test"],
     )
     out_dir = tmp_path / "20260728_1200_Refined_Script_Topic"
     out_dir.mkdir(parents=True)
     background = MagicMock()
     background.size = (1080, 1080)
-    fact_report = SimpleNamespace(
+    fact_report = FactCheckReport(
+        confirmed_claim_ids=["claim-1"],
         confirmed=1,
         disputed=0,
         unverifiable=0,
@@ -142,18 +148,24 @@ def test_pipeline_metadata_and_folder_name(mock_db, pipeline_seams):
         assert meta_data["article_id"] == "art-123"
 
 def test_pipeline_quality_gate_failure(mock_db, pipeline_seams):
-    """기존 Quality Gate 실패 시 publisher 미호출 확인"""
+    """V2 publish Quality Gate 실패 시 publisher 미호출 확인"""
     from src.pipeline import run_pipeline
+    from src.qa.deterministic_verifier import QualityGateError
     with patch("src.pipeline.ig_publisher.publish") as mock_publish, \
-         patch("src.qa.content_quality_gate.validate_content_quality", side_effect=Exception("QG Error")):
+         patch(
+             "src.qa.publish_quality_gate.validate_publish_quality",
+             side_effect=QualityGateError("QG_ERROR", "QG Error"),
+         ):
         res = run_pipeline(
             topic="Input",
             publish=True,
             source_lineage=_lineage("Input"),
             auto=True
         )
-        
+
         # Publisher should NOT be called
         mock_publish.assert_not_called()
+        assert res.failure_stage == "QUALITY_GATE"
+        assert res.error_code == "QG_ERROR"
         assert res.publish_succeeded is False
         assert res.failure_stage == "QUALITY_GATE"
