@@ -53,6 +53,10 @@ class ContentCreator:
         """
         새로운 증거 기반 Claim 생성 및 검증을 수행한 뒤 ScriptAssembler로 넘깁니다.
         """
+        # A reused creator must never expose a report from an earlier successful run
+        # after the current run fails before a new report is produced.
+        self.last_fact_check_report = None
+
         # 1. Lineage 확인 (신규 생성 시 V2 필수)
         if not source_lineage or not source_lineage.is_verified_ready:
             raise QualityGateError("LEGACY_LINEAGE_UNVERIFIED", "Cannot generate new content with unverified legacy source lineage.")
