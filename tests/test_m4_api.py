@@ -90,10 +90,8 @@ def test_transition_no_origin_fails_csrf():
         "target_state": "APPROVED",
         "reason": "Looking good"
     }, headers={"X-Admin-Token": "test_super_secret"})
-    # Without Origin or Referer, verify_origin allows it? Wait, my auth.py checks `if source:`...
-    # Oh! I should ensure that we REQUIRE origin for POST transitions in production, 
-    # but my code does `if source: check else: pass`.
-    pass # Let's test invalid origin instead
+    assert response.status_code == 403
+    assert "Invalid Origin" in response.json()["detail"]
 
 def test_transition_invalid_origin_csrf():
     response = client.post("/api/experiments/exp_api_1/transitions", json={
@@ -136,9 +134,45 @@ def test_transition_optimistic_concurrency_failure():
     assert "Optimistic concurrency failure" in response.json()["detail"]
 
 def test_idempotency_same_key():
-    # If the user clicks the exact same target state from the exact same version, idempotency should protect it.
-    # We test it implicitly because idempotency is checked by idempotency_key inside `transition_experiment`.
-    pass
+    payload = {
+        "target_state": "APPROVED",
+        "reason": "Reviewed",
+        "idempotency_key": "approve-exp-api-1",
+    }
+    headers = {
+        "X-Admin-Token": "test_super_secret",
+        "Origin": "http://127.0.0.1:8501",
+    }
+
+    first = client.post(
+        "/api/experiments/exp_api_1/transitions", json=payload, headers=headers
+    )
+    second = client.post(
+        "/api/experiments/exp_api_1/transitions", json=payload, headers=headers
+    )
+
+    assert first.status_code == 200
+    assert first.json()["idempotent"] is False
+    assert second.status_code == 200
+    assert second.json()["idempotent"] is True
+    assert second.json()["new_state"] == "APPROVED"
+
+
+def test_transition_rejects_actor_override():
+    response = client.post(
+        "/api/experiments/exp_api_1/transitions",
+        json={
+            "target_state": "APPROVED",
+            "reason": "Looking good",
+            "actor_type": "system",
+        },
+        headers={
+            "X-Admin-Token": "test_super_secret",
+            "Origin": "http://127.0.0.1:8501",
+        },
+    )
+
+    assert response.status_code == 422
 
 def test_get_metrics_insufficient_sample():
     # Without any assignments, it should return insufficient_sample=True

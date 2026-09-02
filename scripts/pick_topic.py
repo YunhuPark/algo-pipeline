@@ -208,16 +208,17 @@ def main() -> None:
     if _already_posted_today():
         print(f"[{datetime.now().strftime('%H:%M:%S')}] 오늘 이미 게시 완료 → 스킵")
         sys.exit(0)
-    print(f"[{datetime.now().strftime('%H:%M:%S')}] GPT 주제 선택 중...")
-    topic = pick_topic()
-    print(f"[{datetime.now().strftime('%H:%M:%S')}] 선택된 주제: {topic}")
-
-    cmd = [
-        sys.executable, str(ROOT / "main.py"),
-        topic,
-        "--publish",
-    ]
-    result = subprocess.run(cmd, cwd=str(ROOT))
+    print("직접 GPT 주제 발행은 비활성화되었습니다. 검증된 뉴스 Queue V2를 사용합니다.")
+    queued = subprocess.run(
+        [sys.executable, str(ROOT / "main.py"), "--queue", "1"],
+        cwd=str(ROOT),
+    )
+    if queued.returncode != 0:
+        sys.exit(queued.returncode)
+    result = subprocess.run(
+        [sys.executable, str(ROOT / "main.py"), "--queue-publish", "--publish"],
+        cwd=str(ROOT),
+    )
     sys.exit(result.returncode)
 
 

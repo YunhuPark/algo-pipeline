@@ -4,7 +4,7 @@
 Phase 0: 앵글 선택      — 5가지 마케팅 앵글 중 선택
 Phase 1: Trend Analyzer — Tavily 트렌드 수집
 Phase 2: Content Creator— GPT-4o 스크립트 생성 + 자기검증
-Phase 2.5: Fact Check   — 핵심 수치/사실 교차 검증 (disputed≥2 → 재생성)
+Phase 2.5: Fact Check   — Claim 기반 결정론·의미 검증 결과 확인
 Phase 3: Image Searcher — Pexels / DALL-E 배경 이미지
 Phase 4: Design Renderer— Pillow 카드 렌더링
 Phase 5: Approval       — 사용자 최종 확인 (터미널/텔레그램)
@@ -17,12 +17,14 @@ import json as _json
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
+from typing import Callable
 
 from src.agents import trend_analyzer, content_creator, image_searcher, design_renderer
 from src.agents import publisher as ig_publisher
 from src.config import NUM_CARDS
 from src.persona import Persona, load_persona, resolve_persona
 from src.schemas.content_package import PipelineResult, PublishError
+from src.schemas.queue_schemas import PublishAttemptState
 
 MAX_RETRY = 6   # 기사 5건 교체 + 팩트체크 재시도를 합산해도 여유있도록
 
@@ -56,6 +58,9 @@ def run_pipeline(
     make_reels: bool = False,     # Reels MP4 생성 여부
     topic_refined: bool = False,  # 이미 정제된 주제 → Phase 0-R 스킵
     source_lineage: "SourceLineage | None" = None, # 큐 또는 일일 뉴스 수집에서 넘어온 뉴스 출처 정보
+    publish_attempt_id: str | None = None,
+    before_publish: Callable[[str], None] | None = None,
+    on_remote_id: Callable[[str, str], None] | None = None,
 ) -> PipelineResult | None:
     p = persona or load_persona()
     # 주제에 맞는 페르소나 자동 적용 (tone/색상/이모지/해시태그)
@@ -92,6 +97,9 @@ def run_pipeline(
             ignored_titles=ignored_titles,
             topic_refined=topic_refined,
             source_lineage=source_lineage,
+            publish_attempt_id=publish_attempt_id,
+            before_publish=before_publish,
+            on_remote_id=on_remote_id,
         )
         if res is not None:
             return res
@@ -132,6 +140,9 @@ def _run_once(
     ignored_titles: set | None = None,
     topic_refined: bool = False,   # True이면 Phase 0-R 스킵 (이미 정제됨)
     source_lineage: "SourceLineage | None" = None,
+    publish_attempt_id: str | None = None,
+    before_publish=None,
+    on_remote_id=None,
 ) -> PipelineResult | None:
     from src.agents.angle_selector import select_angle as pick_angle
     from src.agents.approval import wait_for_approval
@@ -302,6 +313,9 @@ def _run_once(
             disputed_notes=notes_state.get("last", "") if notes_state else "",
             source_lineage=source_lineage,
         )
+        fc_report = cc.last_fact_check_report
+        from src.qa.publish_quality_gate import validate_publish_quality
+        validate_publish_quality(fc_report, script)
         print(f"  → {len(script.slides)}장 생성 완료")
     except QualityGateError as e:
         print(f"  ⚠️ Quality Gate 실패 (생성 중): {e.error_code} - {e}")
@@ -323,47 +337,19 @@ def _run_once(
             script.model_dump_json(indent=2), encoding="utf-8"
         )
 
-    # ── Phase 2.5: Fact Check ────────────────────────────
-    # 리스트형 주제는 GPT 지식 기반 생성 → 기사와 대조 불가 → 팩트체크 스킵
+    # ── Phase 2.5: Fact Check 결과 ────────────────────────
+    # ContentCreator가 Claim 생성 → 결정론 검증 → Semantic Critic을 모두
+    # 통과한 경우에만 여기까지 도달한다. 이 안전 게이트는 비활성화할 수 없다.
     from src.agents.content_creator import _is_listicle_topic as _pipeline_is_listicle
-    _skip_factcheck = _pipeline_is_listicle(topic)
-    if _skip_factcheck:
-        print("\n[2.5] 팩트체크 스킵 (리스트형 주제 — GPT 지식 기반 생성)")
-    fc_report = None
-    disputed_notes = ""
-    if fact_check and not _skip_factcheck:
-        print("\n[2.5] 팩트체크 중...")
-        try:
-            from src.agents.fact_checker import check_script
-            # 상위 3건 원문 합산 → 더 넓은 교차검증
-            source_text = "\n\n".join(
-                r.content for r in trend_report.results[:3]
-            ) if trend_report.results else ""
-
-            fc_report = check_script(script, source_text=source_text)
-            print(f"  → 검증: {fc_report.confirmed}개 확인 / {fc_report.disputed}개 의심 / {fc_report.unverifiable}개 불확실")
-
-            if fc_report.disputed > 0:
-                print("  ⚠️ 의심 항목:")
-                disputed_items = []
-                for item in fc_report.flagged_items:
-                    if item.verdict == "disputed":
-                        print(f"     - {item.claim} ({item.note})")
-                        disputed_items.append(f"• {item.claim[:50]}: {item.note}")
-                disputed_notes = "\n".join(disputed_items)
-
-            # disputed 2건 이상 → 재생성 트리거 (다음 retry에 실패 이유 포함)
-            if fc_report.disputed >= 2:
-                print(f"  ⚠️ disputed {fc_report.disputed}건 — 스크립트 재생성 트리거")
-                if notes_state is not None:
-                    notes_state["last"] = disputed_notes
-                    # 팩트체크 재시도 한도 관리를 위해 현재 기사 제목 기록
-                    notes_state["last_article_title"] = (
-                        trend_report.results[0].title if trend_report.results else ""
-                    )
-                return None  # run_pipeline 재시도 루프로 복귀
-        except Exception as e:
-            print(f"  팩트체크 스킵 (오류: {e})")
+    _is_listicle = _pipeline_is_listicle(topic)
+    if not fact_check:
+        print("\n[2.5] fact_check=False는 호환용이며 안전 게이트는 항상 실행됩니다.")
+    print(
+        "\n[2.5] Claim 검증 완료: "
+        f"{fc_report.confirmed}개 확인 / "
+        f"{fc_report.disputed}개 의심 / "
+        f"{fc_report.unverifiable}개 불확실"
+    )
 
     # ── Phase 2.6: 슬라이드별 영상 자막 검증 매핑 ────────────────
     # 슬라이드 생성 후 각 슬라이드 내용과 영상 자막을 GPT로 대조.
@@ -377,7 +363,7 @@ def _run_once(
         used_video_ids: set[str] = set()         # 이미 배정된 video_id (슬라이드별 중복 방지)
 
         # 리스트형: 기사 후보 풀 무시, 슬라이드 제목 자체로 검색
-        if _skip_factcheck:
+        if _is_listicle:
             assigned_pool: list = []
         else:
             assigned_pool = list(video_candidates)
@@ -386,14 +372,14 @@ def _run_once(
         _main_result = trend_report.results[0] if trend_report.results else None
         _article_title_for_match = (
             f"{_main_result.title} {_main_result.content[:300]}"
-            if _main_result and not _skip_factcheck else ""
+            if _main_result and not _is_listicle else ""
         )
 
         for i, slide in enumerate(content_slides_list):
             print(f"  슬라이드{i+1} '{slide.title[:25]}' 영상 검색·자막 검증 중...")
             available_pool = [c for c in assigned_pool if c.video_id not in used_video_ids]
 
-            if _skip_factcheck:
+            if _is_listicle:
                 # 리스트형: 슬라이드별 개별 검색 + 자막 검증 (12초 간격으로 429 방지)
                 import re as _re_kw
                 _raw_title = _re_kw.sub(r'\[\d+/\d+\]\s*', '', slide.title).strip()
@@ -631,6 +617,7 @@ def _run_once(
     _permalink = None
     failure_stage = None
     error_code = None
+    attempt_state = PublishAttemptState.NOT_ATTEMPTED
 
     # ── Quality Gate: 발행 전 품질 검사 ─────────────────────
     if publish and decision == "upload":
@@ -638,27 +625,40 @@ def _run_once(
         pass
 
 
-    # ── Quality Gate 검사 ────────────────────────────────
+    # ── Quality Gate 재검사 (publisher 직전 defense-in-depth) ──────
     try:
-        from src.qa.content_quality_gate import validate_content_quality, QualityGateError
-        _src = trend_report.results[0] if trend_report and trend_report.results else None
-        _q_meta = {
-            "topic": topic,
-            "source_title": _src.title if _src else "",
-            "source_url": _src.url if _src else "",
-            "fact_confirmed": fc_report.confirmed if fc_report else 0,
-            "fact_disputed": fc_report.disputed if fc_report else 0,
-            "fact_unverifiable": fc_report.unverifiable if fc_report else 0,
-        }
-        validate_content_quality(_q_meta, script)
+        from src.qa.publish_quality_gate import validate_publish_quality
+        validate_publish_quality(fc_report, script)
+    except QualityGateError as e:
+        print(f"  ⚠️ Quality Gate 실패: {e}")
+        return PipelineResult(image_paths=paths, generation_succeeded=True, publish_requested=publish, publish_succeeded=False, ig_post_id=None, permalink=None, failure_stage="QUALITY_GATE", error_code=e.error_code)
     except Exception as e:
         print(f"  ⚠️ Quality Gate 실패: {e}")
-        return PipelineResult(image_paths=paths, generation_succeeded=True, publish_requested=publish, publish_succeeded=False, ig_post_id=None, permalink=None, failure_stage="QUALITY_GATE", error_code=str(e))
+        return PipelineResult(image_paths=paths, generation_succeeded=True, publish_requested=publish, publish_succeeded=False, ig_post_id=None, permalink=None, failure_stage="QUALITY_GATE", error_code="PUBLISH_QUALITY_GATE_ERROR")
         
     # ── Phase 6: Instagram 업로드 ─────────────────────────
 
     if publish and decision == "upload":
         print("\n[6] Instagram 업로드 중...")
+        if publish_attempt_id and before_publish:
+            try:
+                before_publish(publish_attempt_id)
+                attempt_state = PublishAttemptState.STARTED
+            except Exception as e:
+                return PipelineResult(
+                    image_paths=paths,
+                    generation_succeeded=True,
+                    publish_requested=True,
+                    publish_succeeded=False,
+                    ig_post_id=None,
+                    permalink=None,
+                    failure_stage="PRE_PUBLISH_PERSISTENCE",
+                    error_code="LOCAL_ATTEMPT_PERSISTENCE_ERROR",
+                    publish_attempt_state=PublishAttemptState.NOT_ATTEMPTED,
+                    publish_attempt_id=publish_attempt_id,
+                )
+        else:
+            attempt_state = PublishAttemptState.STARTED
         try:
             ig_post_id = ig_publisher.publish(
                 image_paths=paths,
@@ -667,7 +667,18 @@ def _run_once(
                 base_url=ig_base_url,
             )
             if not ig_post_id:
+                attempt_state = PublishAttemptState.UNKNOWN
                 raise PublishError("Empty ig_post_id returned from publisher", "empty_id")
+            attempt_state = PublishAttemptState.REMOTE_ID_CONFIRMED
+            if publish_attempt_id and on_remote_id:
+                try:
+                    on_remote_id(publish_attempt_id, ig_post_id)
+                except Exception:
+                    attempt_state = PublishAttemptState.UNKNOWN
+                    raise PublishError(
+                        "Remote publish succeeded but ig_post_id persistence failed",
+                        "REMOTE_PUBLISH_PERSISTENCE_UNCERTAIN",
+                    )
                 
             try:
                 from src.agents.publisher import get_post_permalink
@@ -689,7 +700,13 @@ def _run_once(
         except Exception as e:
             print(f"  ⚠️ Instagram 업로드 실패: {e}")
             failure_stage = "publisher"
-            error_code = str(e)
+            if attempt_state != PublishAttemptState.NOT_ATTEMPTED:
+                attempt_state = PublishAttemptState.UNKNOWN
+            error_code = (
+                "UNCERTAIN_EMPTY_POST_ID"
+                if "Empty ig_post_id" in str(e)
+                else "REMOTE_PUBLISH_PERSISTENCE_UNCERTAIN"
+            )
 
     # ── meta.json 저장 (algo-site 투명성 기능용) ──────────
     try:
@@ -766,4 +783,4 @@ def _run_once(
     except Exception:
         pass
 
-    return PipelineResult(image_paths=paths, generation_succeeded=True, publish_requested=publish, publish_succeeded=publish_succeeded, ig_post_id=ig_post_id, permalink=_permalink, failure_stage=failure_stage, error_code=error_code)
+    return PipelineResult(image_paths=paths, generation_succeeded=True, publish_requested=publish, publish_succeeded=publish_succeeded, ig_post_id=ig_post_id, permalink=_permalink, failure_stage=failure_stage, error_code=error_code, publish_attempt_state=attempt_state, publish_attempt_id=publish_attempt_id)
