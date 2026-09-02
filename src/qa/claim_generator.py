@@ -1,9 +1,15 @@
 import json
-import uuid
-from typing import List, Dict, Any
+import os
+from typing import Any, Callable, List
+
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_openai import ChatOpenAI
-from src.schemas.card_news import Claim, SourceLineage, Slide, CardNewsScript
+
+from src.qa.deterministic_verifier import QualityGateError
+from src.schemas.card_news import Claim, SourceLineage
+
+
+MAX_GENERATED_CLAIMS = 12
 
 _CLAIM_SYSTEM_PROMPT = """
 당신은 사실 관계를 엄밀하게 분리하는 분석기입니다.
@@ -31,60 +37,139 @@ _CLAIM_SYSTEM_PROMPT = """
 4. CTA 타입은 반드시 마지막에 하나만 넣고, 원문과 관련이 없는 "지금 당장 써보세요", "위험합니다" 식의 과도한 선동을 피하십시오.
 """
 
+class ClaimGenerationError(QualityGateError, ValueError):
+    """Fail-closed claim extraction error compatible with legacy ValueError callers."""
+
+
 class ClaimGenerator:
-    def __init__(self, llm=None):
-        self.llm = llm or ChatOpenAI(
-            model="gpt-4o", 
-            temperature=0.2, 
-            max_retries=1,
-            model_kwargs={"response_format": {"type": "json_object"}}
-        )
+    def __init__(self, llm=None, llm_factory: Callable[[], Any] | None = None):
+        self._llm = llm
+        self._llm_factory = llm_factory or self._build_default_llm
         self.prompt = ChatPromptTemplate.from_messages([
             ("system", _CLAIM_SYSTEM_PROMPT),
             ("human", "원문:\n{evidence}"),
         ])
-        
-    def generate_claims(self, lineage: SourceLineage) -> List[Claim]:
-        if not lineage.evidence_passages:
-            return []
-            
-        evidence_text = ""
-        for ev in lineage.evidence_passages:
-            evidence_text += f"[ID: {ev.evidence_id}]\n{ev.text}\n\n"
-            
-        chain = self.prompt | self.llm
-        response = chain.invoke({"evidence": evidence_text})
-        
-        content = response.content.strip()
-        
-        # Strip markdown formatting robustly
+
+    @staticmethod
+    def _build_default_llm():
+        return ChatOpenAI(
+            model=os.getenv("LLM_MODEL", "gpt-4o"),
+            temperature=0.0,
+            max_retries=1,
+            request_timeout=20.0,
+            model_kwargs={"response_format": {"type": "json_object"}},
+        )
+
+    def _get_llm(self):
+        if self._llm is None:
+            self._llm = self._llm_factory()
+        return self._llm
+
+    @staticmethod
+    def _parse_response_content(content: Any) -> dict[str, Any]:
+        if not isinstance(content, str) or not content.strip():
+            raise ClaimGenerationError(
+                "CLAIM_RESPONSE_EMPTY",
+                "Claim generator returned empty or non-text content.",
+            )
+
+        content = content.strip()
         if content.startswith("```"):
             lines = content.splitlines()
-            if lines and lines[0].startswith("```"):
-                lines = lines[1:]
-            if lines and lines[-1].startswith("```"):
-                lines = lines[:-1]
-            content = "\n".join(lines).strip()
-            
+            if len(lines) < 3 or lines[-1].strip() != "```":
+                raise ClaimGenerationError(
+                    "CLAIM_RESPONSE_INVALID_JSON",
+                    "Claim response contains an incomplete Markdown fence.",
+                )
+            if lines[0].strip().lower() not in {"```", "```json"}:
+                raise ClaimGenerationError(
+                    "CLAIM_RESPONSE_INVALID_JSON",
+                    "Claim response uses an unsupported Markdown fence.",
+                )
+            content = "\n".join(lines[1:-1]).strip()
+
         try:
             data = json.loads(content)
-        except json.JSONDecodeError as e:
-            raise ValueError(f"Failed to parse claim JSON: {e}")
-            
+        except json.JSONDecodeError as exc:
+            raise ClaimGenerationError(
+                "CLAIM_RESPONSE_INVALID_JSON",
+                f"Failed to parse claim JSON: {exc.msg}",
+            ) from exc
+
         if not isinstance(data, dict):
-            raise ValueError("Expected JSON root to be an object")
-            
-        claims = []
-        for c in data.get("claims", []):
-            claim = Claim(
-                claim_id=c.get("claim_id", str(uuid.uuid4())),
-                claim_text=c.get("claim_text", ""),
-                claim_type=c.get("claim_type", "factual"),
-                entities=c.get("entities", []),
-                numbers=c.get("numbers", []),
-                dates=c.get("dates", []),
-                evidence_ids=c.get("evidence_ids", []),
-                source_url=lineage.source_url
+            raise ClaimGenerationError(
+                "CLAIM_RESPONSE_INVALID_ROOT",
+                "Expected JSON root to be an object.",
             )
+        if "claims" not in data:
+            raise ClaimGenerationError(
+                "CLAIM_LIST_MISSING",
+                "Claim response is missing the claims field.",
+            )
+        if not isinstance(data["claims"], list):
+            raise ClaimGenerationError(
+                "CLAIM_LIST_INVALID",
+                "Claim response field claims must be a list.",
+            )
+        if not data["claims"]:
+            raise ClaimGenerationError(
+                "CLAIMS_EMPTY",
+                "Claim generator returned no claims.",
+            )
+        if len(data["claims"]) > MAX_GENERATED_CLAIMS:
+            raise ClaimGenerationError(
+                "CLAIM_LIMIT_EXCEEDED",
+                f"Claim generator returned more than {MAX_GENERATED_CLAIMS} claims.",
+            )
+        return data
+
+    def generate_claims(self, lineage: SourceLineage) -> List[Claim]:
+        if not lineage.is_verified_ready or not lineage.evidence_passages:
+            raise ClaimGenerationError(
+                "CLAIM_EVIDENCE_MISSING",
+                "Verified SourceLineage evidence is required for claim generation.",
+            )
+
+        evidence_text = "\n\n".join(
+            f"[ID: {ev.evidence_id}]\n{ev.text}" for ev in lineage.evidence_passages
+        )
+
+        try:
+            chain = self.prompt | self._get_llm()
+            response = chain.invoke({"evidence": evidence_text})
+        except QualityGateError:
+            raise
+        except Exception as exc:
+            raise ClaimGenerationError(
+                "CLAIM_GENERATION_FAILED",
+                f"Claim generator request failed: {type(exc).__name__}",
+            ) from exc
+
+        data = self._parse_response_content(getattr(response, "content", None))
+
+        claims: list[Claim] = []
+        seen_ids: set[str] = set()
+        for index, raw_claim in enumerate(data["claims"]):
+            if not isinstance(raw_claim, dict):
+                raise ClaimGenerationError(
+                    "CLAIM_SCHEMA_INVALID",
+                    f"Claim at index {index} must be an object.",
+                )
+            try:
+                claim = Claim.model_validate(
+                    {**raw_claim, "source_url": lineage.source_url}
+                )
+            except Exception as exc:
+                raise ClaimGenerationError(
+                    "CLAIM_SCHEMA_INVALID",
+                    f"Claim at index {index} failed schema validation.",
+                ) from exc
+            if claim.claim_id in seen_ids:
+                raise ClaimGenerationError(
+                    "CLAIM_ID_DUPLICATE",
+                    f"Duplicate claim_id: {claim.claim_id}",
+                    claim.claim_id,
+                )
+            seen_ids.add(claim.claim_id)
             claims.append(claim)
         return claims

@@ -3,6 +3,8 @@ from typing import Literal, Optional, List, Any
 from .card_news import CardNewsScript, Claim, TrendReport
 from dataclasses import dataclass
 from pathlib import Path
+from .queue_schemas import PublishAttemptState
+from .fact_check import FactCheckReport
 
 class PublishError(Exception):
     pass
@@ -17,6 +19,8 @@ class PipelineResult:
     permalink: str | None
     failure_stage: str | None
     error_code: str | None
+    publish_attempt_state: PublishAttemptState = PublishAttemptState.NOT_ATTEMPTED
+    publish_attempt_id: str | None = None
 
 PipelineStatus = Literal[
     "CANDIDATE",
@@ -57,7 +61,7 @@ class ContentPackage(BaseModel):
     
     # 2. Fact Check
     extracted_claims: List[Claim] = Field(default_factory=list)
-    fact_check_report: Optional[Any] = None  # FactCheckReport
+    fact_check_report: Optional[FactCheckReport] = None
     
     # 3. Draft
     draft_script: Optional[CardNewsScript] = None

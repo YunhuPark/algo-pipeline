@@ -15,6 +15,7 @@ from src.qa.claim_generator import ClaimGenerator
 from src.qa.deterministic_verifier import DeterministicVerifier, QualityGateError
 from src.qa.semantic_critic import run_semantic_critic
 from src.qa.script_assembler import ScriptAssembler
+from src.schemas.fact_check import FactCheckReport
 
 
 def _is_listicle_topic(topic: str) -> bool:
@@ -23,11 +24,18 @@ def _is_listicle_topic(topic: str) -> bool:
 
 
 class ContentCreator:
-    """Legacy adapter for Pipeline integration"""
+    """Evidence-bound content creator used by the production Pipeline."""
 
-    def __init__(self, brand_persona: Persona | None = None):
+    def __init__(
+        self,
+        brand_persona: Persona | None = None,
+        claim_generator: ClaimGenerator | None = None,
+        semantic_llm=None,
+    ):
         self.persona = brand_persona or load_persona()
-        self.claim_generator = ClaimGenerator()
+        self.claim_generator = claim_generator or ClaimGenerator()
+        self.semantic_llm = semantic_llm
+        self.last_fact_check_report: FactCheckReport | None = None
 
     def run(
         self,
@@ -45,6 +53,10 @@ class ContentCreator:
         """
         새로운 증거 기반 Claim 생성 및 검증을 수행한 뒤 ScriptAssembler로 넘깁니다.
         """
+        # A reused creator must never expose a report from an earlier successful run
+        # after the current run fails before a new report is produced.
+        self.last_fact_check_report = None
+
         # 1. Lineage 확인 (신규 생성 시 V2 필수)
         if not source_lineage or not source_lineage.is_verified_ready:
             raise QualityGateError("LEGACY_LINEAGE_UNVERIFIED", "Cannot generate new content with unverified legacy source lineage.")
@@ -56,7 +68,15 @@ class ContentCreator:
         DeterministicVerifier.verify_claims(claims, source_lineage)
 
         # 4. Quality Gate (Semantic)
-        run_semantic_critic(claims, source_lineage)
+        run_semantic_critic(claims, source_lineage, llm=self.semantic_llm)
+
+        self.last_fact_check_report = FactCheckReport(
+            confirmed_claim_ids=[claim.claim_id for claim in claims],
+            confirmed=len(claims),
+            disputed=0,
+            unverifiable=0,
+            flagged_items=[],
+        )
 
         # 5. Script Assemble
         script = ScriptAssembler.assemble(topic=source_lineage.topic, claims=claims)

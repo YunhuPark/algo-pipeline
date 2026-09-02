@@ -14,9 +14,15 @@ from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 
+# Tests and embedding applications may inject an explicit path without
+# mutating process-wide environment variables. Production keeps this unset.
+TRACKING_DB_PATH: Path | None = None
+
 def resolve_tracking_db_path(settings=None) -> Path:
     if settings and hasattr(settings, "TRACKING_DB_PATH"):
         return Path(settings.TRACKING_DB_PATH)
+    if TRACKING_DB_PATH is not None:
+        return Path(TRACKING_DB_PATH)
     env_path = os.environ.get("TRACKING_DB_PATH")
     algo_env = os.environ.get("ALGO_ENV", "production").lower()
     if algo_env in ("test", "synthetic"):
