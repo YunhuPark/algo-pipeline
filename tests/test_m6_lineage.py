@@ -30,6 +30,10 @@ def test_run_daily_empty_queue_routes_through_queue_cli(mock_db, tmp_path):
          patch("scripts.run_daily._try_acquire_lock", return_value=True), \
          patch("scripts.run_daily.LOCK_FILE", lock_file), \
          patch("scripts.run_daily._notify"), \
+         patch(
+             "scripts.run_daily.resolve_automation_mode",
+             return_value=SimpleNamespace(live_publish=True),
+         ), \
          patch("src.queue_runtime.prepare_queue_runtime"), \
          patch("scripts.run_daily.subprocess.run", side_effect=[
              SimpleNamespace(returncode=0),
@@ -42,6 +46,31 @@ def test_run_daily_empty_queue_routes_through_queue_cli(mock_db, tmp_path):
         mock_exit.assert_called_with(0)
         assert run.call_args_list[0].args[0][-2:] == ["--queue", "1"]
         assert run.call_args_list[1].args[0][-2:] == ["--queue-publish", "--publish"]
+
+
+def test_run_daily_safe_default_preserves_pending_queue(mock_db, tmp_path):
+    """자동 게시 비활성 모드는 큐를 생성하되 publisher CLI를 호출하지 않는다."""
+    lock_file = tmp_path / "logs" / "pipeline.lock"
+    with patch("scripts.run_daily._queue_pending", return_value=False), \
+         patch("scripts.run_daily._try_acquire_lock", return_value=True), \
+         patch("scripts.run_daily.LOCK_FILE", lock_file), \
+         patch("scripts.run_daily._notify"), \
+         patch(
+             "scripts.run_daily.resolve_automation_mode",
+             return_value=SimpleNamespace(live_publish=False),
+         ), \
+         patch("src.queue_runtime.prepare_queue_runtime"), \
+         patch(
+             "scripts.run_daily.subprocess.run",
+             return_value=SimpleNamespace(returncode=0),
+         ) as run:
+        from scripts.run_daily import main
+        with patch("sys.exit") as mock_exit:
+            main()
+
+        mock_exit.assert_called_with(0)
+        run.assert_called_once()
+        assert run.call_args.args[0][-2:] == ["--queue", "1"]
 
 def test_run_daily_queue_ingestion_failure_is_fail_closed(mock_db, tmp_path):
     """Queue V2 등록 실패 시 publisher CLI를 호출하지 않는다."""

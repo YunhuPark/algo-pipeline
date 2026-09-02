@@ -174,10 +174,12 @@ def main() -> None:
 
     # ── 에이전트 루프 ─────────────────────────────────────
     if args.agent:
+        os.environ["AGENT_AUTO_UPLOAD"] = "true" if args.publish else "false"
+        os.environ["AGENT_DRY_RUN"] = "true" if args.dry_run or not args.publish else "false"
+        from src.automation_mode import resolve_automation_mode
+        resolve_automation_mode()
         from src.queue_runtime import prepare_queue_runtime
         prepare_queue_runtime()
-        if args.dry_run:   os.environ["AGENT_DRY_RUN"]    = "true"
-        if not args.publish: os.environ["AGENT_AUTO_UPLOAD"] = "false"
         if args.threads:   os.environ["AGENT_THREADS"]    = "true"
         if args.blog:      os.environ["AGENT_BLOG"]       = "true"
         if args.template != "auto": os.environ["AGENT_TEMPLATE"] = args.template
