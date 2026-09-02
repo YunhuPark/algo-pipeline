@@ -10,18 +10,32 @@ SQLite 데이터베이스 — 알고 Agent 영구 저장소
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 
-DB_PATH = Path("data/algo.db")
+from src.db_factory import get_connection
+from src.schemas.queue_schemas import CollectionMethod, QueueMetadataV2
 
 
-def init_db() -> None:
+def resolve_algo_db_path(settings=None) -> Path:
+    if settings and hasattr(settings, "ALGO_DB_PATH"):
+        return Path(settings.ALGO_DB_PATH)
+    env_path = os.environ.get("ALGO_DB_PATH")
+    algo_env = os.environ.get("ALGO_ENV", "production").lower()
+    if algo_env in ("test", "synthetic"):
+        if not env_path:
+            raise RuntimeError(f"[{algo_env}] ALGO_DB_PATH must be explicitly injected via env or settings.")
+        return Path(env_path)
+    return Path(env_path) if env_path else Path("data/algo.db")
+
+def init_db(db_path: Path | None = None) -> None:
     """DB 및 테이블 초기화 (최초 1회)."""
-    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    with _conn() as conn:
+    target_path = db_path or resolve_algo_db_path()
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+    with _conn(target_path) as conn:
         # 기존 DB 마이그레이션: status 컬럼 없으면 추가
         try:
             conn.execute("ALTER TABLE posts ADD COLUMN status TEXT DEFAULT 'active'")
@@ -81,13 +95,17 @@ def init_db() -> None:
 
 
 @contextmanager
-def _conn():
-    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(DB_PATH)
+def _conn(db_path: Path | None = None):
+    target_path = db_path or resolve_algo_db_path()
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+    conn = get_connection(target_path)
     conn.row_factory = sqlite3.Row
     try:
         yield conn
         conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
     finally:
         conn.close()
 
@@ -184,12 +202,61 @@ def enqueue(
         return cur.lastrowid
 
 
+def enqueue_v2(
+    metadata: QueueMetadataV2,
+    collection_method: CollectionMethod,
+    *,
+    angle_hint: str = "",
+    scheduled_at: str | None = None,
+) -> int:
+    """Insert an attested queue row. The Queue V2 migration must already be applied."""
+    if collection_method in {
+        CollectionMethod.LEGACY_UNVERIFIED,
+        CollectionMethod.TEST_FIXTURE,
+        CollectionMethod.SYNTHETIC,
+    } and os.environ.get("ALGO_ENV", "production").lower() == "production":
+        raise ValueError(f"{collection_method.value} cannot be enqueued in production")
+
+    with _conn() as conn:
+        cur = conn.execute(
+            """INSERT INTO queue (
+                   topic, context, angle_hint, metadata_json, collection_method,
+                   lineage_hash, metadata_schema_version, scheduled_at,
+                   publish_attempt_state
+               ) VALUES (?,?,?,?,?,?,?,?,?)""",
+            (
+                metadata.topic,
+                metadata.context,
+                angle_hint,
+                metadata.canonical_json(),
+                collection_method.value,
+                metadata.lineage_hash(),
+                metadata.schema_version,
+                scheduled_at,
+                "NOT_ATTEMPTED",
+            ),
+        )
+        return int(cur.lastrowid)
+
+
 def dequeue_next() -> sqlite3.Row | None:
     """다음 발행 대기 항목 (scheduled_at 기준, NULL이면 우선)."""
     with _conn() as conn:
         row = conn.execute(
             """SELECT * FROM queue
                WHERE status = 'pending'
+                 AND (
+                       publish_error_code IS NULL OR publish_error_code IN (
+                           'NETWORK_TIMEOUT_BEFORE_PUBLISH',
+                           'RATE_LIMITED_BEFORE_PUBLISH',
+                           'TEMPORARY_UPSTREAM_UNAVAILABLE',
+                           'PIPELINE_PRE_PUBLISH_TRANSIENT'
+                       )
+                 )
+                 AND ig_post_id IS NULL
+                 AND publish_attempt_id IS NULL
+                 AND publish_attempt_state = 'NOT_ATTEMPTED'
+                 AND retry_count < 3
                  AND (scheduled_at IS NULL OR scheduled_at <= datetime('now','localtime'))
                ORDER BY scheduled_at ASC NULLS FIRST, id ASC
                LIMIT 1""",
@@ -200,6 +267,78 @@ def dequeue_next() -> sqlite3.Row | None:
 def mark_queue_status(queue_id: int, status: str) -> None:
     with _conn() as conn:
         conn.execute("UPDATE queue SET status=? WHERE id=?", (status, queue_id))
+
+
+def mark_queue_error(
+    queue_id: int,
+    error_code: str,
+    *,
+    increment_retry: bool = False,
+    preserve_attempt: bool = True,
+) -> None:
+    assignments = ["publish_error_code=?"]
+    params: list[object] = [error_code]
+    if increment_retry:
+        assignments.append("retry_count=retry_count+1")
+    if not preserve_attempt:
+        assignments.extend(
+            [
+                "publish_attempt_id=NULL",
+                "publish_started_at=NULL",
+                "publish_attempt_state='NOT_ATTEMPTED'",
+            ]
+        )
+    params.append(queue_id)
+    with _conn() as conn:
+        conn.execute(
+            f"UPDATE queue SET {', '.join(assignments)} WHERE id=?",
+            tuple(params),
+        )
+
+
+def start_publish_attempt(queue_id: int, attempt_id: str, started_at: str) -> None:
+    with _conn() as conn:
+        cur = conn.execute(
+            """UPDATE queue
+               SET publish_attempt_id=?, publish_started_at=?,
+                   publish_attempt_state='STARTED', publish_error_code='PUBLISH_IN_PROGRESS'
+               WHERE id=? AND status='pending' AND ig_post_id IS NULL
+                 AND publish_attempt_id IS NULL
+                 AND publish_attempt_state='NOT_ATTEMPTED'""",
+            (attempt_id, started_at, queue_id),
+        )
+        if cur.rowcount != 1:
+            raise RuntimeError("publish attempt precondition failed")
+
+
+def store_queue_ig_post_id(queue_id: int, attempt_id: str, ig_post_id: str) -> None:
+    if not ig_post_id.strip():
+        raise ValueError("ig_post_id must not be blank")
+    with _conn() as conn:
+        existing = conn.execute(
+            "SELECT ig_post_id, publish_attempt_id FROM queue WHERE id=?", (queue_id,)
+        ).fetchone()
+        if existing is None or existing["publish_attempt_id"] != attempt_id:
+            raise RuntimeError("publish attempt mismatch")
+        if existing["ig_post_id"] not in (None, ig_post_id):
+            raise RuntimeError("refusing to overwrite a different ig_post_id")
+        conn.execute(
+            """UPDATE queue SET ig_post_id=?, publish_attempt_state='REMOTE_ID_CONFIRMED'
+               WHERE id=? AND publish_attempt_id=?""",
+            (ig_post_id, queue_id, attempt_id),
+        )
+
+
+def complete_queue_publish(queue_id: int, attempt_id: str, ig_post_id: str) -> None:
+    with _conn() as conn:
+        cur = conn.execute(
+            """UPDATE queue SET status='published', publish_error_code=NULL,
+                   publish_attempt_state='REMOTE_ID_CONFIRMED'
+               WHERE id=? AND publish_attempt_id=? AND ig_post_id=?""",
+            (queue_id, attempt_id, ig_post_id),
+        )
+        if cur.rowcount != 1:
+            raise RuntimeError("publish completion precondition failed")
 
 
 def get_queue(status: str | None = None) -> list[sqlite3.Row]:
@@ -274,4 +413,4 @@ def get_recent_article_urls(days: int = 7) -> set[str]:
 
 
 # ── 초기화 실행 ───────────────────────────────────────────
-init_db()
+# init_db() was removed to prevent module-level side effects.

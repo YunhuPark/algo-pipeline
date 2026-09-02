@@ -31,6 +31,8 @@ _transcript_cache: dict[str, str] = {}
 _last_transcript_fetch: float = 0.0
 _TRANSCRIPT_INTERVAL = 12.0  # 자막 요청 최소 간격(초) — 429 rate limit 방지 (4초→12초)
 
+MAX_RETRIES = 2  # 최대 재시도 횟수
+
 
 @dataclass
 class VideoInfo:
@@ -298,8 +300,8 @@ def _get_video_transcript(video_id: str, max_chars: int = 4000) -> str:
                 'subtitlesformat': 'vtt',
                 'outtmpl': os.path.join(tmp, '%(id)s.%(ext)s'),
                 'restrictfilenames': True,   # Windows 특수문자 파일명 오류([Errno 22]) 방지
-                'retries': 2,
-                'fragment_retries': 2,
+                'retries': MAX_RETRIES,
+                'fragment_retries': MAX_RETRIES,
                 'http_headers': {
                     'User-Agent': (
                         'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
@@ -351,7 +353,9 @@ def _get_video_transcript(video_id: str, max_chars: int = 4000) -> str:
         _transcript_cache[video_id] = ""   # 인메모리에만 캐시 (재시도 방지)
         if not is_rate_limit:
             cache_file.write_text("", encoding='utf-8')
-        return ""
+        # 최대 재시도 초과나 429의 경우 즉시 Fail-closed
+        raise RuntimeError(f"YouTube transcript unavailable for {video_id}: {err_msg}")
+
 
 
 def _hms_to_seconds(hms: str) -> int:

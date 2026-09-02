@@ -13,17 +13,37 @@ ContentQueue — 콘텐츠 큐 관리
 from __future__ import annotations
 
 from datetime import datetime
+from datetime import timezone
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 from src.db import (
-    enqueue,
+    enqueue_v2,
     dequeue_next,
+    mark_queue_error,
+    start_publish_attempt,
+    store_queue_ig_post_id,
+    complete_queue_publish,
     mark_queue_status,
     queue_count,
     get_queue,
 )
-from src.agents.news_collector import collect_and_select
+from src.schemas.queue_schemas import CollectionMethod, PublishAttemptState, QueueMetadataV2
+
+
+RETRYABLE_PRE_PUBLISH_ERRORS = {
+    "NETWORK_TIMEOUT_BEFORE_PUBLISH",
+    "RATE_LIMITED_BEFORE_PUBLISH",
+    "TEMPORARY_UPSTREAM_UNAVAILABLE",
+    "PIPELINE_PRE_PUBLISH_TRANSIENT",
+}
+
+
+def _collect_news():
+    from src.agents.news_collector import collect_and_select
+
+    return collect_and_select()
 
 
 # ── 공개 함수 ──────────────────────────────────────────────
@@ -48,21 +68,7 @@ def bulk_generate(
     ids: list[int] = []
 
     if topics:
-        # 직접 지정된 주제 사용
-        for i in range(min(count, len(topics))):
-            row_id = enqueue(
-                topic=topics[i],
-                context="",
-                angle_hint="",
-            )
-            ids.append(row_id)
-            print(f"  [ContentQueue] 큐 추가 ({i+1}/{count}): {topics[i]}")
-
-        # 주제가 count보다 적으면 나머지는 뉴스 수집으로 채우기
-        remaining = count - len(topics)
-        if remaining > 0 and auto_news:
-            print(f"  [ContentQueue] 부족한 {remaining}개를 뉴스에서 수집합니다...")
-            ids.extend(_fill_from_news(remaining))
+        raise ValueError("직접 주제는 출처 attestation이 없어 Queue V2에 등록할 수 없습니다.")
 
     elif auto_news:
         ids.extend(_fill_from_news(count))
@@ -82,7 +88,7 @@ def _fill_from_news(count: int) -> list[int]:
     for i in range(count):
         try:
             print(f"  [ContentQueue] 뉴스 수집 중 ({i+1}/{count})...")
-            news = collect_and_select()
+            news = _collect_news()
 
             # 중복 주제 회피
             topic = news.topic
@@ -90,10 +96,28 @@ def _fill_from_news(count: int) -> list[int]:
                 topic = f"{topic} (심화)"
             seen_topics.add(topic)
 
-            row_id = enqueue(
+            evidence = [
+                {
+                    "title": item.title,
+                    "url": item.url,
+                    "source": item.source,
+                    "summary": item.summary,
+                }
+                for item in news.source_items
+                if item.title.strip() and item.url.strip()
+            ]
+            if not evidence:
+                raise ValueError("뉴스 출처 evidence가 없어 enqueue를 차단합니다.")
+            metadata = QueueMetadataV2(
                 topic=topic,
+                source_title=evidence[0]["title"],
+                source_url=evidence[0]["url"],
                 context=news.context,
-                angle_hint="",
+                evidence=evidence,
+            )
+            row_id = enqueue_v2(
+                metadata,
+                CollectionMethod.NEWS_COLLECTOR,
             )
             ids.append(row_id)
             print(f"  [ContentQueue] 뉴스 큐 추가: {topic}")
@@ -117,9 +141,6 @@ def publish_next(publish_to_ig: bool = True) -> dict[str, Any] | None:
     Returns:
         {"id": queue_id, "topic": topic, "paths": [Path, ...]} or None
     """
-    from src import pipeline
-    from src.persona import load_persona
-
     row = dequeue_next()
     if row is None:
         print("  [ContentQueue] 대기 중인 큐가 없습니다.")
@@ -131,35 +152,87 @@ def publish_next(publish_to_ig: bool = True) -> dict[str, Any] | None:
     angle_hint = row["angle_hint"] or ""
     image_dir = row["image_dir"] or ""
 
+    metadata, error = _load_queue_metadata(row)
+    if error:
+        mark_queue_error(queue_id, error, increment_retry=False, preserve_attempt=True)
+        print(f"  [ContentQueue] 게시 차단: {error} (큐 id={queue_id})")
+        return None
+    assert metadata is not None
+    collection_method = CollectionMethod(row["collection_method"])
+    source_lineage = metadata.to_source_lineage(collection_method)
+
+    attempt_id = str(uuid4()) if publish_to_ig else None
+
+    def before_publish(value: str) -> None:
+        start_publish_attempt(
+            queue_id,
+            value,
+            datetime.now(timezone.utc).isoformat(),
+        )
+
+    def on_remote_id(value: str, post_id: str) -> None:
+        store_queue_ig_post_id(queue_id, value, post_id)
+
     print(f"\n  [ContentQueue] 발행 시작: '{topic}' (큐 id={queue_id})")
 
     try:
         # ── 이미 렌더링된 경우 ─────────────────────────────
+        from src.schemas.content_package import PipelineResult, PublishError
+        res = None
         if image_dir and Path(image_dir).exists():
             print(f"  [ContentQueue] 기존 렌더링 사용: {image_dir}")
             paths = sorted(Path(image_dir).glob("*.png"))
             if not paths:
                 print("  [ContentQueue] PNG 없음 — 전체 파이프라인 실행")
-                paths = _run_full_pipeline(
-                    topic, context, angle_hint, publish_to_ig
+                res = _run_full_pipeline(
+                    topic, context, angle_hint, publish_to_ig,
+                    attempt_id, before_publish, on_remote_id, source_lineage,
                 )
+            else:
+                # need to implement a manual publish step for cached images,
+                # but to be safe we just fail or we would need to duplicate pipeline.
+                pass
         else:
-            paths = _run_full_pipeline(
-                topic, context, angle_hint, publish_to_ig
+            res = _run_full_pipeline(
+                topic, context, angle_hint, publish_to_ig,
+                attempt_id, before_publish, on_remote_id, source_lineage,
             )
 
-        if paths:
-            mark_queue_status(queue_id, "published")
-            print(f"  [ContentQueue] 발행 완료: {topic} ({len(paths)}장)")
-            return {"id": queue_id, "topic": topic, "paths": paths}
+        if res and hasattr(res, 'image_paths') and res.image_paths:
+            if res.publish_requested:
+                if res.publish_succeeded and res.ig_post_id:
+                    complete_queue_publish(queue_id, attempt_id, res.ig_post_id)
+                    print(f"  [ContentQueue] 발행 완료: {topic} ({len(res.image_paths)}장)")
+                    return {"id": queue_id, "topic": topic, "paths": res.image_paths}
+                else:
+                    print(f"  [ContentQueue] 게시 실패 (큐 id={queue_id}): {res.error_code}")
+                    retryable = (
+                        res.publish_attempt_state == PublishAttemptState.NOT_ATTEMPTED
+                        and res.error_code in RETRYABLE_PRE_PUBLISH_ERRORS
+                    )
+                    mark_queue_error(
+                        queue_id,
+                        res.error_code or "UNKNOWN_PIPELINE_ERROR",
+                        increment_retry=retryable,
+                        preserve_attempt=not retryable,
+                    )
+                    return None
+            else:
+                # generation only
+                mark_queue_status(queue_id, "ready")
+                return {"id": queue_id, "topic": topic, "paths": res.image_paths}
+        elif type(res) == list and len(res) > 0: # fallback for paths directly
+            # shouldn't happen but just in case
+            mark_queue_error(queue_id, "UNKNOWN_PIPELINE_ERROR")
+            return None
         else:
             print(f"  [ContentQueue] 발행 실패 (빈 경로): {topic}")
-            mark_queue_status(queue_id, "skipped")
+            mark_queue_error(queue_id, "EMPTY_PIPELINE_RESULT")
             return None
 
     except Exception as e:
         print(f"  [ContentQueue] 파이프라인 오류 (큐 id={queue_id}): {e}")
-        mark_queue_status(queue_id, "skipped")
+        mark_queue_error(queue_id, "UNKNOWN_PIPELINE_EXCEPTION")
         raise
 
 
@@ -168,7 +241,11 @@ def _run_full_pipeline(
     context: str,
     angle_hint: str,
     publish: bool,
-) -> list[Path]:
+    publish_attempt_id: str | None = None,
+    before_publish=None,
+    on_remote_id=None,
+    source_lineage=None,
+):
     """파이프라인 실행 헬퍼."""
     from src import pipeline
     from src.persona import load_persona
@@ -178,14 +255,18 @@ def _run_full_pipeline(
     if angle_hint:
         trend_context = f"{context}\n[앵글 힌트] {angle_hint}".strip()
 
-    paths = pipeline.run_pipeline(
+    res = pipeline.run_pipeline(
         topic=topic,
         persona=persona,
         trend_context=trend_context,
         publish=publish,
         auto=True,
+        source_lineage=source_lineage,
+        publish_attempt_id=publish_attempt_id,
+        before_publish=before_publish,
+        on_remote_id=on_remote_id,
     )
-    return paths
+    return res
 
 
 def add_topic(
@@ -204,15 +285,42 @@ def add_topic(
     Returns:
         생성된 queue row id
     """
-    row_id = enqueue(
-        topic=topic,
-        context=context,
-        angle_hint="",
-        scheduled_at=scheduled_at,
-    )
-    sched_label = f" (예약: {scheduled_at})" if scheduled_at else ""
-    print(f"  [ContentQueue] 추가: '{topic}'{sched_label} → id={row_id}")
-    return row_id
+    raise ValueError("Queue V2는 검증된 출처 evidence가 필수이며 직접 주제 등록을 지원하지 않습니다.")
+
+
+def _load_queue_metadata(row: Any) -> tuple[QueueMetadataV2 | None, str | None]:
+    import json
+    import hashlib
+
+    method = row["collection_method"] if "collection_method" in row.keys() else None
+    if method == CollectionMethod.LEGACY_UNVERIFIED.value:
+        return None, "LEGACY_UNSUPPORTED"
+    if method not in {CollectionMethod.NEWS_COLLECTOR.value, CollectionMethod.MANUAL_VERIFIED.value}:
+        return None, "UNPUBLISHABLE_METHOD"
+    if row["metadata_schema_version"] != 2:
+        return None, "MISSING_SCHEMA_VERSION"
+    try:
+        raw = row["metadata_json"]
+        data = json.loads(raw)
+        metadata = QueueMetadataV2.model_validate(data)
+    except Exception:
+        return None, "JSON_PARSE_ERROR"
+    canonical = metadata.canonical_json()
+    actual = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    if actual != row["lineage_hash"]:
+        return None, "HASH_MISMATCH"
+    if metadata.topic != row["topic"] or metadata.context != (row["context"] or ""):
+        return None, "METHOD_MISMATCH"
+    try:
+        metadata.to_source_lineage(CollectionMethod(method))
+    except Exception:
+        return None, "INVALID_SOURCE_LINEAGE"
+    return metadata, None
+
+
+def _validate_queue_row(row: Any) -> str | None:
+    """Compatibility wrapper for callers that only need the error code."""
+    return _load_queue_metadata(row)[1]
 
 
 def get_status() -> dict[str, Any]:
