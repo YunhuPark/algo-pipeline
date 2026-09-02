@@ -55,4 +55,3 @@ class AgentStateMachine:
     @property
     def terminal(self) -> bool:
         return not VALID_TRANSITIONS[self.state]
-

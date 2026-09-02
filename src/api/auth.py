@@ -27,4 +27,3 @@ def verify_origin(
     allowed_hosts = {"127.0.0.1", "localhost"}
     if parsed.scheme not in {"http", "https"} or parsed.hostname not in allowed_hosts:
         raise HTTPException(status_code=403, detail="Invalid Origin")
-

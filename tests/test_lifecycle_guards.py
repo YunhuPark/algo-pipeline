@@ -54,4 +54,3 @@ def test_lifecycle_has_no_implicit_publisher_or_network_call():
     assert result.state == RunState.SUCCEEDED
     publisher.assert_not_called()
     http_request.assert_not_called()
-

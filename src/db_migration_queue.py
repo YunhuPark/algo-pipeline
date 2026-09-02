@@ -94,4 +94,3 @@ def migrate_queue_lineage_v2(db_path: str | Path) -> None:
         raise
     finally:
         conn.close()
-

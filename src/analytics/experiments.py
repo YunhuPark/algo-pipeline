@@ -135,4 +135,3 @@ def transition_experiment(
         "version": version + 1,
         "idempotent": False,
     }
-
