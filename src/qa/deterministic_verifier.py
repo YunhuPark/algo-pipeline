@@ -38,18 +38,18 @@ def parse_number_with_qualifier(text: str) -> Tuple[Optional[Decimal], str]:
     """Parse a string to extract canonical number and its qualifier (unit, %, etc)."""
     # Ex: "30%", "1.5 million", "3개 기업", "13"
     text = unicodedata.normalize('NFKC', text).lower()
-    
+
     # Try to extract the first decimal-like pattern
     match = re.search(r'([\d]+(?:[\.,]\d+)?)', text)
     if not match:
         return None, ""
-        
+
     num_str = match.group(1).replace(',', '')
     try:
         val = Decimal(num_str)
     except InvalidOperation:
         return None, ""
-        
+
     # Extract qualifiers
     qualifier = ""
     if "%" in text or "퍼센트" in text:
@@ -68,13 +68,13 @@ def parse_number_with_qualifier(text: str) -> Tuple[Optional[Decimal], str]:
         qualifier = "만"
     elif "억" in text:
         qualifier = "억"
-    
+
     return val, qualifier
 
 
 class DeterministicVerifier:
     """순수 함수 기반 결정적 검증기"""
-    
+
     @staticmethod
     def verify_claims(claims: List[Claim], lineage: SourceLineage) -> None:
         """
@@ -100,7 +100,7 @@ class DeterministicVerifier:
 
         # Map evidence by ID
         evidence_map = {ev.evidence_id: ev for ev in lineage.evidence_passages}
-        
+
         for claim in claims:
             # 1. Verification of evidence constraints
             if not claim.evidence_ids:
@@ -117,23 +117,23 @@ class DeterministicVerifier:
                 if ev_id not in evidence_map:
                     raise QualityGateError("EVIDENCE_ID_UNKNOWN", f"Evidence ID {ev_id} not found in lineage.", claim.claim_id)
                 ev = evidence_map[ev_id]
-                
+
                 # Check article ID / source URL mismatch
                 if ev.article_id != lineage.article_id:
                     raise QualityGateError("EVIDENCE_ARTICLE_MISMATCH", f"Evidence {ev_id} is from a different article.", claim.claim_id)
                 if claim.source_url and ev.source_url and claim.source_url != ev.source_url:
                     raise QualityGateError("SOURCE_URL_MISMATCH", f"Claim source URL doesn't match evidence URL.", claim.claim_id)
-                    
+
             # Extract combined evidence text for this claim
             combined_evidence_text = " ".join([evidence_map[ev_id].text for ev_id in claim.evidence_ids])
             norm_evidence_text = normalize_text(combined_evidence_text)
-            
+
             # 2. Check Entities (Token/Boundary based)
             for entity in claim.entities:
                 norm_ent = normalize_text(entity)
                 if not norm_ent:
                     continue
-                
+
                 # Expand aliases
                 allowed_forms = [norm_ent] + ALLOWED_ALIASES.get(norm_ent, [])
                 found = False
@@ -152,12 +152,12 @@ class DeterministicVerifier:
                             break
                 if not found:
                     raise QualityGateError("ENTITY_UNSUPPORTED", f"Entity '{entity}' not found in evidence.", claim.claim_id)
-                    
+
             # 3. Check Numbers
             for num_obj in claim.numbers:
                 val = num_obj.normalized_value
                 qual = num_obj.unit
-                
+
                 found = False
                 # Simple extraction of all numbers in evidence
                 words = combined_evidence_text.split()
@@ -179,7 +179,7 @@ class DeterministicVerifier:
                 # Fail if relative date converted to arbitrary absolute date
                 if date_obj.is_relative and not date_obj.raw_text:
                     raise QualityGateError("DATE_UNSUPPORTED", "Relative date must have raw_text reference.", claim.claim_id)
-                    
+
             # 5. CTA Policy Violation (Heuristic check)
             if claim.claim_type == "cta":
                 bad_patterns = ["당장 써볼 것", "지금 당장", "빨리 다운로드", "위험합니다!"]

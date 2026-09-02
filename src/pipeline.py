@@ -635,7 +635,7 @@ def _run_once(
     except Exception as e:
         print(f"  ⚠️ Quality Gate 실패: {e}")
         return PipelineResult(image_paths=paths, generation_succeeded=True, publish_requested=publish, publish_succeeded=False, ig_post_id=None, permalink=None, failure_stage="QUALITY_GATE", error_code="PUBLISH_QUALITY_GATE_ERROR")
-        
+
     # ── Phase 6: Instagram 업로드 ─────────────────────────
 
     if publish and decision == "upload":
@@ -679,7 +679,7 @@ def _run_once(
                         "Remote publish succeeded but ig_post_id persistence failed",
                         "REMOTE_PUBLISH_PERSISTENCE_UNCERTAIN",
                     )
-                
+
             try:
                 from src.agents.publisher import get_post_permalink
                 _permalink = get_post_permalink(ig_post_id)

@@ -185,7 +185,7 @@ def startup() -> None:
     """초기 기동 (DB 초기화) 및 파이프라인 실행."""
     from src.queue_runtime import prepare_queue_runtime
     prepare_queue_runtime()
-    
+
     if already_posted_today():
         _log("오늘 이미 게시 완료 → 종료")
         LOCK_FILE.unlink(missing_ok=True)
@@ -241,7 +241,7 @@ def main() -> None:
     if not _try_acquire_lock():
         _log("파이프라인 이미 실행 중 (락파일 존재) → 종료")
         return
-        
+
     startup()
 
 

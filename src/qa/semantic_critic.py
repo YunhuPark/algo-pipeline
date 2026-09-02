@@ -59,7 +59,7 @@ class SemanticCritic:
                 reason="No evidence provided for factual claim.",
                 confidence=1.0
             )
-            
+
         evidence_map = {ev.evidence_id: ev for ev in lineage.evidence_passages}
         unknown_ids = [ev_id for ev_id in claim.evidence_ids if ev_id not in evidence_map]
         if unknown_ids:
@@ -69,11 +69,11 @@ class SemanticCritic:
                 claim.claim_id,
             )
         evidence_text = "\n".join(evidence_map[ev_id].text for ev_id in claim.evidence_ids)
-        
+
         try:
             chain = self.prompt | self._get_llm()
             response = chain.invoke({"evidence": evidence_text, "claim": claim.claim_text})
-            
+
             # OpenAI sometimes wraps json in markdown
             content = getattr(response, "content", None)
             if not isinstance(content, str) or not content.strip():
@@ -88,9 +88,9 @@ class SemanticCritic:
                 ):
                     raise ValueError("Semantic critic returned an invalid Markdown fence")
                 content = "\n".join(lines[1:-1]).strip()
-            
+
             data = json.loads(content)
-            
+
             # Use Pydantic to validate
             try:
                 # Use data from LLM if provided, otherwise fallback to known claim_id/evidence_ids
@@ -105,10 +105,10 @@ class SemanticCritic:
                 )
             except Exception as e:
                 raise QualityGateError("CRITIC_PARSE_ERROR", f"Validation failed: {str(e)}", claim.claim_id)
-                
+
             if res.claim_id != claim.claim_id or res.evidence_ids != claim.evidence_ids:
                 raise QualityGateError("CRITIC_RESPONSE_MISMATCH", "Critic response mapped to wrong claim/evidence", claim.claim_id)
-                
+
             return res
         except QualityGateError:
             raise

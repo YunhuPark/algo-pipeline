@@ -32,7 +32,7 @@ def mock_pipeline_agents(monkeypatch, tmp_path):
          patch("src.agents.angle_selector.select_angle") as mock_angle, \
          patch("src.db.insert_post") as mock_insert_post, \
          patch("subprocess.run"):
-        
+
         mock_tr.return_value = ("Test Topic", "Focus", "Reason")
         mock_yf1.return_value = []
         mock_ta.return_value = TrendReport(
@@ -40,7 +40,7 @@ def mock_pipeline_agents(monkeypatch, tmp_path):
             results=[TrendResult(title="Test", url="http://test.com", content="A" * 1500, score=1.0)],
             summary=""
         )
-        
+
         mock_script = CardNewsScript(
             topic="Test Topic",
             slides=[
@@ -55,13 +55,13 @@ def mock_pipeline_agents(monkeypatch, tmp_path):
             confirmed_claim_ids=["claim-1"],
             confirmed=1,
         )
-        
+
         # content_creator.run()은 CardNewsScript만 반환 (tuple이 아님)
         mock_cc = mock_cc_cls.return_value.run
         mock_cc.return_value = mock_script
         mock_cc_cls.return_value.last_fact_check_report = mock_fc
         mock_fc_check.return_value = mock_fc
-        
+
         # image_searcher.get_background_image()는 PIL Image를 반환
         mock_bg = MagicMock()
         mock_bg.size = (1080, 1080)
@@ -69,7 +69,7 @@ def mock_pipeline_agents(monkeypatch, tmp_path):
         mock_yf2.return_value = (None, 0)
         mock_dr.return_value = [Path("dummy.png")]
         mock_app.return_value = "upload"
-        
+
         yield {
             "ta": mock_ta,
             "cc": mock_cc,
@@ -212,7 +212,7 @@ def test_queue_generation_only_not_published():
     with patch("src.agents.content_queue.dequeue_next", return_value=_attested_row()), \
          patch("src.agents.content_queue._run_full_pipeline") as mock_pipeline, \
          patch("src.agents.content_queue.mark_queue_status") as mock_mark:
-        
+
         mock_pipeline.return_value = PipelineResult(
             image_paths=[Path("a.png")],
             generation_succeeded=True,
@@ -223,7 +223,7 @@ def test_queue_generation_only_not_published():
             failure_stage=None,
             error_code=None
         )
-        
+
         res = cq.publish_next(publish_to_ig=False)
         assert res is not None
         mock_mark.assert_called_with(1, "ready")
@@ -231,11 +231,11 @@ def test_queue_generation_only_not_published():
 def test_permalink_failure_distinct_from_publish(mock_pipeline_agents):
     """permalink 조회 실패와 media publish 실패 구분"""
     from src.pipeline import run_pipeline
-    
+
     with patch("src.pipeline.ig_publisher.publish", return_value="12345"), \
          patch("src.agents.publisher.get_post_permalink", side_effect=Exception("No permalink")), \
          patch("src.db.insert_post"):
-        
+
         res = run_pipeline(topic="Test", publish=True, auto=True)
         assert res.publish_succeeded is True
         assert res.ig_post_id == "12345"
@@ -283,10 +283,10 @@ def test_quality_gate_unverifiable_claim():
 def test_mock_preflight_error_classification():
     """Mock preflight 오류 분류"""
     from src.api.preflight import IGPreflightCheck, PreflightError
-    
+
     def mock_client(url, params):
         return {"error": {"message": "Invalid token", "code": 190, "error_subcode": 460}}
-        
+
     pf = IGPreflightCheck(http_client=mock_client)
     with pytest.raises(PreflightError) as exc:
         pf.check_token("test_token")
@@ -296,9 +296,9 @@ def test_quality_gate_failure_blocks_publish(mock_pipeline_agents):
     """품질 게이트 실패 시 publisher 호출 0회"""
     from src.pipeline import run_pipeline
     from src.qa.deterministic_verifier import QualityGateError
-    
+
     mock_pipeline_agents["cc"].side_effect = QualityGateError("QG_FAILED", "Quality gate failed")
-    
+
     with patch("src.pipeline.ig_publisher.publish") as mock_publish:
         res = run_pipeline(topic="Test", publish=True, auto=True)
         assert res.publish_succeeded is False

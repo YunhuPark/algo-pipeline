@@ -34,14 +34,14 @@ def resolve_tracking_db_path(settings=None) -> Path:
 @contextmanager
 def _conn(db_path: Path | None = None):
     target_path = db_path or resolve_tracking_db_path()
-    
+
     if os.environ.get("ALGO_ENV") == "test":
         try:
             target_path_resolved = target_path.resolve()
             prod_tracking = Path("data/tracking.db").resolve()
             prod_algo = Path("data/algo.db").resolve()
             prod_dir = Path("data").resolve()
-            
+
             # 차단 기준: 대상 경로가 운영 DB와 정확히 일치하거나, 운영 data 디렉터리 내부에 있는 경우
             # (os.path.samefile 혹은 Path.resolve() 사용. symlink 완벽 판별은 OS 환경에 따라 한계가 있을 수 있음)
             if target_path_resolved == prod_tracking or target_path_resolved == prod_algo or prod_dir in target_path_resolved.parents:
@@ -51,7 +51,7 @@ def _conn(db_path: Path | None = None):
             raise
         except Exception:
             pass
-            
+
     target_path.parent.mkdir(parents=True, exist_ok=True)
     conn = get_connection(str(target_path), timeout=30)
     conn.row_factory = sqlite3.Row
@@ -252,7 +252,7 @@ def init_tracking_db(db_path: Path | None = None) -> None:
             reconciler_version TEXT
         );
         """)
-    
+
     from src.analytics.db_experiments import init_experiment_db
     init_experiment_db(target_path)
 
@@ -291,8 +291,8 @@ def log_quality_check(run_id: str, check_type: str, passed: bool, reason: str = 
 def log_user_edit(run_id: str, slide_idx: int, original_text: str, final_text: str) -> None:
     import difflib
     matcher = difflib.SequenceMatcher(None, original_text, final_text)
-    modification_rate = 1.0 - matcher.ratio()  
-    
+    modification_rate = 1.0 - matcher.ratio()
+
     with _conn() as conn:
         conn.execute(
             "INSERT INTO user_edits (run_id, slide_idx, original_text, final_text, modification_rate) VALUES (?, ?, ?, ?, ?)",

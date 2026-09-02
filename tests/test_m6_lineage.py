@@ -127,17 +127,17 @@ def test_pipeline_metadata_and_folder_name(mock_db, pipeline_seams):
             source_lineage=_lineage(),
             auto=True
         )
-        
+
         assert res is not None
         assert res.publish_succeeded is True
-        
+
         # Check DB
         from src.db import get_posts
         posts = get_posts()
         assert len(posts) == 1
         assert posts[0]["topic"] == "Refined Script Topic"  # Must match script.topic
         assert posts[0]["post_id"] == "test_id_123"
-        
+
         # Check meta.json
         meta_file = out_dir / "meta.json"
         assert meta_file.exists()
