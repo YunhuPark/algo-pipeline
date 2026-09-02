@@ -51,8 +51,8 @@ jobs:
       - name: Run isolated test suite
         shell: bash
         run: |
-          before=$(find data -maxdepth 1 -type f \( -name '*.db' -o -name '*.db-wal' -o -name '*.db-shm' \) | wc -l)
+          before=$(find . -type f \( -name '*.db' -o -name '*.db-wal' -o -name '*.db-shm' \) | wc -l)
           test "$before" -eq 0
           python -m pytest tests -q
-          after=$(find data -maxdepth 1 -type f \( -name '*.db' -o -name '*.db-wal' -o -name '*.db-shm' \) | wc -l)
+          after=$(find . -type f \( -name '*.db' -o -name '*.db-wal' -o -name '*.db-shm' \) | wc -l)
           test "$after" -eq 0
