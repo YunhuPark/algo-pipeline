@@ -18,7 +18,7 @@ sys.path.insert(0, str(ROOT))
 from dotenv import load_dotenv
 load_dotenv(ROOT / ".env")
 
-import sqlite3
+from src.db_factory import get_connection
 
 from openai import OpenAI
 
@@ -31,7 +31,7 @@ def _recent_topics(days: int = 21) -> list[str]:
     if not db_path.exists():
         return []
     try:
-        conn = sqlite3.connect(str(db_path))
+        conn = get_connection(str(db_path))
         rows = conn.execute(
             "SELECT topic FROM posts WHERE platform='instagram' "
             "AND posted_at >= date('now', ?) ORDER BY id DESC",
@@ -188,7 +188,7 @@ def _already_posted_today() -> bool:
     db_path = ROOT / "data" / "algo.db"
     if db_path.exists():
         try:
-            conn = sqlite3.connect(str(db_path))
+            conn = get_connection(str(db_path))
             row = conn.execute(
                 "SELECT COUNT(*) FROM posts WHERE platform='instagram' AND posted_at LIKE ?",
                 (f"{today}%",)
@@ -208,16 +208,17 @@ def main() -> None:
     if _already_posted_today():
         print(f"[{datetime.now().strftime('%H:%M:%S')}] 오늘 이미 게시 완료 → 스킵")
         sys.exit(0)
-    print(f"[{datetime.now().strftime('%H:%M:%S')}] GPT 주제 선택 중...")
-    topic = pick_topic()
-    print(f"[{datetime.now().strftime('%H:%M:%S')}] 선택된 주제: {topic}")
-
-    cmd = [
-        sys.executable, str(ROOT / "main.py"),
-        topic,
-        "--publish",
-    ]
-    result = subprocess.run(cmd, cwd=str(ROOT))
+    print("직접 GPT 주제 발행은 비활성화되었습니다. 검증된 뉴스 Queue V2를 사용합니다.")
+    queued = subprocess.run(
+        [sys.executable, str(ROOT / "main.py"), "--queue", "1"],
+        cwd=str(ROOT),
+    )
+    if queued.returncode != 0:
+        sys.exit(queued.returncode)
+    result = subprocess.run(
+        [sys.executable, str(ROOT / "main.py"), "--queue-publish", "--publish"],
+        cwd=str(ROOT),
+    )
     sys.exit(result.returncode)
 
 

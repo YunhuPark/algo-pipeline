@@ -13,7 +13,7 @@ from __future__ import annotations
 import io
 import os
 import socket
-import sqlite3
+from src.db_factory import get_connection
 import subprocess
 import sys
 import time
@@ -101,7 +101,7 @@ def _get_today_post_info() -> tuple[str, str]:
     try:
         db_path = ROOT / "data" / "algo.db"
         if db_path.exists():
-            conn = sqlite3.connect(str(db_path))
+            conn = get_connection(str(db_path))
             row = conn.execute(
                 "SELECT topic, post_id FROM posts WHERE platform='instagram' AND posted_at LIKE ? ORDER BY id DESC LIMIT 1",
                 (f"{today}%",)
@@ -121,11 +121,10 @@ def already_posted_today() -> bool:
 
     # 1) DB 확인
     try:
-        from src.db import init_db
-        init_db()
+        from src.db_factory import get_connection
         db_path = ROOT / "data" / "algo.db"
         if db_path.exists():
-            conn = sqlite3.connect(str(db_path))
+            conn = get_connection(db_path)
             row = conn.execute(
                 "SELECT COUNT(*) FROM posts WHERE platform='instagram' AND posted_at LIKE ?",
                 (f"{today}%",)
@@ -182,16 +181,10 @@ def _try_acquire_lock() -> bool:
         return False
 
 
-def main() -> None:
-    _log("=== 로그인 트리거 시작 ===")
-    _ensure_services()
-
-    # 이미 실행 중인 파이프라인 확인 (stale 락파일 정리 포함)
-    _is_pipeline_running()
-
-    if not _try_acquire_lock():
-        _log("파이프라인 이미 실행 중 (락파일 존재) → 종료")
-        return
+def startup() -> None:
+    """초기 기동 (DB 초기화) 및 파이프라인 실행."""
+    from src.queue_runtime import prepare_queue_runtime
+    prepare_queue_runtime()
 
     if already_posted_today():
         _log("오늘 이미 게시 완료 → 종료")
@@ -205,8 +198,14 @@ def main() -> None:
             _log("큐에서 발행")
             cmd = [sys.executable, str(ROOT / "main.py"), "--queue-publish", "--publish"]
         else:
-            _log("GPT 주제 선택 후 생성")
-            cmd = [sys.executable, str(ROOT / "scripts" / "pick_topic.py")]
+            _log("검증된 뉴스 수집 후 Queue V2 등록")
+            queued = subprocess.run(
+                [sys.executable, str(ROOT / "main.py"), "--queue", "1"],
+                cwd=str(ROOT),
+            )
+            if queued.returncode != 0:
+                raise RuntimeError("Queue V2 뉴스 등록 실패")
+            cmd = [sys.executable, str(ROOT / "main.py"), "--queue-publish", "--publish"]
 
         result = subprocess.run(cmd, cwd=str(ROOT))
     finally:
@@ -231,6 +230,19 @@ def main() -> None:
             "생성 중 오류가 발생했어요.\nlogs/login_trigger.log 확인해주세요."
         )
         _log("오류 알림 전송")
+
+def main() -> None:
+    _log("=== 로그인 트리거 시작 ===")
+    _ensure_services()
+
+    # 이미 실행 중인 파이프라인 확인 (stale 락파일 정리 포함)
+    _is_pipeline_running()
+
+    if not _try_acquire_lock():
+        _log("파이프라인 이미 실행 중 (락파일 존재) → 종료")
+        return
+
+    startup()
 
 
 if __name__ == "__main__":

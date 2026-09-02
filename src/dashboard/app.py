@@ -32,7 +32,7 @@ from flask import Flask, request, redirect, url_for, send_file, Response, stream
 
 from src.db import (
     get_posts, get_analytics, get_queue,
-    enqueue, mark_queue_status, queue_count,
+    mark_queue_status, queue_count,
 )
 
 app = Flask(__name__)
@@ -918,26 +918,9 @@ def queue_page():
       <div>
         <div class="panel" style="margin-bottom:16px">
           <div class="panel-header">
-            <div class="panel-title">주제 직접 추가</div>
+            <div class="panel-title">검증되지 않은 주제 등록 차단</div>
           </div>
-          <form method="post" action="/queue/add">
-            <div class="input-group">
-              <label class="input-label">주제</label>
-              <input name="topic" placeholder="예: AI 트렌드, GPT-5 발표" required>
-            </div>
-            <div class="input-group">
-              <label class="input-label">예약 시간 (선택)</label>
-              <input name="scheduled_at" type="datetime-local">
-            </div>
-            <button type="submit" class="btn btn-primary" style="width:100%">큐에 추가</button>
-          </form>
-        </div>
-        <div class="panel" style="margin-bottom:16px">
-          <div class="panel-header">
-            <div class="panel-title">GPT 주제 추천</div>
-          </div>
-          <p class="panel-sub" style="margin-bottom:14px">GPT가 오늘의 AI/테크 트렌드 주제 5개를 추천합니다. 원하는 것만 골라서 큐에 추가하세요.</p>
-          <a href="/queue/suggest" class="btn btn-primary" style="width:100%;display:block;text-align:center;text-decoration:none">✨ 주제 추천받기</a>
+          <p class="panel-sub">Queue V2는 출처 URL과 evidence가 검증된 항목만 허용합니다. 직접 입력과 GPT 추천 주제는 발행 큐에 추가할 수 없습니다.</p>
         </div>
         <div class="panel">
           <div class="panel-header">
@@ -959,12 +942,10 @@ def queue_page():
 
 @app.route("/queue/add", methods=["POST"])
 def queue_add():
-    topic = request.form.get("topic", "").strip()
-    scheduled_at = request.form.get("scheduled_at", "").strip() or None
-    if not topic:
-        return redirect(url_for("queue_page", err="주제를 입력하세요."))
-    enqueue(topic=topic, scheduled_at=scheduled_at)
-    return redirect(url_for("queue_page", msg=f"'{topic}' 큐에 추가됨"))
+    return redirect(url_for(
+        "queue_page",
+        err="Queue V2는 검증된 출처 evidence가 필요해 직접 주제 등록을 차단합니다.",
+    ))
 
 
 @app.route("/queue/skip/<int:qid>", methods=["POST"])
@@ -986,80 +967,18 @@ def queue_generate():
 
 @app.route("/queue/suggest")
 def queue_suggest():
-    """GPT로 주제 5개 추천 → 선택해서 큐에 추가"""
-    from datetime import datetime
-    from openai import OpenAI
-    import os
-    client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-    today = datetime.now().strftime("%Y년 %m월 %d일")
-    resp = client.chat.completions.create(
-        model="gpt-4o-mini",
-        messages=[
-            {
-                "role": "system",
-                "content": (
-                    "당신은 한국 인스타그램 AI/테크 계정 @algo__kr의 콘텐츠 기획자입니다. "
-                    "MZ세대가 흥미로워할 AI, 테크, 스타트업 관련 카드뉴스 주제를 추천합니다."
-                ),
-            },
-            {
-                "role": "user",
-                "content": (
-                    f"오늘은 {today}입니다. "
-                    "인스타그램 카드뉴스로 만들기 좋은 AI/테크 트렌드 주제 5개를 추천해주세요. "
-                    "각 줄에 주제 하나씩, 번호 없이, 15자 이내로 써주세요."
-                ),
-            },
-        ],
-        max_tokens=200,
-        temperature=0.85,
-    )
-    raw = resp.choices[0].message.content.strip()
-    topics = [t.strip().strip("-").strip() for t in raw.splitlines() if t.strip()][:5]
-
-    cards = "".join(
-        f"""<div style="display:flex;align-items:center;gap:12px;padding:14px 16px;
-            background:var(--bg-card);border:1px solid var(--border);border-radius:10px;margin-bottom:10px">
-          <input type="checkbox" name="topics" value="{t}" id="t{i}"
-            style="width:18px;height:18px;accent-color:var(--accent);cursor:pointer">
-          <label for="t{i}" style="font-size:15px;font-weight:500;cursor:pointer;flex:1">{t}</label>
-        </div>"""
-        for i, t in enumerate(topics)
-    )
-
-    body = f"""
-    <div style="max-width:560px;margin:0 auto">
-      <div class="panel">
-        <div class="panel-header">
-          <div class="panel-title">GPT 주제 추천</div>
-          <span class="badge badge-pending">오늘의 AI 트렌드</span>
-        </div>
-        <p class="panel-sub" style="margin-bottom:18px">원하는 주제를 선택해서 큐에 추가하세요.</p>
-        <form method="post" action="/queue/suggest/add">
-          {cards}
-          <div style="display:flex;gap:10px;margin-top:20px">
-            <button type="submit" class="btn btn-primary" style="flex:1">선택한 주제 큐에 추가</button>
-            <a href="/queue/suggest" class="btn btn-secondary" style="flex:1;text-align:center;text-decoration:none">다시 추천받기</a>
-          </div>
-        </form>
-      </div>
-      <div style="text-align:center;margin-top:12px">
-        <a href="/queue" style="color:var(--muted);font-size:13px">← 큐 관리로 돌아가기</a>
-      </div>
-    </div>"""
-    return _page("GPT 주제 추천", "/queue", body)
+    return redirect(url_for(
+        "queue_page",
+        err="GPT 추천 주제는 검증된 출처 evidence가 없어 Queue V2 등록을 차단합니다.",
+    ))
 
 
 @app.route("/queue/suggest/add", methods=["POST"])
 def queue_suggest_add():
-    from src.db import enqueue
-    topics = request.form.getlist("topics")
-    if not topics:
-        return redirect(url_for("queue_suggest"))
-    for t in topics:
-        if t.strip():
-            enqueue(topic=t.strip())
-    return redirect(url_for("queue_page", msg=f"{len(topics)}개 주제가 큐에 추가됐습니다"))
+    return redirect(url_for(
+        "queue_page",
+        err="GPT 추천 주제의 레거시 큐 등록 경로가 비활성화되었습니다.",
+    ))
 
 
 # ── /analytics 성과 분석 ──────────────────────────────────
@@ -1376,9 +1295,8 @@ def generate_page():
             f"<td style='font-weight:500'>{d.name[16:].replace('_',' ')[:32]}</td>"
             f"<td><span class='badge badge-ig'>{count}장</span></td>"
             f"<td style='color:var(--muted);font-size:12px'>{mtime}</td>"
-            f"<td style='display:flex;gap:6px'>"
+            f"<td>"
             f"<a href='/preview/{d.name}' class='btn btn-secondary' style='padding:5px 12px;font-size:12px'>미리보기</a>"
-            f"<a href='/publish_page/{d.name}' class='btn btn-primary' style='padding:5px 12px;font-size:12px'>발행</a>"
             f"</td>"
             f"</tr>"
         )
@@ -1454,7 +1372,7 @@ def generate_page():
     <div class="panel-header">
       <div class="panel-title" id="previewTitle">생성 완료</div>
       <div style="display:flex;gap:8px">
-        <button id="publishBtn" class="btn btn-success">📤 Instagram 발행</button>
+        <span class="badge badge-pending">Queue V2 등록 필요</span>
         <button id="newGenBtn" class="btn btn-secondary">+ 새로 생성</button>
       </div>
     </div>
@@ -1619,31 +1537,6 @@ document.getElementById('manualForm').addEventListener('submit', e => {{
 document.getElementById('autoBtn').addEventListener('click', () => {{
   const reels = document.getElementById('autoReels').checked;
   startJob('', true, reels);
-}});
-
-document.getElementById('publishBtn').addEventListener('click', () => {{
-  if (!currentDirName) return;
-  if (!confirm('Instagram에 바로 발행하시겠습니까?')) return;
-  const btn = document.getElementById('publishBtn');
-  btn.textContent = '발행 중...';
-  btn.disabled = true;
-  fetch('/publish_now', {{
-    method: 'POST',
-    headers: {{'Content-Type': 'application/json'}},
-    body: JSON.stringify({{dir_name: currentDirName}})
-  }})
-  .then(r => r.json())
-  .then(data => {{
-    if (data.success) {{
-      btn.textContent = '✓ 발행 완료!';
-      btn.className = 'btn btn-success';
-      alert('Instagram 발행 완료!\\npost_id: ' + data.post_id);
-    }} else {{
-      btn.textContent = '📤 Instagram 발행';
-      btn.disabled = false;
-      alert('발행 실패: ' + data.error);
-    }}
-  }});
 }});
 
 document.getElementById('newGenBtn').addEventListener('click', () => {{
@@ -1858,7 +1751,7 @@ def preview_page(dir_name: str):
       <div class="panel-title">{topic}</div>
       <div class="panel-sub">{len(media_files)}장 · {dir_name[:15]}</div>
     </div>
-    <a href="/publish_page/{dir_name}" class="btn btn-primary">📤 Instagram 발행</a>
+    <span class="badge badge-pending">직접 발행 차단</span>
   </div>
   <div style="display:flex;gap:10px;overflow-x:auto;padding-bottom:8px" id="cardRow">
     {cards_html}
@@ -2194,14 +2087,9 @@ def publish_page(dir_name: str):
     cap_path = d / "caption.txt"
     caption_txt = cap_path.read_text(encoding="utf-8") if cap_path.exists() else ""
 
-    # IG 토큰 상태
-    from dotenv import load_dotenv
-    load_dotenv(ROOT / ".env")
-    ig_ok = bool(os.getenv("IG_ACCESS_TOKEN")) and bool(os.getenv("IG_USER_ID"))
     ig_status = (
-        '<span style="color:#00E5FF">✓ 설정됨 — 바로 발행 가능</span>'
-        if ig_ok else
-        '<span style="color:#ff6b6b">✗ IG_ACCESS_TOKEN / IG_USER_ID 없음 → <a href="/settings">설정</a></span>'
+        '<span style="color:var(--warn)">직접 발행은 비활성화되었습니다. '
+        '검증된 뉴스 수집 → Queue V2 발행 경로를 사용하세요.</span>'
     )
 
     # 썸네일: PNG만 표시 (업로드되는 것과 동일하게)
@@ -2250,121 +2138,33 @@ def publish_page(dir_name: str):
   <div class="panel-header">
     <div>
       <div class="panel-title">캡션 편집</div>
-      <div class="panel-sub">발행 전 캡션을 수정할 수 있습니다</div>
+      <div class="panel-sub">미리보기 전용 — 이 화면에서는 발행할 수 없습니다</div>
     </div>
   </div>
   <textarea id="captionText" rows="8" style="font-family:'Consolas',monospace;font-size:12px;line-height:1.7">{caption_txt}</textarea>
 </div>
 
-<div style="display:flex;align-items:center;gap:12px">
-  <button id="publishNowBtn" class="btn btn-primary btn-lg" {'disabled' if not ig_ok else ''}>
-    📤 Instagram에 발행
-  </button>
-  <div id="publishStatus" style="font-size:13px"></div>
+<div style="background:rgba(255,184,77,.08);border:1px solid rgba(255,184,77,.25);border-radius:12px;padding:14px 16px;color:var(--warn)">
+  Queue V2 lineage와 durable publish attempt가 없는 기존 결과물의 직접 발행은 차단됩니다.
 </div>
-
-<script>
-document.getElementById('publishNowBtn')?.addEventListener('click', () => {{
-  if (!confirm('Instagram 캐러셀로 발행하시겠습니까?')) return;
-  const btn = document.getElementById('publishNowBtn');
-  btn.textContent = '발행 중...';
-  btn.disabled = true;
-  const caption = document.getElementById('captionText').value;
-  fetch('/publish_now', {{
-    method: 'POST',
-    headers: {{'Content-Type': 'application/json'}},
-    body: JSON.stringify({{dir_name: '{dir_name}', caption}})
-  }})
-  .then(r => r.json())
-  .then(data => {{
-    if (data.success) {{
-      btn.textContent = '✓ 발행 완료!';
-      btn.className = 'btn btn-success btn-lg';
-      const igUrl = data.permalink || `https://www.instagram.com/`;
-      document.getElementById('publishStatus').innerHTML =
-        `<span style="color:var(--accent2)">✓ 업로드 완료 &nbsp;·&nbsp; <a href="${{igUrl}}" target="_blank">Instagram에서 보기 →</a></span>`;
-    }} else {{
-      btn.textContent = '📤 Instagram에 발행';
-      btn.disabled = false;
-      document.getElementById('publishStatus').innerHTML =
-        `<span style="color:var(--danger)">✕ 오류: ${{data.error}}</span>`;
-    }}
-  }});
-}});
-</script>
 """
     return _page(f"발행 — {topic}", "/generate", body)
 
 
 @app.route("/publish_now", methods=["POST"])
 def publish_now():
-    data = request.get_json()
-    dir_name = data.get("dir_name", "")
-    custom_caption = data.get("caption", "")
-
-    d = ROOT / "output" / dir_name
-    if not d.exists():
-        return {"success": False, "error": "폴더 없음"}
-
-    pngs = sorted(d.glob("card_*.png"))
-    if not pngs:
-        return {"success": False, "error": "PNG 파일 없음"}
-
-    try:
-        from src.agents.publisher import publish as ig_publish
-
-        # caption에서 hook / hashtags 파싱
-        cap_path = d / "caption.txt"
-        if custom_caption:
-            caption_text = custom_caption
-        elif cap_path.exists():
-            caption_text = cap_path.read_text(encoding="utf-8")
-        else:
-            caption_text = ""
-
-        lines = [l for l in caption_text.split("\n") if l.strip()]
-        hook = lines[0] if lines else dir_name[16:].replace("_", " ")
-        hashtags = [w for w in caption_text.split() if w.startswith("#")]
-
-        post_id = ig_publish(
-            image_paths=pngs,
-            hook=hook,
-            hashtags=hashtags,
-        )
-
-        # 실제 Instagram permalink 조회 (shortcode URL)
-        permalink = ""
-        try:
-            from src.agents.publisher import get_post_permalink
-            permalink = get_post_permalink(post_id)
-        except Exception:
-            pass
-
-        # DB 기록
-        try:
-            from src.db import insert_post
-            insert_post(
-                platform="instagram",
-                topic=dir_name[16:].replace("_", " "),
-                post_id=post_id,
-                angle="",
-                hook=hook,
-                hashtags=hashtags,
-                image_dir=str(d),
-                posted_at=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            )
-        except Exception:
-            pass
-
-        return {"success": True, "post_id": post_id, "permalink": permalink}
-
-    except Exception as e:
-        return {"success": False, "error": str(e)}
+    return {
+        "success": False,
+        "error": "Direct dashboard publish is disabled; use Queue V2.",
+        "error_code": "UNSAFE_DIRECT_PUBLISH_BLOCKED",
+    }, 409
 
 
 # ── 실행 ─────────────────────────────────────────────────
 
 if __name__ == "__main__":
+    from src.queue_runtime import prepare_queue_runtime
+    prepare_queue_runtime()
     port = int(os.environ.get("PORT", 5001))
     print(f"알고 대시보드: http://localhost:{port}")
     app.run(host="0.0.0.0", port=port, debug=False, threaded=True)

@@ -58,9 +58,10 @@ def job_daily_cardnews() -> None:
     _log("=" * 55)
     _log("[알고] 일일 카드뉴스 작업 시작")
     try:
-        from src.agents.content_queue import publish_next, get_status
-        from src import pipeline
-        from src.agents.news_collector import collect_and_select
+        from src.queue_runtime import prepare_queue_runtime
+        from src.agents.content_queue import bulk_generate, publish_next, get_status
+
+        prepare_queue_runtime()
 
         status = get_status()
         _log(f"  큐 대기: {status['pending']}개")
@@ -68,27 +69,25 @@ def job_daily_cardnews() -> None:
         if status["pending"] > 0:
             # 큐에서 발행
             _log("  큐에서 다음 항목 발행...")
-            publish_next(publish_to_ig=AUTO_UPLOAD and not DRY_RUN)
+            res = publish_next(publish_to_ig=AUTO_UPLOAD and not DRY_RUN)
+            if not res:
+                raise Exception("큐 발행 실패")
         else:
-            # 큐 비어있으면 뉴스 자동 수집
-            _log("  큐 없음 → 뉴스 자동 수집...")
-            selection = collect_and_select()
-            _log(f"  주제: {selection.topic}")
-            pipeline.run_pipeline(
-                topic=selection.topic,
-                trend_context=selection.context,
-                publish=AUTO_UPLOAD and not DRY_RUN,
-                publish_threads=AGENT_THREADS and not DRY_RUN,
-                publish_blog=AGENT_BLOG and not DRY_RUN,
-                template=AGENT_TEMPLATE,
-                fact_check=True,
-                auto=True,
-            )
+            _log("  큐 없음 → 검증된 뉴스 수집 후 Queue V2 등록...")
+            ids = bulk_generate(count=1, auto_news=True)
+            if not ids:
+                raise Exception("검증된 뉴스가 없어 Queue V2 등록 실패")
+            res = publish_next(publish_to_ig=AUTO_UPLOAD and not DRY_RUN)
+            if not res:
+                raise Exception("Queue V2 발행 실패")
 
         # 텔레그램 완료 알림
         try:
             from src.telegram_bot import notify
-            notify("✅ 오늘의 알고 카드뉴스 업로드 완료!")
+            if AUTO_UPLOAD and not DRY_RUN:
+                notify("✅ 오늘의 알고 카드뉴스 업로드 완료!")
+            else:
+                notify("✅ 오늘의 알고 카드뉴스 생성 완료 (업로드 생략)!")
         except Exception:
             pass
 
@@ -164,6 +163,8 @@ def job_weekly_analysis() -> None:
 # ── 스케줄러 실행 ─────────────────────────────────────────
 
 def start() -> None:
+    from src.queue_runtime import prepare_queue_runtime
+    prepare_queue_runtime()
     scheduler = BlockingScheduler(timezone="Asia/Seoul")
 
     scheduler.add_job(
