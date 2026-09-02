@@ -32,5 +32,5 @@ def validate_content_quality(meta: dict, script: Any) -> None:
     Exists for legacy pipeline compatibility.
     """
     warnings.warn("validate_content_quality is deprecated", DeprecationWarning, stacklevel=2)
-    
+
     _disabled()

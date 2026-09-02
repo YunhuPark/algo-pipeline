@@ -23,7 +23,7 @@
 
 ## 5. Topic-Source Lineage & Hallucination Fix (2026-08-01)
 * **Issue**: `scripts/run_daily.py` independently generated an arbitrary topic via `_pick_topic()` when the queue was empty, causing a disconnect between the stated topic and the actual news source content, resulting in hallucinatory scripts.
-* **Remediation**: 
+* **Remediation**:
     1. Removed `_pick_topic()` logic completely.
     2. Enforced fail-closed behavior if `collect_and_select()` fails.
     3. Introduced `SourceLineage` in `schemas/card_news.py` to firmly bind the canonical `topic`, `source_title`, `source_url`, and `context`.

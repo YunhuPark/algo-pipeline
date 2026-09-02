@@ -136,7 +136,7 @@ class SourceLineage(BaseModel):
                 raise ValueError("source_url is required for schema_version >= 2.0")
             if not self.content_hash:
                 raise ValueError("content_hash is required for schema_version >= 2.0")
-            
+
             # Evidence unique id check
             seen_ids = set()
             for ev in self.evidence_passages:
@@ -147,7 +147,7 @@ class SourceLineage(BaseModel):
                     raise ValueError(f"Evidence article_id {ev.article_id} mismatch with lineage {self.article_id}")
                 if ev.source_url != self.source_url:
                     raise ValueError(f"Evidence source_url {ev.source_url} mismatch with lineage {self.source_url}")
-                
+
         return self
 
     @property

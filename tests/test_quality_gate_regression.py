@@ -21,7 +21,7 @@ def lineage_no_5():
 
 def test_quality_gate_number_unsupported_hallucination(lineage_no_5):
     verifier = DeterministicVerifier()
-    
+
     # 5가지 특징 hallucination in Claim
     claim = Claim(
         claim_id="c1",
@@ -31,10 +31,10 @@ def test_quality_gate_number_unsupported_hallucination(lineage_no_5):
         evidence_ids=["ev_1"],
         source_url="http://test.com"
     )
-    
+
     with pytest.raises(QualityGateError) as exc_info:
         verifier.verify_claims([claim], lineage_no_5)
-    
+
     assert "not supported by evidence" in str(exc_info.value)
     assert "5가지" in str(exc_info.value)
 
@@ -52,11 +52,11 @@ def test_pipeline_aborts_on_hallucinated_number(
         "NUMBER_UNSUPPORTED", "Number '5만' not supported by evidence."
     )
     mock_angle.return_value = None
-    
+
     res = run_pipeline("OpenAI Agents", publish=True, source_lineage=lineage_no_5, auto=True)
-    
+
     assert res.generation_succeeded is False
     assert res.failure_stage == "QUALITY_GATE"
-    
+
     mock_render.assert_not_called()
     mock_publish.assert_not_called()

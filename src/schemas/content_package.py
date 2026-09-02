@@ -55,27 +55,27 @@ class ContentPackage(BaseModel):
     event_id: str = ""
     status: PipelineStatus = "CANDIDATE"
     strategy: Optional[GenerationStrategy] = None
-    
+
     # 1. Research
     trend_report: Optional[TrendReport] = None
-    
+
     # 2. Fact Check
     extracted_claims: List[Claim] = Field(default_factory=list)
     fact_check_report: Optional[FactCheckReport] = None
-    
+
     # 3. Draft
     draft_script: Optional[CardNewsScript] = None
-    
+
     # 4. Critic
     critic_report: Optional[Any] = None
-    
+
     # 5. Render
     rendered_image_paths: List[str] = Field(default_factory=list)
-    
+
     # 6. QA
     visual_qa: Optional[Any] = None
     caption_qa: Optional[Any] = None
-    
+
     # 7. Final Scoring
     quality_score: int = 0
     quality_policy_version: str = "1.0.0"

@@ -111,7 +111,7 @@ def main() -> None:
         class MockResult:
             returncode = 1
         result = MockResult()
-        
+
         if not _queue_pending():
             _log("큐 비어있음 — 검증된 뉴스 수집 후 Queue V2 등록")
             queued = subprocess.run(
@@ -127,7 +127,7 @@ def main() -> None:
         )
         topic = "큐 항목"
         result.returncode = proc.returncode
-                
+
     finally:
         LOCK_FILE.unlink(missing_ok=True)
 
@@ -146,7 +146,7 @@ def main() -> None:
                         published = True
             except:
                 pass
-        
+
         if published:
             _notify("알고 카드뉴스 발행 완료 ✅", f"'{topic}' 카드뉴스가 인스타에 올라갔습니다.")
         else:
@@ -160,7 +160,7 @@ def main() -> None:
 def configure_console_encoding() -> None:
     """UTF-8 강제 설정 (Windows 환경 호환성 및 테스트 안정성 확보)"""
     import io
-    
+
     # pytest capture나 runpy 등에서 안전하도록 reconfigure 우선 시도
     for stream in (sys.stdout, sys.stderr):
         if hasattr(stream, "reconfigure"):
@@ -169,7 +169,7 @@ def configure_console_encoding() -> None:
                 continue
             except (TypeError, io.UnsupportedOperation):
                 pass
-                
+
         # fallback: buffer가 있는 경우 TextIOWrapper로 덮어쓰기
         if getattr(stream, "encoding", "").lower() != "utf-8" and hasattr(stream, "buffer"):
             if stream is sys.stdout:

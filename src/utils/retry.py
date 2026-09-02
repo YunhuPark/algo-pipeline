@@ -47,7 +47,7 @@ def call_with_retry(
             if "insufficient_quota" in err_str or "billing" in err_str:
                 print(f"  [retry] {name} OpenAI 크레딧 부족으로 재시도 불가, 즉시 종료")
                 raise
-            
+
             is_rate_limit = any(kw in err_str for kw in ("rate", "429", "too many requests"))
 
             # Extract Retry-After if available in exception
@@ -59,7 +59,7 @@ def call_with_retry(
                         retry_after = int(retry_after_str)
                     except ValueError:
                         pass
-            
+
             if is_rate_limit:
                 if retry_after:
                     wait = min(retry_after, max_delay)

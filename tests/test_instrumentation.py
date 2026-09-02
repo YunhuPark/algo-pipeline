@@ -11,12 +11,12 @@ def test_instrumentation_fields(monkeypatch, tmp_path):
     from src.db_tracking import init_tracking_db, resolve_tracking_db_path
     init_tracking_db(db_path)
     db_path = resolve_tracking_db_path()
-    
+
     run_id = start_run(topic="Fake Instrumentation Test")
     assert run_id is not None
-    
+
     time.sleep(0.1)
-    
+
     end_run(
         run_id=run_id,
         status="SUCCESS",
@@ -27,17 +27,17 @@ def test_instrumentation_fields(monkeypatch, tmp_path):
         grounded_claim_rate=1.0,
         step_failure_rate=0.0
     )
-    
+
     # Verify in DB
     conn = get_connection(db_path)
     c = conn.cursor()
     c.execute("SELECT cost_usd, latency_sec, retry_count, status FROM content_runs WHERE run_id = ?", (run_id,))
     row = c.fetchone()
-    
+
     assert row is not None
     assert row[0] == 0.015
     assert row[1] == 0.1
     assert row[2] == 2
     assert row[3] == "SUCCESS"
-    
+
     conn.close()

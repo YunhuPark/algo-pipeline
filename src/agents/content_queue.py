@@ -189,7 +189,7 @@ def publish_next(publish_to_ig: bool = True) -> dict[str, Any] | None:
                     attempt_id, before_publish, on_remote_id, source_lineage,
                 )
             else:
-                # need to implement a manual publish step for cached images, 
+                # need to implement a manual publish step for cached images,
                 # but to be safe we just fail or we would need to duplicate pipeline.
                 pass
         else:

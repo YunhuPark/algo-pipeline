@@ -12,17 +12,17 @@ client = TestClient(app)
 def mock_env_and_db(monkeypatch, tmp_path):
     monkeypatch.setenv("ALGO_ENV", "test")
     monkeypatch.setenv("ADMIN_TOKEN", "test_super_secret")
-    
+
     test_tracking_db = tmp_path / "tracking.db"
     test_algo_db = tmp_path / "algo.db"
-    
+
     with patch("src.analytics.db_experiments.TRACKING_DB_PATH", test_tracking_db, create=True), \
          patch("src.analytics.experiments.TRACKING_DB_PATH", test_tracking_db, create=True), \
          patch("src.analytics.assignment.TRACKING_DB_PATH", test_tracking_db, create=True), \
          patch("src.analytics.metrics.TRACKING_DB_PATH", test_tracking_db, create=True), \
          patch("src.analytics.guardrails.TRACKING_DB_PATH", test_tracking_db, create=True), \
          patch("src.api.app.TRACKING_DB_PATH", test_tracking_db, create=True):
-         
+
         # Init DB schema
         with get_connection(test_tracking_db) as conn:
             conn.execute("""
@@ -57,10 +57,10 @@ def mock_env_and_db(monkeypatch, tmp_path):
             )
             """)
             conn.execute("CREATE TABLE IF NOT EXISTS content_runs (run_id TEXT PRIMARY KEY, topic TEXT, origin TEXT, latency_sec REAL, cost_usd REAL, error_msg TEXT)")
-            
+
             # Setup a test experiment
             conn.execute("INSERT INTO experiments (experiment_id, name, status, allocation_percent, metric_definition_version) VALUES ('exp_api_1', 'Test API Exp', 'DRAFT', 0.0, 'v1')")
-            
+
         yield test_tracking_db
 
 def test_get_experiments():
@@ -98,7 +98,7 @@ def test_transition_invalid_origin_csrf():
         "target_state": "APPROVED",
         "reason": "Looking good"
     }, headers={"X-Admin-Token": "test_super_secret", "Origin": "http://evil.com"})
-    
+
     assert response.status_code == 403
     assert "Invalid Origin" in response.json()["detail"]
 
@@ -107,7 +107,7 @@ def test_transition_success():
         "target_state": "APPROVED",
         "reason": "Looking good"
     }, headers={"X-Admin-Token": "test_super_secret", "Origin": "http://127.0.0.1:8501"})
-    
+
     assert response.status_code == 200
     assert response.json()["new_state"] == "APPROVED"
     assert response.json()["actor_type"] == "test_human"  # derived from backend securely
@@ -118,7 +118,7 @@ def test_transition_invalid_state():
         "target_state": "ACCEPTED",
         "reason": "Force jump"
     }, headers={"X-Admin-Token": "test_super_secret", "Origin": "http://127.0.0.1:8501"})
-    
+
     assert response.status_code == 409
     assert "Invalid transition" in response.json()["detail"]
 
@@ -129,7 +129,7 @@ def test_transition_optimistic_concurrency_failure():
         "reason": "Optimistic check",
         "expected_version": 999  # Stale version
     }, headers={"X-Admin-Token": "test_super_secret", "Origin": "http://127.0.0.1:8501"})
-    
+
     assert response.status_code == 409
     assert "Optimistic concurrency failure" in response.json()["detail"]
 
