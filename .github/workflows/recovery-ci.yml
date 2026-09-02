@@ -21,8 +21,8 @@ jobs:
       ALGO_ENV: test
       OPENAI_API_KEY: test-key
       TAVILY_API_KEY: test-key
-      ALGO_DB_PATH: ${{ runner.temp }}/algo.db
-      TRACKING_DB_PATH: ${{ runner.temp }}/tracking.db
+      ALGO_DB_PATH: /tmp/algo-recovery-ci.db
+      TRACKING_DB_PATH: /tmp/tracking-recovery-ci.db
 
     steps:
       - name: Check out repository
