@@ -23,4 +23,3 @@ def wilson_interval(successes: int, total: int, z: float = 1.96) -> tuple[float,
         / denominator
     )
     return (max(0.0, center - margin), min(1.0, center + margin))
-

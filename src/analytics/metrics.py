@@ -42,4 +42,3 @@ def get_experiment_metrics(experiment_id: str) -> dict[str, Any]:
         "insufficient_sample": total < MIN_EXPERIMENT_SAMPLE,
         "variants": [dict(row) for row in variants],
     }
-

@@ -146,4 +146,3 @@ def init_tracking_db(db_path: str | Path | None = None) -> Path:
 
     init_base_tracking_db(target)
     return target
-

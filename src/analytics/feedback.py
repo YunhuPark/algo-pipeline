@@ -76,4 +76,3 @@ def log_editorial_feedback(
         if idempotency_key and "unique" in str(exc).lower():
             return -1
         raise
-

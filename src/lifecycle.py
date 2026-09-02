@@ -65,4 +65,3 @@ def run_agent_lifecycle(
 
     machine.transition(RunState.SUCCEEDED)
     return LifecycleResult(state=machine.state, steps=tuple(results))
-

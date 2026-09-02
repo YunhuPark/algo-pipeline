@@ -16,4 +16,3 @@ def should_pause(*, error_rate: float, latency_seconds: float) -> bool:
 
 def configured_db_path() -> Path:
     return Path(TRACKING_DB_PATH) if TRACKING_DB_PATH is not None else tracking_db_path()
-

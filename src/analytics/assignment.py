@@ -55,4 +55,3 @@ def assign_variant(experiment_id: str, opportunity_id: str) -> str:
             ),
         )
         return chosen["variant_id"]
-
