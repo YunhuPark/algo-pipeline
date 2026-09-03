@@ -59,6 +59,8 @@ def test_agent_live_publish_rejects_nonproduction_before_db(tmp_path):
         env=env,
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         check=False,
     )
 
@@ -73,6 +75,8 @@ def test_manual_cli_publish_is_blocked_before_importing_publisher():
         cwd=ROOT,
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         check=False,
     )
     assert result.returncode == 2
@@ -85,6 +89,8 @@ def test_cached_output_direct_publish_is_blocked():
         cwd=ROOT,
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         check=False,
     )
     assert result.returncode == 2
