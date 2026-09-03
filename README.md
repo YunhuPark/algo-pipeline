@@ -1,125 +1,141 @@
-# 알고 — AI 카드뉴스 자동화 파이프라인
+# 알고 — Evidence-bound AI 카드뉴스 파이프라인
 
-매일 오전 9시, AI가 자동으로 AI/테크 트렌드를 수집해 인스타그램 카드뉴스를 생성·발행합니다.
+AI/테크 뉴스를 수집해 출처 근거가 있는 카드뉴스를 생성하고, 검증된 Queue를 통해 Instagram 게시까지 수행하는 로컬 자동화 시스템입니다.
 
-**포트폴리오 사이트:** [algo-site-hazel.vercel.app](https://algo-site-hazel.vercel.app)  
-**인스타그램:** [@algo__kr](https://instagram.com/algo__kr)
+**포트폴리오:** [algo-site-hazel.vercel.app](https://algo-site-hazel.vercel.app)
 
----
+**Instagram:** [@algo__kr](https://instagram.com/algo__kr)
 
-## 전체 구조
+## 현재 안전 계약
 
-```
-매일 오전 9시 (Windows Task Scheduler)
-        │
-        ▼
-   run_daily.py
-        │
-        ├─ 큐에 항목 있음? → 큐에서 발행
-        └─ 없음? → GPT가 주제 선택 → 파이프라인 실행
-                            │
-                            ▼
-              1. Tavily API      최신 AI/테크 기사 수집
-              2. GPT-4o          앵글 선택 + 6장 스크립트 작성
-              3. FactChecker     hallucination 검사 + 교차 검증
-              4. DALL-E 3        배경 이미지 생성
-              5. Pillow          1080×1350px 카드 렌더링
-              6. Instagram API   캐러셀 자동 업로드
-              7. export_meta.py  algo-site 대시보드 자동 갱신
+- Queue Lineage V2가 출처 metadata·schema version·lineage hash를 검증합니다.
+- Fact Checker V2가 근거에 연결된 claim만 렌더링과 게시 단계로 전달합니다.
+- publisher 호출 전에 durable attempt를 DB에 기록합니다.
+- 빈 원격 ID, 저장 실패, stale attempt는 자동 재시도하지 않습니다.
+- Analytics V2의 추천은 검토용 초안이며 게시 정책을 자동 변경하지 않습니다.
+- 자동 게시의 기본값은 **비활성화**입니다.
+
+직접 주제 게시, legacy queue, cached output 직접 업로드, dashboard 직접 게시처럼 durable attempt를 우회하는 경로는 차단되어 있습니다.
+
+## 처리 흐름
+
+```text
+뉴스 수집 → Queue V2 attestation → Claim 생성 → 결정론 검증
+→ Semantic Critic → Script 조립 → 렌더링 → publish attempt 기록
+→ Instagram API → remote ID 기록 → published 확정
 ```
 
----
+## 주요 구성
 
-## 파일 구조
-
-```
-cardnews/
-├── main.py                  # CLI 진입점
-├── proxy_router.py          # ngrok 단일 터널 라우터
-├── start_services.bat       # Flask + proxy + ngrok 한 번에 시작
-├── run_daily.bat            # 레거시 (run_daily.py로 대체됨)
-│
-├── src/
-│   ├── pipeline.py          # 전체 파이프라인 오케스트레이터
-│   ├── persona.py           # 브랜드 페르소나 관리
-│   ├── db.py                # SQLite 게시 이력
-│   ├── dashboard/           # Flask 로컬 관리 대시보드 (localhost:5001)
-│   └── agents/
-│       ├── trend_analyzer.py     # Tavily 기사 수집
-│       ├── content_creator.py    # GPT-4o 스크립트 생성
-│       ├── fact_checker.py       # 팩트체크 + 할루시네이션 검증
-│       ├── image_searcher.py     # DALL-E 3 이미지 생성
-│       ├── design_renderer.py    # Pillow 카드 렌더링
-│       ├── publisher.py          # Instagram Graph API 업로드
-│       └── content_queue.py      # 예약 큐 관리
-│
-└── scripts/
-    ├── run_daily.py         # Task Scheduler 엔트리포인트
-    ├── export_meta.py       # algo-site posts_meta.json 갱신 + git push
-    ├── backfill_meta.py     # 기존 output 폴더 meta.json 생성
-    ├── backfill_ig_ids.py   # Instagram API로 ig_post_id 백필
-    └── capture_dashboard.py # Playwright 대시보드 스크린샷 자동 캡처
+```text
+main.py                         CLI 진입점
+src/pipeline.py                 생성·검증·게시 orchestration
+src/agents/content_queue.py     Queue V2 등록과 안전한 게시 상태 머신
+src/qa/                         claim 생성·결정론 검증·semantic critic
+src/analytics/                  실험 분석과 검토형 recommendation
+src/api/                        실험 제어 API
+src/dashboard/                  로컬 관리 dashboard
+src/queue_runtime.py            DB backup 및 checksum migration
+src/automation_mode.py          무인 자동화 fail-closed 설정
+docs/runbooks/                  migration·검증·rollout 절차
+tests/                          격리된 회귀·부작용 방지 테스트
 ```
 
----
+## 설치
 
-## 실행 방법
-
-### 서비스 시작 (컴퓨터 켤 때)
-```bash
-start_services.bat
+```powershell
+python -m venv venv
+.\venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip
+pip install -r requirements.txt
+Copy-Item .env.example .env
 ```
-Flask 대시보드(5001), proxy_router(9000), ngrok 터널을 한 번에 시작합니다.  
-컴퓨터 로그인 시 Task Scheduler가 자동 실행합니다.
 
-### 수동 카드뉴스 생성
-```bash
-# 주제 지정해서 생성만
+`.env`의 실제 키와 토큰은 Git에 추가하지 마세요. 기본 자동화 설정은 다음과 같이 게시를 차단합니다.
+
+```dotenv
+ALGO_ENV=production
+AGENT_AUTO_UPLOAD=false
+AGENT_DRY_RUN=true
+```
+
+## 안전 검증
+
+테스트는 운영 DB가 아닌 임시 DB만 사용합니다.
+
+```powershell
+$env:ALGO_ENV = "test"
+$env:OPENAI_API_KEY = "test-key"
+$env:TAVILY_API_KEY = "test-key"
+python -m pytest tests -q
+```
+
+## 운영 준비
+
+Scheduler, dashboard, 로그인 작업, `main.py` 프로세스를 모두 종료한 뒤 Queue V2 migration을 실행합니다.
+
+```powershell
+$env:ALGO_ENV = "production"
+python -m src.queue_runtime --db data/algo.db
+```
+
+기존 DB는 변경 전에 `data/backups/` 아래에 일관된 SQLite backup이 생성됩니다. 자세한 검증과 rollback 절차는 [Queue migration runbook](docs/runbooks/queue-lineage-v2-migration.md)을 따르세요.
+
+## 실행 모드
+
+검증된 뉴스 한 건을 Queue에 등록하되 게시하지 않습니다.
+
+```powershell
+python main.py --queue 1
+```
+
+검토 후 Queue의 다음 한 건을 감독하에 게시합니다.
+
+```powershell
+python main.py --queue-publish --publish
+```
+
+직접 주제 생성은 가능하지만 Instagram 게시는 차단됩니다.
+
+```powershell
 python main.py "AI 에이전트의 미래"
-
-# 생성 + 인스타 업로드
-python main.py "AI 에이전트의 미래" --publish
-
-# 이미 생성된 카드 바로 업로드
-python main.py --upload-dir 20260503_1257_양자컴퓨터의_상장_랠리
 ```
 
-### 로컬 대시보드
-```
-http://localhost:5001
-```
-생성 현황, 큐 관리, 성과 분석, 설정을 웹 UI로 관리합니다.
+무인 자동화는 staging 검증과 감독 게시가 끝난 후에만 활성화합니다. Windows Task Scheduler와 로그인 작업은 `.env`의 세 값이 모두 명시적으로 live 조건을 만족할 때만 게시합니다.
 
----
-
-## 환경 변수 (.env)
-
-```
-OPENAI_API_KEY=
-TAVILY_API_KEY=
-IG_ACCESS_TOKEN=
-IG_USER_ID=
-IG_IMAGE_BASE_URL=https://your-ngrok-domain.ngrok-free.dev
-NUM_CARDS=6
+```dotenv
+ALGO_ENV=production
+AGENT_AUTO_UPLOAD=true
+AGENT_DRY_RUN=false
 ```
 
----
+전체 전환 순서는 [Staged rollout runbook](docs/runbooks/staged-rollout.md)을 따르세요.
+
+## 운영 제한
+
+- `--queue-add`: 출처 attestation이 없어 차단
+- 직접 주제와 `--publish`: Queue V2를 우회하므로 차단
+- `--upload-dir`: durable attempt를 우회하므로 차단
+- dashboard `/publish_now`: 직접 게시 차단
+- uncertain attempt: 자동 reset·자동 retry 금지
+- Analytics recommendation 승인: policy activation과 분리
 
 ## 기술 스택
 
-| 역할 | 도구 |
-|------|------|
-| 기사 수집 | Tavily API |
-| 스크립트 생성 | OpenAI GPT-4o |
-| 이미지 생성 | DALL-E 3 |
-| 카드 렌더링 | Python Pillow |
-| 발행 | Instagram Graph API |
-| 로컬 대시보드 | Flask + SQLite |
-| 포트폴리오 사이트 | Next.js 15 + Vercel |
-| 자동화 | Windows Task Scheduler |
-| 이미지 서빙 | ngrok + proxy_router |
+| 영역 | 기술 |
+|---|---|
+| 수집·생성 | Tavily, OpenAI |
+| 검증 | Pydantic schema, deterministic verifier, semantic critic |
+| 렌더링 | Pillow |
+| 게시 | Instagram Graph API |
+| 저장 | SQLite |
+| API·Dashboard | FastAPI, Flask |
+| 테스트·CI | pytest, GitHub Actions |
+| 자동화 | APScheduler, Windows Task Scheduler |
 
-## Security & Quality Updates (2026-07-28)
-- **Fail-Closed Publishing**: Pipeline uses `PipelineResult` to ensure true publish completion before reporting success.
-- **Quality Gate Enforced**: `validate_content_quality` blocks unverifiable or inconsistent claims before calling publisher.
-- **API Preflight**: `src/api/preflight.py` prevents execution with invalid tokens.
+## 운영 문서
+
+- [Staged rollout](docs/runbooks/staged-rollout.md)
+- [Queue Lineage V2 migration](docs/runbooks/queue-lineage-v2-migration.md)
+- [Fact Checker V2](docs/runbooks/fact-checker-v2.md)
+- [Analytics V2](docs/runbooks/analytics-v2.md)

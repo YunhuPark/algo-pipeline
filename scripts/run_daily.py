@@ -18,6 +18,8 @@ sys.path.insert(0, str(ROOT))
 from dotenv import load_dotenv
 load_dotenv(ROOT / ".env")
 
+from src.automation_mode import resolve_automation_mode
+
 LOG = ROOT / "logs" / "scheduler.log"
 LOCK_FILE = ROOT / "logs" / "pipeline.lock"
 
@@ -98,6 +100,8 @@ def _try_acquire_lock() -> bool:
 def main() -> None:
     _log("=== 알고 일일 자동화 시작 ===")
 
+    automation_mode = resolve_automation_mode()
+
     from src.queue_runtime import prepare_queue_runtime
     prepare_queue_runtime()
 
@@ -120,13 +124,17 @@ def main() -> None:
             )
             if queued.returncode != 0:
                 raise RuntimeError("Queue V2 뉴스 등록 실패")
-        _log("Queue V2에서 발행")
-        proc = subprocess.run(
-            [sys.executable, str(ROOT / "main.py"), "--queue-publish", "--publish"],
-            cwd=str(ROOT),
-        )
         topic = "큐 항목"
-        result.returncode = proc.returncode
+        if automation_mode.live_publish:
+            _log("Queue V2에서 발행")
+            proc = subprocess.run(
+                [sys.executable, str(ROOT / "main.py"), "--queue-publish", "--publish"],
+                cwd=str(ROOT),
+            )
+            result.returncode = proc.returncode
+        else:
+            _log("자동 게시 비활성 — 검증된 pending 큐를 보존합니다.")
+            result.returncode = 0
 
     finally:
         LOCK_FILE.unlink(missing_ok=True)

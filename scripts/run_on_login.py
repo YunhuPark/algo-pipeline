@@ -27,6 +27,8 @@ sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="repla
 from dotenv import load_dotenv
 load_dotenv(ROOT / ".env")
 
+from src.automation_mode import resolve_automation_mode
+
 LOG_DIR = ROOT / "logs"
 LOG_DIR.mkdir(exist_ok=True)
 LOCK_FILE = LOG_DIR / "pipeline.lock"
@@ -183,6 +185,7 @@ def _try_acquire_lock() -> bool:
 
 def startup() -> None:
     """초기 기동 (DB 초기화) 및 파이프라인 실행."""
+    automation_mode = resolve_automation_mode()
     from src.queue_runtime import prepare_queue_runtime
     prepare_queue_runtime()
 
@@ -194,20 +197,30 @@ def startup() -> None:
     _log("오늘 게시물 없음 → 파이프라인 시작")
     _notify("알고 카드뉴스 🤖", "카드뉴스 생성을 시작합니다...")
     try:
-        if has_pending_queue():
+        pending = has_pending_queue()
+        if pending and automation_mode.live_publish:
             _log("큐에서 발행")
             cmd = [sys.executable, str(ROOT / "main.py"), "--queue-publish", "--publish"]
         else:
-            _log("검증된 뉴스 수집 후 Queue V2 등록")
-            queued = subprocess.run(
-                [sys.executable, str(ROOT / "main.py"), "--queue", "1"],
-                cwd=str(ROOT),
-            )
-            if queued.returncode != 0:
-                raise RuntimeError("Queue V2 뉴스 등록 실패")
-            cmd = [sys.executable, str(ROOT / "main.py"), "--queue-publish", "--publish"]
+            if not pending:
+                _log("검증된 뉴스 수집 후 Queue V2 등록")
+                queued = subprocess.run(
+                    [sys.executable, str(ROOT / "main.py"), "--queue", "1"],
+                    cwd=str(ROOT),
+                )
+                if queued.returncode != 0:
+                    raise RuntimeError("Queue V2 뉴스 등록 실패")
+            if automation_mode.live_publish:
+                cmd = [sys.executable, str(ROOT / "main.py"), "--queue-publish", "--publish"]
+            else:
+                _log("자동 게시 비활성 — 검증된 pending 큐를 보존합니다.")
+                cmd = None
 
-        result = subprocess.run(cmd, cwd=str(ROOT))
+        result = (
+            subprocess.run(cmd, cwd=str(ROOT))
+            if cmd
+            else subprocess.CompletedProcess(args=[], returncode=0)
+        )
     finally:
         LOCK_FILE.unlink(missing_ok=True)
 
@@ -232,6 +245,8 @@ def startup() -> None:
         _log("오류 알림 전송")
 
 def main() -> None:
+    # Validate the unattended mode before starting dashboard or proxy services.
+    resolve_automation_mode()
     _log("=== 로그인 트리거 시작 ===")
     _ensure_services()
 
