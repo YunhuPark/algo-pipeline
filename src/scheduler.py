@@ -13,10 +13,10 @@
   AGENT_POST_HOUR   = 9      # 업로드 시간 (기본 9)
   AGENT_COMMENT_MIN = 30     # 댓글 체크 주기(분)
   AGENT_DM_MIN      = 60     # DM 체크 주기(분)
-  AGENT_AUTO_UPLOAD = true   # Instagram 자동 업로드
+  AGENT_AUTO_UPLOAD = false  # 명시적으로 true일 때만 Instagram 자동 업로드
   AGENT_THREADS     = false  # Threads 동시 발행
   AGENT_BLOG        = false  # 블로그 동시 발행
-  AGENT_DRY_RUN     = false  # 시뮬레이션 모드
+  AGENT_DRY_RUN     = true   # 기본값은 시뮬레이션 모드
   AGENT_TEMPLATE    = auto   # 디자인 템플릿
 """
 from __future__ import annotations
@@ -35,15 +35,18 @@ from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 from dotenv import load_dotenv
 
+from src.automation_mode import resolve_automation_mode
+
 load_dotenv()
 
 POST_HOUR       = int(os.getenv("AGENT_POST_HOUR",    "9"))
 COMMENT_MIN     = int(os.getenv("AGENT_COMMENT_MIN",  "30"))
 DM_MIN          = int(os.getenv("AGENT_DM_MIN",       "60"))
-AUTO_UPLOAD     = os.getenv("AGENT_AUTO_UPLOAD", "true").lower()  == "true"
+_AUTOMATION_MODE = resolve_automation_mode()
+AUTO_UPLOAD     = _AUTOMATION_MODE.live_publish
 AGENT_THREADS   = os.getenv("AGENT_THREADS",     "false").lower() == "true"
 AGENT_BLOG      = os.getenv("AGENT_BLOG",        "false").lower() == "true"
-DRY_RUN         = os.getenv("AGENT_DRY_RUN",     "false").lower() == "true"
+DRY_RUN         = _AUTOMATION_MODE.dry_run
 AGENT_TEMPLATE  = os.getenv("AGENT_TEMPLATE",    "auto")
 
 
@@ -66,25 +69,29 @@ def job_daily_cardnews() -> None:
         status = get_status()
         _log(f"  큐 대기: {status['pending']}개")
 
-        if status["pending"] > 0:
+        if status["pending"] > 0 and AUTO_UPLOAD:
             # 큐에서 발행
             _log("  큐에서 다음 항목 발행...")
-            res = publish_next(publish_to_ig=AUTO_UPLOAD and not DRY_RUN)
+            res = publish_next(publish_to_ig=True)
             if not res:
                 raise Exception("큐 발행 실패")
-        else:
+        elif status["pending"] == 0:
             _log("  큐 없음 → 검증된 뉴스 수집 후 Queue V2 등록...")
             ids = bulk_generate(count=1, auto_news=True)
             if not ids:
                 raise Exception("검증된 뉴스가 없어 Queue V2 등록 실패")
-            res = publish_next(publish_to_ig=AUTO_UPLOAD and not DRY_RUN)
-            if not res:
-                raise Exception("Queue V2 발행 실패")
+            if AUTO_UPLOAD:
+                res = publish_next(publish_to_ig=True)
+                if not res:
+                    raise Exception("Queue V2 발행 실패")
+
+        if not AUTO_UPLOAD:
+            _log("  자동 게시 비활성 — 검증된 pending 큐를 보존합니다.")
 
         # 텔레그램 완료 알림
         try:
             from src.telegram_bot import notify
-            if AUTO_UPLOAD and not DRY_RUN:
+            if AUTO_UPLOAD:
                 notify("✅ 오늘의 알고 카드뉴스 업로드 완료!")
             else:
                 notify("✅ 오늘의 알고 카드뉴스 생성 완료 (업로드 생략)!")
