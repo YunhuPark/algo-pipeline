@@ -50,8 +50,17 @@ Review the Queue in the local dashboard or with a reviewed read-only SQLite insp
 
 Keep the Scheduler and login task disabled. Publish exactly one reviewed pending Queue item from an interactive console:
 
-Before the command, verify `IG_ACCESS_TOKEN` and `IG_USER_ID` without printing their
-values. `IG_IMAGE_BASE_URL` must be an explicit HTTPS base URL. Using
+First follow `instagram-auth-setup.md`, including rotation of any previously exposed
+app secret or access token. Then run the read-only remote account preflight:
+
+```powershell
+python scripts/ig_preflight.py
+```
+
+The preflight must succeed without printing `IG_ACCESS_TOKEN`, changing the database,
+uploading media, or creating a container. It verifies that the token resolves to the
+configured `IG_USER_ID` before the Queue is dequeued. `IG_IMAGE_BASE_URL` must be an
+explicit HTTPS base URL. Using
 `IG_IMAGE_BASE_URL=catbox` is a separate, explicit approval to upload every generated
 image to a third-party public service. An empty value must fail before dequeue and
 before a durable publish attempt is recorded.
