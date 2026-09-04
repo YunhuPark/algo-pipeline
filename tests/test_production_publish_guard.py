@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ast
 import os
+import sqlite3
 import subprocess
 import sys
 from pathlib import Path
@@ -95,3 +96,61 @@ def test_cached_output_direct_publish_is_blocked():
     )
     assert result.returncode == 2
     assert "durable publish attempt" in result.stdout
+
+
+def test_queue_publish_cli_blocks_invalid_configuration_before_attempt(tmp_path, monkeypatch):
+    from src import db
+    from src.db_migration_queue import migrate_queue_lineage_v2
+    from src.schemas.queue_schemas import CollectionMethod, QueueMetadataV2
+
+    db_path = tmp_path / "algo.db"
+    monkeypatch.setenv("ALGO_ENV", "test")
+    monkeypatch.setenv("ALGO_DB_PATH", str(db_path))
+    db.init_db(db_path)
+    migrate_queue_lineage_v2(db_path)
+    row_id = db.enqueue_v2(
+        QueueMetadataV2(
+            topic="verified topic",
+            source_title="source",
+            source_url="https://example.test/article",
+            context="verified source context",
+            evidence=[{"title": "source", "url": "https://example.test/article"}],
+        ),
+        CollectionMethod.NEWS_COLLECTOR,
+    )
+
+    env = os.environ.copy()
+    env.update(
+        {
+            "ALGO_ENV": "production",
+            "ALGO_DB_PATH": str(db_path),
+            "ALLOW_PERSISTENT_DB": "true",
+            "OPENAI_API_KEY": "test-key",
+            "TAVILY_API_KEY": "test-key",
+            "IG_IMAGE_BASE_URL": "",
+        }
+    )
+    env.pop("IG_ACCESS_TOKEN", None)
+    env.pop("IG_USER_ID", None)
+
+    result = subprocess.run(
+        [sys.executable, str(ROOT / "main.py"), "--queue-publish", "--publish"],
+        cwd=ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        check=False,
+    )
+
+    assert result.returncode == 2
+    assert "게시 설정 차단" in result.stdout
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute("SELECT * FROM queue WHERE id=?", (row_id,)).fetchone()
+    assert row["status"] == "pending"
+    assert row["publish_attempt_id"] is None
+    assert row["publish_started_at"] is None
+    assert row["publish_attempt_state"] == "NOT_ATTEMPTED"
+    assert row["publish_error_code"] is None
