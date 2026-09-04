@@ -31,3 +31,12 @@ def test_supervised_publish_requires_explicit_public_image_delivery():
     assert "IG_IMAGE_BASE_URL" in RUNBOOK
     assert "third-party public service" in RUNBOOK
     assert "before dequeue" in RUNBOOK
+
+
+def test_supervised_publish_requires_read_only_account_preflight():
+    assert "python scripts/ig_preflight.py" in RUNBOOK
+    assert "configured `IG_USER_ID`" in RUNBOOK
+    assert "without printing `IG_ACCESS_TOKEN`" in RUNBOOK
+    assert RUNBOOK.index("scripts/ig_preflight.py") < RUNBOOK.index(
+        "main.py --queue-publish --publish"
+    )
