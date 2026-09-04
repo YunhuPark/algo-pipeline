@@ -69,3 +69,61 @@ def test_publish_rejects_empty_url_before_network(monkeypatch, tmp_path: Path):
 
     catbox.assert_not_called()
     http_post.assert_not_called()
+
+
+def test_remote_account_preflight_uses_instagram_login_and_matches_id(monkeypatch):
+    publisher = _publisher(monkeypatch)
+    calls = []
+
+    def client(url, params):
+        calls.append((url, params))
+        return {
+            "id": "ig-test-user",
+            "username": "verified_account",
+            "account_type": "BUSINESS",
+        }
+
+    result = publisher.verify_instagram_account(http_client=client)
+
+    assert result["status"] == "ok"
+    assert calls[0][0] == "https://graph.instagram.com/v21.0/me"
+    assert calls[0][1]["fields"] == "id,username,account_type"
+
+
+def test_remote_account_mismatch_fails_closed_without_token_leak(monkeypatch):
+    publisher = _publisher(monkeypatch)
+    secret = "IGAA-this-must-never-appear"
+    monkeypatch.setattr(publisher, "IG_ACCESS_TOKEN", secret)
+
+    with pytest.raises(publisher.PublishConfigurationError) as exc:
+        publisher.verify_instagram_account(
+            http_client=lambda _url, _params: {
+                "id": "different-user",
+                "account_type": "BUSINESS",
+            }
+        )
+
+    assert "ACCOUNT_MISMATCH" in str(exc.value)
+    assert secret not in str(exc.value)
+
+
+@pytest.mark.parametrize(
+    "payload,error_code",
+    [
+        ({"error": {"code": 190, "error_subcode": 460}}, "TOKEN_EXPIRED"),
+        ({"error": {"code": 190}}, "TOKEN_INVALID"),
+        ({"error": {"code": 10}}, "PERMISSION_DENIED"),
+    ],
+)
+def test_remote_account_errors_are_sanitized(monkeypatch, payload, error_code):
+    publisher = _publisher(monkeypatch)
+    secret = "IGAA-this-must-never-appear"
+    monkeypatch.setattr(publisher, "IG_ACCESS_TOKEN", secret)
+
+    with pytest.raises(publisher.PublishConfigurationError) as exc:
+        publisher.verify_instagram_account(
+            http_client=lambda _url, _params: payload
+        )
+
+    assert error_code in str(exc.value)
+    assert secret not in str(exc.value)

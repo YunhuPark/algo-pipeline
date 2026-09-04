@@ -111,6 +111,16 @@ def test_publish_configuration_is_checked_before_dequeue(monkeypatch):
     dequeue.assert_not_called()
 
 
+def test_publish_configuration_includes_remote_account_preflight():
+    with patch("src.agents.publisher.validate_publish_config") as local, patch(
+        "src.agents.publisher.verify_instagram_account"
+    ) as remote:
+        content_queue._validate_publish_configuration()
+
+    local.assert_called_once_with()
+    remote.assert_called_once_with()
+
+
 def test_manual_topic_is_blocked(queue_db):
     with pytest.raises(ValueError, match="evidence"):
         content_queue.add_topic("출처 없는 주제")
