@@ -42,9 +42,10 @@ RETRYABLE_PRE_PUBLISH_ERRORS = {
 
 def _validate_publish_configuration() -> None:
     """Fail before dequeue/attempt mutation when remote publishing is unsafe."""
-    from src.agents.publisher import validate_publish_config
+    from src.agents.publisher import validate_publish_config, verify_instagram_account
 
     validate_publish_config()
+    verify_instagram_account()
 
 
 def _collect_news():

@@ -3,26 +3,18 @@ Phase 4 (선택): Instagram Graph API Publisher
 생성된 카드뉴스 이미지를 인스타그램 캐러셀 게시물로 자동 업로드.
 
 ── 사전 요구사항 ─────────────────────────────────────────────────────
-1. Meta Developer 앱 생성
-   https://developers.facebook.com → '앱 만들기' → '비즈니스' 유형
+1. Meta Developer 앱에서 Instagram API with Instagram Login 구성
 
-2. Instagram 비즈니스/크리에이터 계정 연결
-   → 개인 인스타 계정을 프로페셔널(비즈니스/크리에이터) 전환 후
-   → Facebook 페이지와 연결
+2. Instagram 계정을 프로페셔널(비즈니스/크리에이터) 계정으로 전환
 
 3. 필요한 권한 (Permissions):
-   instagram_basic, instagram_content_publish, pages_read_engagement
+   instagram_business_basic, instagram_business_content_publish
 
-4. 장기 액세스 토큰 발급 (60일 유효, 자동 갱신 코드 포함)
-   https://developers.facebook.com/tools/explorer
+4. ``python scripts/get_ig_token.py``로 Instagram Login OAuth 수행
 
-5. Instagram 비즈니스 계정 ID 확인
-   GET https://graph.facebook.com/me/accounts → 연결된 페이지 ID 확인
-   GET https://graph.facebook.com/{page_id}?fields=instagram_business_account
-
-6. .env에 아래 3개 항목 추가:
-   IG_ACCESS_TOKEN=EAAxxxxxxxx...
-   IG_USER_ID=17841xxxxxxxxx
+5. .env에 아래 3개 항목 추가:
+   IG_ACCESS_TOKEN=<Instagram Login token>
+   IG_USER_ID=<Instagram professional account id>
    IG_IMAGE_BASE_URL=https://your-server.com/images/   ← 이미지 공개 URL (아래 참고)
 
 ── 이미지 공개 URL 옵션 ─────────────────────────────────────────────
@@ -73,6 +65,7 @@ IG_USER_ID       = os.getenv("IG_USER_ID", "")
 IG_IMAGE_BASE_URL = os.getenv("IG_IMAGE_BASE_URL", "")  # 공개 이미지 URL 베이스
 
 GRAPH_BASE = "https://graph.instagram.com/v21.0"
+GRAPH_ORIGIN = "https://graph.instagram.com"
 
 
 class PublishConfigurationError(RuntimeError):
@@ -112,6 +105,32 @@ def validate_publish_config(base_url: str = "") -> tuple[str, bool]:
         )
 
     return configured.rstrip("/"), False
+
+
+def verify_instagram_account(
+    http_client=None,
+    *,
+    access_token: str | None = None,
+    user_id: str | None = None,
+) -> dict:
+    """Verify credentials and account identity without creating remote media."""
+    from src.api.preflight import IGPreflightCheck, PreflightError
+
+    token = IG_ACCESS_TOKEN if access_token is None else access_token
+    expected_user_id = IG_USER_ID if user_id is None else user_id
+    if not token or not expected_user_id:
+        raise PublishConfigurationError(
+            ".env에 IG_ACCESS_TOKEN과 IG_USER_ID가 없습니다."
+        )
+    try:
+        return IGPreflightCheck(http_client=http_client).check_account(
+            token,
+            expected_user_id,
+        )
+    except PreflightError as exc:
+        raise PublishConfigurationError(
+            f"Instagram 원격 사전검사 실패 ({exc.code}). 게시를 차단합니다."
+        ) from exc
 
 
 # ── 로컬 이미지 서버 + ngrok 자동 터널 ───────────────────
@@ -359,33 +378,29 @@ def publish(
 
 
 def check_token_status() -> dict:
-    """액세스 토큰 상태 및 만료일 확인"""
-    resp = httpx.get(
-        f"{GRAPH_BASE}/debug_token",
-        params={
-            "input_token":  IG_ACCESS_TOKEN,
-            "access_token": IG_ACCESS_TOKEN,
-        },
-        timeout=10,
-    )
-    return resp.json().get("data", {})
+    """Return a sanitized read-only account verification result."""
+    return verify_instagram_account()
 
 
-def refresh_long_lived_token(short_lived_token: str, app_id: str, app_secret: str) -> str:
-    """
-    단기 토큰 → 장기 액세스 토큰 (60일) 변환
-    """
-    resp = httpx.get(
-        f"{GRAPH_BASE}/oauth/access_token",
-        params={
-            "grant_type":        "fb_exchange_token",
-            "client_id":         app_id,
-            "client_secret":     app_secret,
-            "fb_exchange_token": short_lived_token,
-        },
-        timeout=10,
-    )
-    data = resp.json()
-    if "access_token" not in data:
-        raise RuntimeError(f"토큰 갱신 실패: {data}")
-    return data["access_token"]
+def exchange_long_lived_token(short_lived_token: str, app_secret: str) -> str:
+    """Exchange an Instagram Login short-lived token for a long-lived token."""
+    try:
+        resp = httpx.get(
+            f"{GRAPH_ORIGIN}/access_token",
+            params={
+                "grant_type": "ig_exchange_token",
+                "client_secret": app_secret,
+                "access_token": short_lived_token,
+            },
+            timeout=10,
+        )
+        data = resp.json()
+    except (httpx.HTTPError, ValueError) as exc:
+        raise PublishConfigurationError(
+            "Instagram 장기 토큰 교환 요청에 실패했습니다."
+        ) from exc
+    if not isinstance(data, dict) or "access_token" not in data:
+        raise PublishConfigurationError(
+            "Instagram 장기 토큰 교환이 거부되었습니다. 응답은 출력하지 않습니다."
+        )
+    return str(data["access_token"])

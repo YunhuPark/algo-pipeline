@@ -109,7 +109,9 @@ AGENT_AUTO_UPLOAD=true
 AGENT_DRY_RUN=false
 ```
 
-전체 전환 순서는 [Staged rollout runbook](docs/runbooks/staged-rollout.md)을 따르세요.
+Instagram 자격증명은 [Instagram auth setup](docs/runbooks/instagram-auth-setup.md)을
+먼저 완료하고, 전체 전환은 [Staged rollout runbook](docs/runbooks/staged-rollout.md)을
+따르세요.
 
 ## 운영 제한
 
@@ -136,6 +138,7 @@ AGENT_DRY_RUN=false
 ## 운영 문서
 
 - [Staged rollout](docs/runbooks/staged-rollout.md)
+- [Instagram auth setup](docs/runbooks/instagram-auth-setup.md)
 - [Queue Lineage V2 migration](docs/runbooks/queue-lineage-v2-migration.md)
 - [Fact Checker V2](docs/runbooks/fact-checker-v2.md)
 - [Analytics V2](docs/runbooks/analytics-v2.md)

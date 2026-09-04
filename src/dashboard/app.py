@@ -690,25 +690,6 @@ document.addEventListener('keydown',e=>{{if(!document.getElementById('lightbox')
 </body></html>"""
 
 
-# ── Instagram OAuth 콜백 ─────────────────────────────────
-_ig_oauth_code: dict = {}
-
-@app.route("/callback")
-def ig_oauth_callback():
-    from flask import request, Response
-    code = request.args.get("code")
-    error = request.args.get("error")
-    if code:
-        _ig_oauth_code["code"] = code
-        return Response("<h2>Auth complete! Close this window.</h2>", mimetype="text/html")
-    return Response(f"<h2>Auth failed: {error}</h2>", mimetype="text/html", status=400)
-
-@app.route("/callback/code")
-def ig_oauth_get_code():
-    from flask import jsonify
-    return jsonify(_ig_oauth_code)
-
-
 # ── / 메인 대시보드 ───────────────────────────────────────
 
 @app.route("/")

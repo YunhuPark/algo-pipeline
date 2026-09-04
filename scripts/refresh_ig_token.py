@@ -1,96 +1,99 @@
-"""
-Instagram 장기 토큰 자동 갱신 스크립트.
-만료까지 15일 이하 남으면 갱신하고 .env 파일을 업데이트.
-Windows 작업 스케줄러에 매주 실행 등록 권장.
-"""
+"""Manually refresh an Instagram Login long-lived token without logging it."""
 from __future__ import annotations
 
-import io
 import os
-import re
 import sys
-from datetime import datetime, timezone
 from pathlib import Path
-
-sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
+from typing import Any
 
 import httpx
 from dotenv import load_dotenv
 
-ROOT = Path(__file__).parent.parent
-load_dotenv(ROOT / ".env")
 
-IG_ACCESS_TOKEN = os.getenv("IG_ACCESS_TOKEN", "")
-GRAPH_BASE = "https://graph.instagram.com/v21.0"
-REFRESH_THRESHOLD_DAYS = 15
-
-
-def _log(msg: str) -> None:
-    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    print(f"[{ts}] {msg}", flush=True)
+ROOT = Path(__file__).resolve().parents[1]
+ENV_PATH = ROOT / ".env"
+REFRESH_ENDPOINT = "https://graph.instagram.com/refresh_access_token"
+ACCOUNT_ENDPOINT = "https://graph.instagram.com/v21.0/me"
 
 
-def get_token_expiry(token: str) -> int | None:
-    """Instagram Business Login 토큰 만료 시각(unix) 반환. 실패 시 None."""
-    resp = httpx.get(
-        f"{GRAPH_BASE}/me",
-        params={"fields": "id,username", "access_token": token},
-        timeout=10,
-    )
-    data = resp.json()
-    if "error" in data:
-        _log(f"토큰 상태 확인 오류: {data['error'].get('message', data)}")
-        return None
-    # Instagram Business Login 토큰은 /me 응답에 만료일 없음
-    # refresh 엔드포인트 응답의 expires_in으로 만료까지 남은 초 확인
-    refresh_resp = httpx.get(
-        f"{GRAPH_BASE}/refresh_access_token",
-        params={"grant_type": "ig_refresh_token", "access_token": token},
-        timeout=15,
-    )
-    rdata = refresh_resp.json()
-    if "access_token" in rdata:
-        expires_in = rdata.get("expires_in", 0)
-        days_left = expires_in // 86400
-        return days_left, rdata["access_token"]
-    return None
+class TokenRefreshError(RuntimeError):
+    """Sanitized token refresh failure."""
+
+
+def _response_json(response: httpx.Response, stage: str) -> dict[str, Any]:
+    try:
+        data = response.json()
+    except ValueError as exc:
+        raise TokenRefreshError(f"{stage} returned an invalid response.") from exc
+    if not isinstance(data, dict) or "error" in data:
+        raise TokenRefreshError(f"{stage} was rejected; provider response is hidden.")
+    return data
+
+
+def refresh_token(token: str) -> tuple[str, int]:
+    try:
+        response = httpx.get(
+            REFRESH_ENDPOINT,
+            params={"grant_type": "ig_refresh_token", "access_token": token},
+            timeout=15,
+        )
+    except httpx.HTTPError as exc:
+        raise TokenRefreshError("Instagram token refresh could not be completed.") from exc
+    data = _response_json(response, "Instagram token refresh")
+    new_token = str(data.get("access_token") or "")
+    if not new_token:
+        raise TokenRefreshError("Instagram token refresh returned no token.")
+    return new_token, int(data.get("expires_in") or 0)
+
+
+def verify_account(token: str, expected_user_id: str) -> None:
+    try:
+        response = httpx.get(
+            ACCOUNT_ENDPOINT,
+            params={"fields": "id", "access_token": token},
+            timeout=10,
+        )
+    except httpx.HTTPError as exc:
+        raise TokenRefreshError("Refreshed token verification could not be completed.") from exc
+    data = _response_json(response, "Refreshed token verification")
+    if str(data.get("id") or "") != expected_user_id:
+        raise TokenRefreshError("Refreshed token belongs to a different account.")
 
 
 def update_env_token(new_token: str) -> None:
-    env_path = ROOT / ".env"
-    content = env_path.read_text(encoding="utf-8")
-    content = re.sub(
-        r"^IG_ACCESS_TOKEN=.*$",
-        f"IG_ACCESS_TOKEN={new_token}",
-        content,
-        flags=re.MULTILINE,
-    )
-    env_path.write_text(content, encoding="utf-8")
-    _log(".env 토큰 업데이트 완료")
+    current = ENV_PATH.read_text(encoding="utf-8") if ENV_PATH.exists() else ""
+    output: list[str] = []
+    replaced = False
+    for line in current.splitlines():
+        if line.startswith("IG_ACCESS_TOKEN="):
+            output.append(f"IG_ACCESS_TOKEN={new_token}")
+            replaced = True
+        else:
+            output.append(line)
+    if not replaced:
+        output.append(f"IG_ACCESS_TOKEN={new_token}")
+    ENV_PATH.write_text("\n".join(output).rstrip("\n") + "\n", encoding="utf-8")
 
 
-def main() -> None:
-    if not IG_ACCESS_TOKEN:
-        _log("IG_ACCESS_TOKEN 없음 -- 스킵")
-        sys.exit(0)
-
-    _log("Instagram 토큰 상태 확인 중...")
-
-    result = get_token_expiry(IG_ACCESS_TOKEN)
-    if result is None:
-        _log("만료일 확인 불가 -- 현재 토큰 유지")
-        sys.exit(0)
-
-    days_left, new_token = result
-    _log(f"토큰 만료까지 {days_left}일 남음")
-
-    if new_token != IG_ACCESS_TOKEN:
-        _log("갱신된 토큰 수신 -- .env 업데이트")
+def main() -> int:
+    load_dotenv(ENV_PATH, override=True)
+    token = os.getenv("IG_ACCESS_TOKEN", "").strip()
+    user_id = os.getenv("IG_USER_ID", "").strip()
+    if not token or not user_id:
+        print("Token refresh blocked: IG_ACCESS_TOKEN/IG_USER_ID is missing.", file=sys.stderr)
+        return 2
+    try:
+        new_token, expires_in = refresh_token(token)
+        verify_account(new_token, user_id)
         update_env_token(new_token)
-        _log(f"갱신 완료! 새 토큰 만료까지 {days_left}일")
-    else:
-        _log("갱신 불필요 (토큰 유효)")
+    except TokenRefreshError as exc:
+        print(f"Token refresh blocked: {exc}", file=sys.stderr)
+        return 2
+    days = expires_in // 86400 if expires_in else "unknown"
+    print(f"Token refresh complete; validity days: {days}")
+    print("The token value and provider responses were not printed.")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
