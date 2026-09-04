@@ -25,3 +25,9 @@ def test_rollout_requires_migration_and_supervised_publish_first():
 def test_rollout_never_authorizes_automatic_attempt_reset():
     assert "Never clear attempt fields to retry" in RUNBOOK
     assert "unattended publication must remain disabled" in RUNBOOK
+
+
+def test_supervised_publish_requires_explicit_public_image_delivery():
+    assert "IG_IMAGE_BASE_URL" in RUNBOOK
+    assert "third-party public service" in RUNBOOK
+    assert "before dequeue" in RUNBOOK

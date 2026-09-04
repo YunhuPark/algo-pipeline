@@ -179,7 +179,8 @@ def _quality_script() -> CardNewsScript:
 
 def test_queue_does_not_mark_failed_as_published():
     """원격 상태가 불확실하면 published 전환 없이 attempt를 보존한다."""
-    with patch("src.agents.content_queue.dequeue_next", return_value=_attested_row()), \
+    with patch("src.agents.content_queue._validate_publish_configuration"), \
+         patch("src.agents.content_queue.dequeue_next", return_value=_attested_row()), \
          patch("src.agents.content_queue._run_full_pipeline") as mock_pipeline, \
          patch("src.agents.content_queue.mark_queue_status") as mock_mark, \
          patch("src.agents.content_queue.mark_queue_error") as mock_error:

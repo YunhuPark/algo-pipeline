@@ -54,7 +54,10 @@ def _port_open(port: int) -> bool:
 
 def _ensure_services() -> None:
     """Flask(5001) 대시보드가 꺼져 있으면 start_services.bat 실행.
-    Instagram 업로드는 catbox.moe를 사용하므로 ngrok 불필요."""
+
+    이미지 공개 전달 방식은 IG_IMAGE_BASE_URL에서 명시적으로 선택하며,
+    Catbox는 자동 fallback으로 사용하지 않습니다.
+    """
     if _port_open(5001):
         _log("서비스 정상 실행 중 (5001)")
         return

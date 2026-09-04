@@ -50,6 +50,12 @@ Review the Queue in the local dashboard or with a reviewed read-only SQLite insp
 
 Keep the Scheduler and login task disabled. Publish exactly one reviewed pending Queue item from an interactive console:
 
+Before the command, verify `IG_ACCESS_TOKEN` and `IG_USER_ID` without printing their
+values. `IG_IMAGE_BASE_URL` must be an explicit HTTPS base URL. Using
+`IG_IMAGE_BASE_URL=catbox` is a separate, explicit approval to upload every generated
+image to a third-party public service. An empty value must fail before dequeue and
+before a durable publish attempt is recorded.
+
 ```powershell
 $env:ALGO_ENV = "production"
 python main.py --queue-publish --publish
