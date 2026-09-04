@@ -162,7 +162,12 @@ def main() -> None:
         from src.queue_runtime import prepare_queue_runtime
         prepare_queue_runtime()
         from src.agents.content_queue import publish_next
-        result = publish_next(publish_to_ig=args.publish and not args.dry_run)
+        from src.agents.publisher import PublishConfigurationError
+        try:
+            result = publish_next(publish_to_ig=args.publish and not args.dry_run)
+        except PublishConfigurationError as exc:
+            print(f"게시 설정 차단: {exc}")
+            sys.exit(2)
         if result is None:
             sys.exit(1)
         return

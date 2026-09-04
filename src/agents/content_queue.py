@@ -40,6 +40,13 @@ RETRYABLE_PRE_PUBLISH_ERRORS = {
 }
 
 
+def _validate_publish_configuration() -> None:
+    """Fail before dequeue/attempt mutation when remote publishing is unsafe."""
+    from src.agents.publisher import validate_publish_config
+
+    validate_publish_config()
+
+
 def _collect_news():
     from src.agents.news_collector import collect_and_select
 
@@ -141,6 +148,9 @@ def publish_next(publish_to_ig: bool = True) -> dict[str, Any] | None:
     Returns:
         {"id": queue_id, "topic": topic, "paths": [Path, ...]} or None
     """
+    if publish_to_ig:
+        _validate_publish_configuration()
+
     row = dequeue_next()
     if row is None:
         print("  [ContentQueue] 대기 중인 큐가 없습니다.")

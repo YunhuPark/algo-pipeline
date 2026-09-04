@@ -22,6 +22,7 @@ def queue_db(tmp_path, monkeypatch):
     monkeypatch.setenv("ALGO_DB_PATH", str(path))
     db.init_db(path)
     migrate_queue_lineage_v2(path)
+    monkeypatch.setattr(content_queue, "_validate_publish_configuration", lambda: None)
     return path
 
 
@@ -95,6 +96,19 @@ def test_news_without_evidence_enqueues_nothing(queue_db):
     with patch.object(content_queue, "_collect_news", return_value=news):
         assert content_queue.bulk_generate(1) == []
     assert db.queue_count() == 0
+
+
+def test_publish_configuration_is_checked_before_dequeue(monkeypatch):
+    with patch.object(
+        content_queue,
+        "_validate_publish_configuration",
+        side_effect=RuntimeError("unsafe publish configuration"),
+    ) as validate, patch.object(content_queue, "dequeue_next") as dequeue:
+        with pytest.raises(RuntimeError, match="unsafe publish configuration"):
+            content_queue.publish_next(publish_to_ig=True)
+
+    validate.assert_called_once_with()
+    dequeue.assert_not_called()
 
 
 def test_manual_topic_is_blocked(queue_db):
