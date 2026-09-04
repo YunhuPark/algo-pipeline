@@ -30,7 +30,10 @@ Instagram Graph API는 로컬 파일 직접 업로드 불가 — 공개 URL이 �
 옵션 A: ngrok (로컬 개발용)    → ngrok http 8080  → 임시 공개 URL 생성
 옵션 B: Cloudflare Tunnel      → 무료 영구 터널
 옵션 C: AWS S3 / GCS           → 생성 이미지를 버킷에 업로드 후 URL 사용 (권장)
-옵션 D: 내장 HTTP 서버 (이 코드에 포함) → 로컬 서버 자동 시작 + ngrok 연동
+옵션 D: Catbox 공개 업로드        → IG_IMAGE_BASE_URL=catbox 로 명시적 선택
+
+IG_IMAGE_BASE_URL이 비어 있으면 게시를 차단합니다. Catbox는 이미지가 제3자
+서비스에 공개 업로드되므로 빈 설정의 자동 fallback으로 사용하지 않습니다.
 ─────────────────────────────────────────────────────────────────────
 """
 from __future__ import annotations
@@ -42,7 +45,7 @@ import threading
 import time
 from http.server import HTTPServer, SimpleHTTPRequestHandler
 from pathlib import Path
-from urllib.parse import quote
+from urllib.parse import quote, urlparse
 
 import httpx
 import requests
@@ -70,6 +73,45 @@ IG_USER_ID       = os.getenv("IG_USER_ID", "")
 IG_IMAGE_BASE_URL = os.getenv("IG_IMAGE_BASE_URL", "")  # 공개 이미지 URL 베이스
 
 GRAPH_BASE = "https://graph.instagram.com/v21.0"
+
+
+class PublishConfigurationError(RuntimeError):
+    """Raised before any remote publish side effect when configuration is unsafe."""
+
+
+def validate_publish_config(base_url: str = "") -> tuple[str, bool]:
+    """Validate credentials and select an explicitly configured image delivery mode.
+
+    Returns:
+        (url_base, use_catbox)
+
+    The empty value intentionally fails closed. Catbox is accepted only when the
+    operator explicitly sets ``IG_IMAGE_BASE_URL=catbox`` (or ``catbox://``).
+    """
+    if not IG_ACCESS_TOKEN or not IG_USER_ID:
+        raise PublishConfigurationError(
+            ".env에 IG_ACCESS_TOKEN과 IG_USER_ID가 없습니다. "
+            "설정 가이드: src/agents/publisher.py 상단 주석 참고"
+        )
+
+    configured = (base_url or IG_IMAGE_BASE_URL or "").strip()
+    if not configured:
+        raise PublishConfigurationError(
+            "IG_IMAGE_BASE_URL이 비어 있어 게시를 차단합니다. "
+            "공개 HTTPS 베이스 URL을 설정하거나 Catbox 공개 업로드를 승인한 경우에만 "
+            "IG_IMAGE_BASE_URL=catbox를 명시하세요."
+        )
+
+    if configured.lower() in {"catbox", "catbox://"}:
+        return "", True
+
+    parsed = urlparse(configured)
+    if parsed.scheme.lower() != "https" or not parsed.netloc:
+        raise PublishConfigurationError(
+            "IG_IMAGE_BASE_URL은 https:// URL이거나 명시적 catbox 값이어야 합니다."
+        )
+
+    return configured.rstrip("/"), False
 
 
 # ── 로컬 이미지 서버 + ngrok 자동 터널 ───────────────────
@@ -268,20 +310,14 @@ def publish(
     Returns:
         업로드된 게시물 ID
     """
-    if not IG_ACCESS_TOKEN or not IG_USER_ID:
-        raise EnvironmentError(
-            ".env에 IG_ACCESS_TOKEN과 IG_USER_ID가 없습니다.\n"
-            "설정 가이드: src/agents/publisher.py 상단 주석 참고"
-        )
+    url_base, use_catbox = validate_publish_config(base_url)
 
     # PNG 및 MP4 필터 (hashtags.txt 등 제외)
     imgs = [p for p in image_paths if p.suffix.lower() in [".png", ".mp4"]]
     if not imgs:
         raise ValueError("업로드할 미디어(PNG/MP4) 파일이 없습니다.")
 
-    # 공개 URL 결정: catbox → 명시 URL → .env → ngrok 자동 시작
-    url_base = (base_url or IG_IMAGE_BASE_URL or "").rstrip("/")
-    use_catbox = url_base.lower() in ("catbox", "catbox://", "")
+    # 공개 URL은 사전 검증된 명시적 HTTPS URL 또는 명시적 Catbox 선택만 허용합니다.
 
     print(f"\n  [Publisher] Instagram 업로드 시작 ({len(imgs)}장)...")
 
