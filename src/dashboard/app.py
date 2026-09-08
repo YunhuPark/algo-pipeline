@@ -27,9 +27,16 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 # 프로젝트 루트를 sys.path에 추가
-ROOT = Path(__file__).parent.parent.parent
+ROOT = Path(__file__).resolve().parents[2]
 OUTPUT_ROOT = (ROOT / "output").resolve()
 sys.path.insert(0, str(ROOT))
+
+from dotenv import load_dotenv
+
+# The dashboard is normally launched as a fresh child process. Load the
+# repository environment before importing the database layer, which validates
+# ALGO_ENV as soon as the application initializes.
+load_dotenv(ROOT / ".env", override=False)
 
 from flask import Flask, request, redirect, url_for, send_file, Response, stream_with_context
 
@@ -1197,7 +1204,6 @@ def settings_page():
     persona_raw = persona_path.read_text(encoding="utf-8") if persona_path.exists() else "{}"
 
     # .env 키 현황
-    from dotenv import load_dotenv
     load_dotenv(ROOT / ".env")
     keys = [
         "OPENAI_API_KEY", "TAVILY_API_KEY", "PEXELS_API_KEY",
