@@ -1,6 +1,46 @@
+import re
 from typing import List
+
 from src.schemas.card_news import Claim, CardNewsScript, Slide
-import uuid
+
+
+_ANGLE_HOOKS = {
+    "리스트형": "핵심만 모아 저장해두세요",
+    "Before/After": "무엇이 달라졌는지 확인하세요",
+    "즉시실행": "적용 전에 핵심부터 확인하세요",
+    "몰랐던사실": "놓치기 쉬운 핵심을 짚었습니다",
+    "공포": "과장 없이 실제 변화를 확인하세요",
+    "공감": "복잡한 소식을 쉽게 풀었습니다",
+    "이익": "우리에게 미칠 영향을 확인하세요",
+    "사회증거": "지금 주목받는 이유를 확인하세요",
+}
+
+
+def _shorten(text: str, limit: int) -> str:
+    clean = re.sub(r"\s+", " ", text).strip().rstrip(".!?")
+    if len(clean) <= limit:
+        return clean
+    return clean[: max(1, limit - 1)].rstrip() + "…"
+
+
+def _claim_headline(claim: Claim) -> str:
+    """Derive a specific headline without generating any new factual text."""
+
+    first_clause = re.split(r"[.!?\n]", claim.claim_text, maxsplit=1)[0]
+    return _shorten(first_clause, 22)
+
+
+def _hashtags(topic: str, claims: List[Claim]) -> list[str]:
+    tags = ["#알고", "#카드뉴스", "#뉴스분석", "#팩트체크"]
+    candidates = [topic]
+    candidates.extend(entity for claim in claims for entity in claim.entities)
+    for item in candidates:
+        normalized = re.sub(r"[^0-9A-Za-z가-힣_]", "", item)
+        if normalized and len(normalized) <= 24:
+            tag = f"#{normalized}"
+            if tag not in tags:
+                tags.append(tag)
+    return tags[:10]
 
 class ScriptAssembler:
     """
@@ -9,7 +49,13 @@ class ScriptAssembler:
     """
 
     @staticmethod
-    def assemble(topic: str, claims: List[Claim]) -> CardNewsScript:
+    def assemble(
+        topic: str,
+        claims: List[Claim],
+        *,
+        num_cards: int | None = None,
+        editorial_angle: str = "",
+    ) -> CardNewsScript:
         verified_claims = [c for c in claims if c.verification_status == "verified"]
 
         # We need at least some content
@@ -22,25 +68,28 @@ class ScriptAssembler:
         slides.append(Slide(
             slide_number=1,
             slide_type="cover",
-            title=f"{topic} 요약",
-            body="최신 핵심 정보를 정리해 드립니다.",
+            title=_shorten(topic, 22),
+            body=_ANGLE_HOOKS.get(
+                editorial_angle,
+                "원문 근거로 핵심과 의미를 정리했습니다.",
+            ),
             emoji="📰"
         ))
 
         # 2. Content slides
         content_claims = [c for c in verified_claims if c.claim_type != "cta"]
-        # Limit to 4 content slides to match 1 cover + 4 content + 1 cta = 6 max if we want
-        for i, c in enumerate(content_claims[:4]):
+        max_content_slides = max(1, (num_cards or 6) - 2)
+        for c in content_claims[:max_content_slides]:
             accent = ""
             if c.numbers:
-                accent = c.numbers[0]
+                accent = c.numbers[0].raw_text
             elif c.entities:
                 accent = c.entities[0]
 
             slides.append(Slide(
                 slide_number=len(slides) + 1,
                 slide_type="content",
-                title=f"핵심 포인트 {i+1}",
+                title=_claim_headline(c),
                 body=c.claim_text,
                 accent=accent
             ))
@@ -52,7 +101,7 @@ class ScriptAssembler:
         slides.append(Slide(
             slide_number=len(slides) + 1,
             slide_type="cta",
-            title="여러분의 생각은?",
+            title="어떤 변화가 중요할까요?",
             body=cta_body,
             emoji="👇"
         ))
@@ -60,7 +109,10 @@ class ScriptAssembler:
         # Ensure exact requirements for CardNewsScript
         return CardNewsScript(
             topic=topic,
-            hook=f"{topic}의 모든 것",
+            hook=_ANGLE_HOOKS.get(
+                editorial_angle,
+                f"{_shorten(topic, 18)}, 핵심만 확인하세요",
+            ),
             slides=slides,
-            hashtags=["#뉴스", "#정보"]
+            hashtags=_hashtags(topic, verified_claims),
         )

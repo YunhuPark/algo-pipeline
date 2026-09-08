@@ -49,6 +49,7 @@ class ContentCreator:
         raw_article_body: str = "",
         disputed_notes: str = "",
         source_lineage: Optional[SourceLineage] = None,
+        editorial_angle: str = "",
     ) -> CardNewsScript:
         """
         새로운 증거 기반 Claim 생성 및 검증을 수행한 뒤 ScriptAssembler로 넘깁니다.
@@ -79,7 +80,12 @@ class ContentCreator:
         )
 
         # 5. Script Assemble
-        script = ScriptAssembler.assemble(topic=source_lineage.topic, claims=claims)
+        script = ScriptAssembler.assemble(
+            topic=source_lineage.topic,
+            claims=claims,
+            num_cards=num_cards,
+            editorial_angle=editorial_angle,
+        )
 
         return script
 

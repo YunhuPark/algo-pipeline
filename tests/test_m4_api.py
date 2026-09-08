@@ -179,3 +179,19 @@ def test_get_metrics_insufficient_sample():
     response = client.get("/api/experiments/exp_api_1/metrics")
     assert response.status_code == 200
     assert response.json()["insufficient_sample"] is True
+
+
+def test_get_quality_reviews_empty():
+    response = client.get("/api/quality-reviews")
+
+    assert response.status_code == 200
+    assert response.json() == {"total": 0, "items": []}
+
+
+def test_run_quality_review_requires_admin_auth():
+    response = client.post(
+        "/api/quality-reviews/run",
+        headers={"Origin": "http://127.0.0.1:8501"},
+    )
+
+    assert response.status_code == 401
