@@ -2,6 +2,7 @@ import pytest
 from decimal import Decimal
 from src.qa.deterministic_verifier import DeterministicVerifier, QualityGateError
 from src.qa.semantic_critic import SemanticCritic, SemanticCriticResult, run_semantic_critic
+from src.qa.editorial_verifier import validate_edited_slide
 from src.schemas.card_news import SourceLineage, EvidencePassage, Claim, NormalizedNumber, NormalizedDate
 from src.qa.script_assembler import ScriptAssembler
 from langchain_core.runnables import RunnableLambda
@@ -217,6 +218,60 @@ def get_mock_llm(verdict="contradicted", reason="reason", confidence=1.0, claim_
         return Resp()
     return RunnableLambda(invoke)
 
+
+def test_editorial_revision_rejects_number_missing_from_evidence(mock_lineage):
+    mock_llm = get_mock_llm(
+        verdict="supported",
+        claim_id="editorial-revision",
+        evidence_ids=["e1", "e2", "e3", "e4"],
+    )
+
+    with pytest.raises(QualityGateError) as exc:
+        validate_edited_slide(
+            title="점유율 급등",
+            body="점유율이 99%로 올랐다.",
+            slide_type="content",
+            source_lineage=mock_lineage,
+            semantic_llm=mock_llm,
+        )
+
+    assert exc.value.error_code == "NUMBER_UNSUPPORTED"
+
+
+def test_editorial_revision_requires_semantic_support(mock_lineage):
+    mock_llm = get_mock_llm(
+        verdict="contradicted",
+        claim_id="editorial-revision",
+        evidence_ids=["e1", "e2", "e3", "e4"],
+    )
+
+    with pytest.raises(QualityGateError) as exc:
+        validate_edited_slide(
+            title="발표 취소",
+            body="OpenAI가 모델 발표를 취소했다.",
+            slide_type="content",
+            source_lineage=mock_lineage,
+            semantic_llm=mock_llm,
+        )
+
+    assert exc.value.error_code == "CLAIM_CONTRADICTED"
+
+
+def test_editorial_revision_accepts_supported_copy(mock_lineage):
+    mock_llm = get_mock_llm(
+        verdict="supported",
+        claim_id="editorial-revision",
+        evidence_ids=["e1", "e2", "e3", "e4"],
+    )
+
+    validate_edited_slide(
+        title="새 모델 발표",
+        body="OpenAI는 최근 새로운 모델을 발표했다.",
+        slide_type="content",
+        source_lineage=mock_lineage,
+        semantic_llm=mock_llm,
+    )
+
 def test_semantic_critic_positive_negative(mock_lineage):
     # 긍정 ↔ 부정
     claim = Claim(claim_id="c1", claim_text="OpenAI는 모델 발표를 취소했다.", claim_type="factual", evidence_ids=["e1"], verification_status="verified")
@@ -348,3 +403,32 @@ def test_script_assembler(mock_lineage):
     script = ScriptAssembler.assemble("AI Tech", [claim])
     assert script.topic == "AI Tech"
     assert len(script.slides) == 3 # 1 cover, 1 content, 1 cta
+    assert script.slides[1].title.startswith("OpenAI는 최근 새로운 모델")
+    assert len(script.slides[1].title) <= 22
+    assert "핵심 포인트" not in script.slides[1].title
+
+
+def test_script_assembler_applies_angle_and_requested_card_count(mock_lineage):
+    claims = [
+        Claim(
+            claim_id=f"c{index}",
+            claim_text=f"OpenAI는 검증된 기능 {index}을 발표했다.",
+            claim_type="factual",
+            entities=["OpenAI"],
+            evidence_ids=["e1"],
+            verification_status="verified",
+        )
+        for index in range(1, 7)
+    ]
+
+    script = ScriptAssembler.assemble(
+        "OpenAI 업데이트",
+        claims,
+        num_cards=5,
+        editorial_angle="공감",
+    )
+
+    assert len(script.slides) == 5
+    assert script.hook == "복잡한 소식을 쉽게 풀었습니다"
+    assert script.cover.body == script.hook
+    assert "#OpenAI" in script.hashtags

@@ -45,7 +45,7 @@ class TrendResult(BaseModel):
     content: str
     score: float = 0.0
 
-from pydantic import BaseModel, Field, model_validator, AnyHttpUrl
+from pydantic import BaseModel, Field, model_validator
 from decimal import Decimal
 
 # ... (keep Slide, CardNewsScript, TrendResult)
@@ -137,22 +137,30 @@ class SourceLineage(BaseModel):
             if not self.content_hash:
                 raise ValueError("content_hash is required for schema_version >= 2.0")
 
-            # Evidence unique id check
+            if not self.evidence_passages:
+                raise ValueError("evidence_passages are required for schema_version >= 2.0")
+
+            # A lineage has one primary source for compatibility, while each
+            # evidence passage keeps its own article and URL.  This preserves
+            # corroborating sources instead of falsely attributing them all to
+            # the primary article.
             seen_ids = set()
+            has_primary_evidence = False
             for ev in self.evidence_passages:
                 if ev.evidence_id in seen_ids:
                     raise ValueError(f"Duplicate evidence_id: {ev.evidence_id}")
                 seen_ids.add(ev.evidence_id)
-                if ev.article_id != self.article_id:
-                    raise ValueError(f"Evidence article_id {ev.article_id} mismatch with lineage {self.article_id}")
-                if ev.source_url != self.source_url:
-                    raise ValueError(f"Evidence source_url {ev.source_url} mismatch with lineage {self.source_url}")
+                if ev.article_id == self.article_id and ev.source_url == self.source_url:
+                    has_primary_evidence = True
+
+            if not has_primary_evidence:
+                raise ValueError("At least one evidence passage must identify the primary source")
 
         return self
 
     @property
     def is_verified_ready(self) -> bool:
-        return self.schema_version >= "2.0"
+        return self.schema_version >= "2.0" and bool(self.evidence_passages)
 
 class TrendReport(BaseModel):
     """Trend Analyzer가 반환하는 최종 분석 보고서"""

@@ -98,31 +98,27 @@ def _fill_from_news(count: int) -> list[int]:
             print(f"  [ContentQueue] 뉴스 수집 중 ({i+1}/{count})...")
             news = _collect_news()
 
+            # A selected headline without a real source cannot become
+            # publication evidence. Keep the queue fail-closed before the
+            # follow-up article fetch.
+            if not getattr(news, "source_items", None):
+                print("  [ContentQueue] 검증 가능한 뉴스 출처 없음 — 큐 추가 생략")
+                continue
+
             # 중복 주제 회피
             topic = news.topic
             if topic in seen_topics:
                 topic = f"{topic} (심화)"
             seen_topics.add(topic)
 
-            evidence = [
-                {
-                    "title": item.title,
-                    "url": item.url,
-                    "source": item.source,
-                    "summary": item.summary,
-                }
-                for item in news.source_items
-                if item.title.strip() and item.url.strip()
-            ]
-            if not evidence:
-                raise ValueError("뉴스 출처 evidence가 없어 enqueue를 차단합니다.")
-            metadata = QueueMetadataV2(
-                topic=topic,
-                source_title=evidence[0]["title"],
-                source_url=evidence[0]["url"],
-                context=news.context,
-                evidence=evidence,
-            )
+            # Headline snippets are selection candidates, not publication
+            # evidence.  Fetch the selected article body and corroborating
+            # sources before the item becomes publishable Queue V2 data.
+            from src.agents import trend_analyzer
+            from src.services.generation_service import build_queue_metadata
+
+            report = trend_analyzer.run(topic, max_results=5)
+            metadata = build_queue_metadata(topic, report)
             row_id = enqueue_v2(
                 metadata,
                 CollectionMethod.NEWS_COLLECTOR,
@@ -135,7 +131,11 @@ def _fill_from_news(count: int) -> list[int]:
     return ids
 
 
-def publish_next(publish_to_ig: bool = True) -> dict[str, Any] | None:
+def publish_next(
+    publish_to_ig: bool = True,
+    *,
+    require_human_approval: bool = True,
+) -> dict[str, Any] | None:
     """
     큐에서 다음 항목을 꺼내 전체 파이프라인을 실행합니다.
 
@@ -184,6 +184,21 @@ def publish_next(publish_to_ig: bool = True) -> dict[str, Any] | None:
     def on_remote_id(value: str, post_id: str) -> None:
         store_queue_ig_post_id(queue_id, value, post_id)
 
+    def run_full_pipeline():
+        args = (
+            topic,
+            context,
+            angle_hint,
+            publish_to_ig,
+            attempt_id,
+            before_publish,
+            on_remote_id,
+            source_lineage,
+        )
+        if require_human_approval:
+            return _run_full_pipeline(*args)
+        return _run_full_pipeline(*args, require_human_approval=False)
+
     print(f"\n  [ContentQueue] 발행 시작: '{topic}' (큐 id={queue_id})")
 
     try:
@@ -195,21 +210,19 @@ def publish_next(publish_to_ig: bool = True) -> dict[str, Any] | None:
             paths = sorted(Path(image_dir).glob("*.png"))
             if not paths:
                 print("  [ContentQueue] PNG 없음 — 전체 파이프라인 실행")
-                res = _run_full_pipeline(
-                    topic, context, angle_hint, publish_to_ig,
-                    attempt_id, before_publish, on_remote_id, source_lineage,
-                )
+                res = run_full_pipeline()
             else:
                 # need to implement a manual publish step for cached images,
                 # but to be safe we just fail or we would need to duplicate pipeline.
                 pass
         else:
-            res = _run_full_pipeline(
-                topic, context, angle_hint, publish_to_ig,
-                attempt_id, before_publish, on_remote_id, source_lineage,
-            )
+            res = run_full_pipeline()
 
         if res and hasattr(res, 'image_paths') and res.image_paths:
+            if res.approval_decision == "REJECTED":
+                mark_queue_status(queue_id, "skipped")
+                print(f"  [ContentQueue] 사람 검토에서 게시 반려 (큐 id={queue_id})")
+                return None
             if res.publish_requested:
                 if res.publish_succeeded and res.ig_post_id:
                     complete_queue_publish(queue_id, attempt_id, res.ig_post_id)
@@ -256,28 +269,22 @@ def _run_full_pipeline(
     before_publish=None,
     on_remote_id=None,
     source_lineage=None,
+    require_human_approval: bool = True,
 ):
-    """파이프라인 실행 헬퍼."""
-    from src import pipeline
-    from src.persona import load_persona
+    """Canonical pipeline helper shared with the dashboard."""
+    from src.services.generation_service import execute_generation
 
-    persona = load_persona()
-    trend_context = context
-    if angle_hint:
-        trend_context = f"{context}\n[앵글 힌트] {angle_hint}".strip()
-
-    res = pipeline.run_pipeline(
+    return execute_generation(
         topic=topic,
-        persona=persona,
-        trend_context=trend_context,
-        publish=publish,
-        auto=True,
         source_lineage=source_lineage,
+        publish=publish,
+        angle_hint=angle_hint,
         publish_attempt_id=publish_attempt_id,
         before_publish=before_publish,
         on_remote_id=on_remote_id,
+        human_approval=bool(publish and require_human_approval),
+        auto=not require_human_approval,
     )
-    return res
 
 
 def add_topic(

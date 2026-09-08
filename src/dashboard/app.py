@@ -13,19 +13,22 @@
 from __future__ import annotations
 
 import io
+import html
 import json
 import os
 import queue
+import re
 import sys
 import threading
 import time
 import traceback
 import uuid
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 # 프로젝트 루트를 sys.path에 추가
 ROOT = Path(__file__).parent.parent.parent
+OUTPUT_ROOT = (ROOT / "output").resolve()
 sys.path.insert(0, str(ROOT))
 
 from flask import Flask, request, redirect, url_for, send_file, Response, stream_with_context
@@ -36,6 +39,37 @@ from src.db import (
 )
 
 app = Flask(__name__)
+
+
+def _safe_output_segment(value: str, label: str) -> str:
+    """Accept one local output path segment and reject traversal attempts."""
+    segment = str(value or "").strip()
+    if (
+        not segment
+        or segment in {".", ".."}
+        or "/" in segment
+        or "\\" in segment
+        or "\x00" in segment
+    ):
+        raise ValueError(f"유효하지 않은 {label}입니다.")
+    return segment
+
+
+def _resolve_output_dir(dir_name: str) -> Path:
+    segment = _safe_output_segment(dir_name, "출력 폴더")
+    candidate = (OUTPUT_ROOT / segment).resolve()
+    if candidate.parent != OUTPUT_ROOT:
+        raise ValueError("출력 폴더 범위를 벗어난 경로입니다.")
+    return candidate
+
+
+def _resolve_output_file(dir_name: str, filename: str) -> Path:
+    directory = _resolve_output_dir(dir_name)
+    file_segment = _safe_output_segment(filename, "파일명")
+    candidate = (directory / file_segment).resolve()
+    if candidate.parent != directory:
+        raise ValueError("출력 폴더 범위를 벗어난 파일입니다.")
+    return candidate
 
 # ── 생성 작업 상태 저장 (job_id → dict) ───────────────────
 _JOBS: dict[str, dict] = {}   # {job_id: {status, logs, paths, script, error}}
@@ -604,6 +638,7 @@ def _nav(active: str) -> str:
         ("/generate",  "✨", "생성"),
         ("/queue",     "📋", "큐"),
         ("/analytics", "📊", "분석"),
+        ("/quality-review", "🧪", "품질 회고"),
         ("/settings",  "⚙️",  "설정"),
     ]
     links = "".join(
@@ -1061,6 +1096,96 @@ def analytics_chart():
     return "차트 없음", 404
 
 
+# ── /quality-review 주간 품질 회고 ───────────────────────
+
+@app.route("/quality-review")
+def quality_review_page():
+    from src.analytics.weekly_review import get_latest_weekly_quality_review
+
+    msg = request.args.get("msg", "")
+    err = request.args.get("err", "")
+    report = get_latest_weekly_quality_review()
+    if report is None:
+        status = "INSUFFICIENT_DATA"
+        metrics = {}
+        issues = []
+        proposal = None
+        period = "아직 실행된 회고가 없습니다."
+    else:
+        status = report["status"]
+        metrics = report.get("metrics", {})
+        issues = report.get("top_issues", [])
+        proposal = report.get("experiment_proposal")
+        period = f"{report['week_start'][:10]} ~ {report['week_end'][:10]}"
+
+    metric_cards = "".join(
+        f'<div class="stat-card"><div class="val">{html.escape(str(value))}</div>'
+        f'<div class="lbl">{html.escape(label)}</div></div>'
+        for label, value in (
+            ("실제 실행", metrics.get("real_run_count", 0)),
+            ("생성 성공률", f"{metrics.get('generation_success_rate', 0) * 100:.1f}%"),
+            ("평균 수정률", f"{metrics.get('avg_text_edit_ratio', 0) * 100:.1f}%"),
+            ("평균 검토 시간", f"{metrics.get('avg_review_duration_sec', 0):.1f}초"),
+            ("저장률", f"{metrics.get('save_rate', 0) * 100:.2f}%"),
+            ("근거 주장 비율", f"{metrics.get('avg_grounded_claim_rate', 0) * 100:.1f}%"),
+        )
+    )
+    issue_rows = "".join(
+        f"<tr><td>{html.escape(str(item['code']))}</td><td>{int(item['count'])}</td></tr>"
+        for item in issues
+    ) or "<tr><td colspan='2' style='color:var(--muted)'>기록된 이슈 없음</td></tr>"
+
+    if proposal:
+        proposal_html = f"""
+        <div class="panel-title">승인 대기 실험 초안</div>
+        <p style="margin-top:12px"><strong>가설</strong> · {html.escape(proposal['hypothesis'])}</p>
+        <p><strong>변경안</strong> · {html.escape(proposal['change'])}</p>
+        <p><strong>주 지표</strong> · {html.escape(proposal['primary_metric'])}</p>
+        <div class="alert alert-ok" style="margin-top:14px">자동 적용 없음 · 사람이 승인해야 실험으로 전환됩니다.</div>
+        """
+    else:
+        proposal_html = (
+            "<div class='panel-title'>INSUFFICIENT_DATA</div>"
+            "<p class='panel-sub' style='margin-top:10px'>실제 실행 3건과 편집 피드백 1건이 쌓이면 "
+            "개선 실험 초안 1건을 제안합니다.</p>"
+        )
+
+    body = f"""
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:20px">
+      <div><div style="font-size:13px;color:var(--muted)">{period}</div>
+      <div style="font-size:16px;font-weight:700;margin-top:4px">상태: {status}</div></div>
+      <form method="post" action="/quality-review/run">
+        <button class="btn btn-primary">주간 회고 실행</button>
+      </form>
+    </div>
+    <div class="stat-grid">{metric_cards}</div>
+    <div style="display:grid;grid-template-columns:1fr 1.4fr;gap:20px">
+      <div class="panel"><div class="panel-title">반복 이슈 Top 3</div>
+        <div class="table-wrap" style="margin-top:14px"><table>
+          <thead><tr><th>이슈</th><th>횟수</th></tr></thead><tbody>{issue_rows}</tbody>
+        </table></div>
+      </div>
+      <div class="panel">{proposal_html}</div>
+    </div>
+    <div class="panel-sub" style="margin-top:16px">이 기능은 통계와 초안만 저장합니다. 게시, 정책 변경, 실험 활성화는 수행하지 않습니다.</div>
+    """
+    return _page("주간 카드뉴스 품질 회고", "/quality-review", body, msg=msg, err=err)
+
+
+@app.route("/quality-review/run", methods=["POST"])
+def quality_review_run():
+    try:
+        from src.analytics.weekly_review import run_weekly_quality_review
+
+        report = run_weekly_quality_review()
+        return redirect(url_for(
+            "quality_review_page",
+            msg=f"회고 완료: {report['status']}",
+        ))
+    except Exception as exc:
+        return redirect(url_for("quality_review_page", err=str(exc)))
+
+
 # ── /settings 설정 ────────────────────────────────────────
 
 @app.route("/settings")
@@ -1167,12 +1292,13 @@ def _run_pipeline_job(job_id: str, topic: str, auto: bool, make_reels: bool) -> 
             sel = collect_and_select()
             _emit(q, "topic", sel.topic)
             actual_topic = sel.topic
-            trend_ctx = sel.context
         else:
             actual_topic = topic
-            trend_ctx = ""
 
-        from src.pipeline import run_pipeline
+        from src.services.generation_service import (
+            collect_verified_lineage,
+            execute_generation,
+        )
         from src.persona import load_persona, resolve_persona
         from src.agents.topic_refiner import refine_topic
 
@@ -1181,7 +1307,7 @@ def _run_pipeline_job(job_id: str, topic: str, auto: bool, make_reels: bool) -> 
         #   → TrendAnalyzer가 반드시 실행돼야 기사 전문과 영상 후보를 제대로 가져옴.
         #   → 정제는 주제 문자열만 바꾸고, topic_refined=True를 pipeline에 전달해 2번 정제를 막음.
         topic_was_refined = False
-        if not trend_ctx:
+        if not auto:
             try:
                 refined_topic, _rfr, _article_content = refine_topic(actual_topic)
                 if refined_topic != actual_topic:
@@ -1199,22 +1325,23 @@ def _run_pipeline_job(job_id: str, topic: str, auto: bool, make_reels: bool) -> 
             "name": _resolved_p.topic_category,
             "color": _resolved_p.primary_color,
         }))
-        paths = run_pipeline(
+        _emit(q, "log", "🔎 원문과 보조 출처를 수집해 검증 가능한 근거를 구성합니다.")
+        source_lineage = collect_verified_lineage(actual_topic)
+        result = execute_generation(
             topic=actual_topic,
-            trend_context=trend_ctx,
+            source_lineage=source_lineage,
             make_reels=make_reels,
-            fact_check=True,
-            auto=True,   # 대시보드에서는 사용자 입력 없이 자동 선택
-            topic_refined=topic_was_refined,  # 2번 정제 방지
         )
 
         sys.stdout = old_stdout
 
-        if paths:
+        if result.generation_succeeded and result.image_paths:
+            paths = result.image_paths
             job["status"] = "done"
             job["paths"] = [str(p) for p in paths]
             job["topic"] = actual_topic
             job["image_dir"] = str(paths[0].parent)
+            job["run_id"] = result.run_id
 
             # caption.txt 읽기
             caption_path = paths[0].parent / "caption.txt"
@@ -1230,7 +1357,10 @@ def _run_pipeline_job(job_id: str, topic: str, auto: bool, make_reels: bool) -> 
             }))
         else:
             job["status"] = "error"
-            job["error"] = "파이프라인이 빈 결과를 반환했습니다."
+            job["error"] = (
+                f"{result.failure_stage or 'pipeline'}: "
+                f"{result.error_code or 'EMPTY_PIPELINE_RESULT'}"
+            )
             _emit(q, "error", job["error"])
 
     except Exception as e:
@@ -1591,10 +1721,13 @@ def generate_stream(job_id: str):
 
 @app.route("/output_img/<dir_name>/<filename>")
 def output_img(dir_name: str, filename: str):
-    img_path = ROOT / "output" / dir_name / filename
+    try:
+        img_path = _resolve_output_file(dir_name, filename)
+    except ValueError as exc:
+        return str(exc), 400
     if not img_path.exists():
         # 파일명 패턴 탐색
-        parent = ROOT / "output" / dir_name
+        parent = img_path.parent
         candidates = list(parent.glob(filename.rsplit("_", 1)[0] + "*.*"))
         cans = [c for c in candidates if c.suffix.lower() in [".png", ".mp4"]]
         if cans:
@@ -1608,7 +1741,10 @@ def output_img(dir_name: str, filename: str):
 
 @app.route("/caption/<dir_name>")
 def caption(dir_name: str):
-    p = ROOT / "output" / dir_name / "caption.txt"
+    try:
+        p = _resolve_output_file(dir_name, "caption.txt")
+    except ValueError as exc:
+        return str(exc), 400
     if p.exists():
         return p.read_text(encoding="utf-8")
     return ""
@@ -1618,7 +1754,10 @@ def caption(dir_name: str):
 
 @app.route("/preview/<dir_name>")
 def preview_page(dir_name: str):
-    d = ROOT / "output" / dir_name
+    try:
+        d = _resolve_output_dir(dir_name)
+    except ValueError as exc:
+        return str(exc), 400
     if not d.exists():
         return "폴더 없음", 404
 
@@ -1741,6 +1880,17 @@ def preview_page(dir_name: str):
 {caption_html}
 {reels_html}
 
+<div class="panel" style="margin-top:20px">
+  <div class="panel-header"><div><div class="panel-title">사람 검토 결과</div>
+  <div class="panel-sub">승인·반려 기록은 주간 품질 회고에 반영되며 게시를 실행하지 않습니다.</div></div></div>
+  <div style="display:flex;gap:8px;align-items:center">
+    <input id="reviewReason" class="input" placeholder="검토 메모 (선택)" style="flex:1">
+    <button class="btn btn-primary" onclick="submitReview('APPROVED')">검토 승인</button>
+    <button class="btn btn-danger" onclick="submitReview('REJECTED')">반려</button>
+  </div>
+  <div id="reviewStatus" class="panel-sub" style="margin-top:10px"></div>
+</div>
+
 <!-- 슬라이드 수정 모달 -->
 <div id="editModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:1000;align-items:center;justify-content:center">
   <div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:28px;width:480px;max-width:90vw">
@@ -1748,7 +1898,7 @@ def preview_page(dir_name: str):
     <div style="font-size:12px;color:var(--muted);margin-bottom:16px">수정할 내용을 자연어로 입력하면 AI가 해당 슬라이드만 다시 씁니다.</div>
     <div class="input-group">
       <label class="input-label">수정 요청</label>
-      <textarea id="editInstruction" rows="3" placeholder="예: 더 충격적인 수치로 바꿔줘 / 더 쉬운 말로 / 실사용 예시 추가해줘"></textarea>
+      <textarea id="editInstruction" rows="3" placeholder="예: 원문 범위 안에서 더 쉽게 설명해줘 / 문장을 짧게 다듬어줘"></textarea>
     </div>
     <div style="display:flex;gap:8px;margin-top:12px">
       <button id="editSubmitBtn" class="btn btn-primary" onclick="submitEdit()">AI 수정 적용</button>
@@ -1761,9 +1911,12 @@ def preview_page(dir_name: str):
 <script>
 const DIR_NAME = {dir_name_js};
 let editSlideIndex = -1;
+let reviewStartedAt = Date.now();
+let editStartedAt = 0;
 
 function openEditModal(idx, btn) {{
   editSlideIndex = idx;
+  editStartedAt = Date.now();
   document.getElementById('editSlideNum').textContent = idx + 1;
   document.getElementById('editInstruction').value = '';
   document.getElementById('editStatus').textContent = '';
@@ -1782,7 +1935,12 @@ function submitEdit() {{
   fetch('/generate/edit_slide', {{
     method: 'POST',
     headers: {{'Content-Type': 'application/json'}},
-    body: JSON.stringify({{dir_name: DIR_NAME, slide_index: editSlideIndex, instruction}})
+    body: JSON.stringify({{
+      dir_name: DIR_NAME,
+      slide_index: editSlideIndex,
+      instruction,
+      review_duration_sec: Math.max(0, (Date.now() - editStartedAt) / 1000)
+    }})
   }})
   .then(r => r.json())
   .then(data => {{
@@ -1815,6 +1973,24 @@ function regenerateCaption() {{
       const el = document.getElementById('captionText');
       if (el && txt) el.textContent = txt;
     }});
+}}
+
+function submitReview(decision) {{
+  const reason = document.getElementById('reviewReason').value.trim();
+  fetch('/generate/review', {{
+    method: 'POST',
+    headers: {{'Content-Type': 'application/json'}},
+    body: JSON.stringify({{
+      dir_name: DIR_NAME,
+      decision,
+      reason,
+      review_duration_sec: Math.max(0, (Date.now() - reviewStartedAt) / 1000)
+    }})
+  }}).then(r => r.json()).then(data => {{
+    document.getElementById('reviewStatus').textContent = data.success
+      ? '✓ 검토 기록 완료 (게시되지 않음)'
+      : '✕ ' + data.error;
+  }});
 }}
 </script>
 """
@@ -1895,7 +2071,10 @@ def subtitle(video_id: str):
 
 @app.route("/output_video/<dir_name>/<filename>")
 def output_video(dir_name: str, filename: str):
-    p = ROOT / "output" / dir_name / filename
+    try:
+        p = _resolve_output_file(dir_name, filename)
+    except ValueError as exc:
+        return str(exc), 400
     if not p.exists():
         return "not found", 404
     return send_file(str(p), mimetype="video/mp4")
@@ -1906,34 +2085,56 @@ def output_video(dir_name: str, filename: str):
 @app.route("/generate/edit_slide", methods=["POST"])
 def edit_slide():
     """특정 슬라이드 1장만 GPT로 수정 후 재렌더링"""
-    data = request.get_json()
+    data = request.get_json(silent=True) or {}
     dir_name = data.get("dir_name", "")
     slide_index = int(data.get("slide_index", 0))   # 0-based
     instruction = data.get("instruction", "").strip()
+    review_duration_sec = max(0.0, float(data.get("review_duration_sec", 0) or 0))
 
     if not dir_name or not instruction:
         return {"success": False, "error": "dir_name / instruction 필수"}
 
-    d = ROOT / "output" / dir_name
+    try:
+        d = _resolve_output_dir(dir_name)
+    except ValueError as exc:
+        return {"success": False, "error": str(exc)}, 400
     script_path = d / "script.json"
     if not script_path.exists():
         return {"success": False, "error": "script.json 없음 (이전 버전 생성물)"}
+    meta_path = d / "meta.json"
+    lineage_path = d / "source_lineage.json"
+    if not meta_path.exists() or not lineage_path.exists():
+        return {
+            "success": False,
+            "error": "검증 가능한 run_id 또는 source lineage가 없어 수정을 차단합니다.",
+        }, 409
 
     try:
         import json as _json
+        from src.schemas.card_news import SourceLineage
+
         script_data = _json.loads(script_path.read_text(encoding="utf-8"))
+        meta = _json.loads(meta_path.read_text(encoding="utf-8"))
+        source_lineage = SourceLineage.model_validate_json(
+            lineage_path.read_text(encoding="utf-8")
+        )
         slides = script_data["slides"]
 
         if slide_index < 0 or slide_index >= len(slides):
             return {"success": False, "error": f"슬라이드 인덱스 범위 초과 (0~{len(slides)-1})"}
 
         slide = slides[slide_index]
+        original_text = f"{slide.get('title', '')}\n{slide.get('body', '')}".strip()
 
         # GPT로 해당 슬라이드만 재작성
         from langchain_openai import ChatOpenAI
         from src.config import OPENAI_API_KEY
 
-        llm = ChatOpenAI(model="gpt-4o", temperature=0.5, api_key=OPENAI_API_KEY)
+        llm = ChatOpenAI(model="gpt-4o", temperature=0.2, api_key=OPENAI_API_KEY)
+        evidence_text = "\n\n".join(
+            f"[{item.evidence_id}] {item.text[:4000]}"
+            for item in source_lineage.evidence_passages[:3]
+        )
         prompt = (
             f"인스타그램 카드뉴스 슬라이드를 수정해주세요.\n\n"
             f"주제: {script_data['topic']}\n"
@@ -1941,11 +2142,13 @@ def edit_slide():
             f"현재 제목: {slide['title']}\n"
             f"현재 내용: {slide['body']}\n\n"
             f"수정 요청: {instruction}\n\n"
+            f"허용된 원문 근거:\n{evidence_text}\n\n"
             f"규칙:\n"
             f"- 슬라이드 타입({slide['slide_type']})은 유지\n"
             f"- 제목: 15자 이내, 핵심 한 문장\n"
-            f"- 내용: 3~5줄, 각 줄 30자 이내, 구체적 수치 포함\n"
-            f"- 모호한 표현('~전망', '~예상') 금지\n\n"
+            f"- 내용: 3~5줄, 각 줄 30자 이내\n"
+            f"- 원문에 없는 수치·날짜·인명·회사명·인과관계를 추가하지 말 것\n"
+            f"- 원문보다 강한 단정이나 과장 표현을 쓰지 말 것\n\n"
             f"JSON으로만 출력:\n"
             f'{{ "title": "...", "body": "줄1\\n줄2\\n줄3" }}'
         )
@@ -1954,12 +2157,25 @@ def edit_slide():
         # JSON 파싱 (코드블록 제거)
         raw = re.sub(r"```[a-z]*\n?", "", raw).strip().strip("`")
         new_data = _json.loads(raw)
+        if not isinstance(new_data, dict) or not all(
+            isinstance(new_data.get(key), str) and new_data[key].strip()
+            for key in ("title", "body")
+        ):
+            raise ValueError("수정 응답에 title/body 문자열이 없습니다.")
 
-        # script.json 업데이트
+        from src.qa.editorial_verifier import validate_edited_slide
+
+        validate_edited_slide(
+            title=new_data["title"],
+            body=new_data["body"],
+            slide_type=slide["slide_type"],
+            source_lineage=source_lineage,
+        )
+
+        # 검증이 끝난 수정안만 메모리의 script에 반영합니다.
         slides[slide_index]["title"] = new_data["title"]
         slides[slide_index]["body"] = new_data["body"]
         script_data["slides"] = slides
-        script_path.write_text(_json.dumps(script_data, ensure_ascii=False, indent=2), encoding="utf-8")
 
         # 해당 슬라이드 재렌더링
         from src.schemas.card_news import CardNewsScript, Slide
@@ -1973,6 +2189,8 @@ def edit_slide():
                 slide_type=s["slide_type"],
                 title=s["title"],
                 body=s["body"],
+                emoji=s.get("emoji", ""),
+                accent=s.get("accent", ""),
             )
             for s in slides
         ]
@@ -2037,6 +2255,40 @@ def edit_slide():
         from src.agents.design_renderer import _generate_caption
         new_caption = _generate_caption(updated_script, persona.handle)
         (d / "caption.txt").write_text(new_caption, encoding="utf-8")
+        script_json = _json.dumps(script_data, ensure_ascii=False, indent=2)
+        script_path.write_text(script_json, encoding="utf-8")
+
+        import hashlib
+
+        meta["content_revision"] = int(meta.get("content_revision", 0) or 0) + 1
+        meta["editorial_validation_status"] = "EDIT_VERIFIED"
+        meta["script_sha256"] = hashlib.sha256(script_json.encode("utf-8")).hexdigest()
+        meta["last_edited_at"] = datetime.now(timezone.utc).isoformat()
+        meta_path.write_text(
+            _json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+
+        # Edit history is observational data only.  It never changes policy or
+        # triggers publication.
+        run_id = str(meta.get("run_id") or "")
+        if run_id:
+            from src.db_tracking import log_user_edit
+            from src.analytics.feedback import log_editorial_feedback
+            import difflib
+
+            final_text = f"{new_data['title']}\n{new_data['body']}".strip()
+            ratio = 1.0 - difflib.SequenceMatcher(None, original_text, final_text).ratio()
+            log_user_edit(run_id, slide_index, original_text, final_text)
+            log_editorial_feedback(
+                content_id=dir_name,
+                run_id=run_id,
+                editor_id="dashboard_user",
+                approval_decision="EDITED",
+                edit_reason_category="slide_revision",
+                text_edit_ratio=ratio,
+                review_duration_sec=review_duration_sec,
+                idempotency_key=f"edit:{dir_name}:{slide_index}:{time.time_ns()}",
+            )
 
         return {
             "success": True,
@@ -2046,15 +2298,71 @@ def edit_slide():
         }
 
     except Exception as e:
-        import traceback
-        return {"success": False, "error": str(e), "detail": traceback.format_exc()}
+        traceback.print_exc()
+        return {"success": False, "error": str(e)}, 400
+
+
+@app.route("/generate/review", methods=["POST"])
+def record_generation_review():
+    """Record HITL approval/rejection without publishing or activating policy."""
+    data = request.get_json() or {}
+    dir_name = str(data.get("dir_name") or "").strip()
+    decision = str(data.get("decision") or "").strip().upper()
+    reason = str(data.get("reason") or "").strip()
+    duration = max(0.0, float(data.get("review_duration_sec", 0) or 0))
+    if decision not in {"APPROVED", "REJECTED"}:
+        return {"success": False, "error": "decision은 APPROVED 또는 REJECTED여야 합니다."}, 400
+
+    try:
+        meta_path = _resolve_output_file(dir_name, "meta.json")
+    except ValueError as exc:
+        return {"success": False, "error": str(exc)}, 400
+    if not meta_path.exists():
+        return {"success": False, "error": "추적 가능한 meta.json이 없습니다."}, 409
+    try:
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        run_id = str(meta.get("run_id") or "")
+        if not run_id:
+            return {"success": False, "error": "run_id가 없는 이전 생성물입니다."}, 409
+        validation_status = str(meta.get("editorial_validation_status") or "")
+        if decision == "APPROVED" and validation_status not in {
+            "ORIGINAL_VERIFIED",
+            "EDIT_VERIFIED",
+        }:
+            return {
+                "success": False,
+                "error": "근거 검증 상태를 확인할 수 없어 승인을 차단합니다.",
+            }, 409
+        from src.analytics.feedback import log_editorial_feedback
+
+        log_editorial_feedback(
+            content_id=dir_name,
+            run_id=run_id,
+            editor_id="dashboard_user",
+            approval_decision=decision,
+            edit_reason_category="review_rejection" if decision == "REJECTED" else "",
+            review_duration_sec=duration,
+            idempotency_key=f"review:{dir_name}:{decision}",
+        )
+        meta["review_decision"] = decision
+        meta["review_reason"] = reason
+        meta["reviewed_at"] = datetime.now(timezone.utc).isoformat()
+        meta_path.write_text(
+            json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        return {"success": True, "published": False, "policy_changed": False}
+    except Exception as exc:
+        return {"success": False, "error": str(exc)}, 400
 
 
 # ── Instagram 발행 페이지 ─────────────────────────────────
 
 @app.route("/publish_page/<dir_name>")
 def publish_page(dir_name: str):
-    d = ROOT / "output" / dir_name
+    try:
+        d = _resolve_output_dir(dir_name)
+    except ValueError as exc:
+        return str(exc), 400
     pngs = sorted(d.glob("card_*.png"))
     mp4s = sorted(d.glob("card_*.mp4"))
     # MP4와 동일 번호의 PNG가 있으면 중복 → 업로드는 PNG만

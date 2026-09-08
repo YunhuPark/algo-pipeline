@@ -156,8 +156,20 @@ class ClaimGenerator:
                     f"Claim at index {index} must be an object.",
                 )
             try:
+                cited_ids = raw_claim.get("evidence_ids") or []
+                evidence_by_id = {
+                    item.evidence_id: item for item in lineage.evidence_passages
+                }
+                cited_source = next(
+                    (
+                        evidence_by_id[evidence_id].source_url
+                        for evidence_id in cited_ids
+                        if evidence_id in evidence_by_id
+                    ),
+                    lineage.source_url,
+                )
                 claim = Claim.model_validate(
-                    {**raw_claim, "source_url": lineage.source_url}
+                    {**raw_claim, "source_url": raw_claim.get("source_url") or cited_source}
                 )
             except Exception as exc:
                 raise ClaimGenerationError(

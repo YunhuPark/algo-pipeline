@@ -5,25 +5,25 @@
  수동 (주제 지정)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   python main.py "AI 트렌드"
-  python main.py "AI 트렌드" --angle --publish --approve
-  python main.py "경제 뉴스" --template bold --threads --blog
+  python main.py "AI 트렌드" --angle
+  python main.py "경제 뉴스" --template bold
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
  자동 (뉴스 수집 → 주제 선택 → 1회 실행)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  python main.py --auto --angle --publish
+  python main.py --auto --angle
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
  에이전트 (24시간 자동 루프)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  python main.py --agent --publish
   python main.py --agent --dry-run
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
  큐 관리
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   python main.py --queue 5             # 뉴스 5개 미리 생성해서 큐에 쌓기
-  python main.py --queue-publish       # 큐 맨 앞 항목 즉시 발행
+  python main.py --queue-publish             # 큐 맨 앞 항목 생성
+  python main.py --queue-publish --publish   # 검토 후 1건 감독 발행
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
  분석 & 관리
@@ -60,9 +60,9 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--dalle",          action="store_true")
     p.add_argument("--refresh",        action="store_true")
     p.add_argument("--angle",          action="store_true", help="5가지 앵글 선택")
-    p.add_argument("--template",       default="auto",
-                   help="디자인 템플릿: auto/dark/light/bold/minimal/gradient")
-    p.add_argument("--no-factcheck",   action="store_true", help="팩트체크 스킵")
+    p.add_argument("--template",       default="brand",
+                   help="디자인 템플릿: brand/auto/dark/light/bold/minimal/gradient")
+    p.add_argument("--no-factcheck",   action="store_true", help="호환 옵션(근거 검증 게이트는 유지)")
     p.add_argument("--reels",          action="store_true", help="Reels MP4 생성 (moviepy + yt-dlp)")
     # 업로드
     p.add_argument("--publish",        action="store_true", help="Instagram 업로드")
@@ -75,7 +75,7 @@ def parse_args() -> argparse.Namespace:
     # 큐
     p.add_argument("--queue",          type=int, metavar="N", help="N개 미리 생성해서 큐에 쌓기")
     p.add_argument("--queue-add",      metavar="TOPIC",       help="비활성화: 검증된 출처 없는 직접 등록 차단")
-    p.add_argument("--queue-publish",  action="store_true",   help="큐 다음 항목 즉시 발행")
+    p.add_argument("--queue-publish",  action="store_true",   help="큐 다음 항목 생성(--publish와 함께면 감독 발행)")
     # 분석 & 관리
     p.add_argument("--dashboard",      action="store_true",   help="웹 대시보드 시작")
     p.add_argument("--analyze",        action="store_true",   help="성과 + 경쟁사 분석")
@@ -164,7 +164,15 @@ def main() -> None:
         from src.agents.content_queue import publish_next
         from src.agents.publisher import PublishConfigurationError
         try:
-            result = publish_next(publish_to_ig=args.publish and not args.dry_run)
+            publish_requested = args.publish and not args.dry_run
+            unattended = False
+            if publish_requested:
+                from src.automation_mode import resolve_automation_mode
+                unattended = resolve_automation_mode().live_publish
+            result = publish_next(
+                publish_to_ig=publish_requested,
+                require_human_approval=not unattended,
+            )
         except PublishConfigurationError as exc:
             print(f"게시 설정 차단: {exc}")
             sys.exit(2)
@@ -187,7 +195,7 @@ def main() -> None:
         prepare_queue_runtime()
         if args.threads:   os.environ["AGENT_THREADS"]    = "true"
         if args.blog:      os.environ["AGENT_BLOG"]       = "true"
-        if args.template != "auto": os.environ["AGENT_TEMPLATE"] = args.template
+        if args.template != "brand": os.environ["AGENT_TEMPLATE"] = args.template
         from src.scheduler import start
         start()
         return
@@ -202,7 +210,15 @@ def main() -> None:
         if not ids:
             print("검증된 뉴스가 없어 큐 등록을 중단합니다.")
             sys.exit(1)
-        res = publish_next(publish_to_ig=args.publish and not args.dry_run)
+        publish_requested = args.publish and not args.dry_run
+        unattended = False
+        if publish_requested:
+            from src.automation_mode import resolve_automation_mode
+            unattended = resolve_automation_mode().live_publish
+        res = publish_next(
+            publish_to_ig=publish_requested,
+            require_human_approval=not unattended,
+        )
         if res is None:
             sys.exit(1)
         return
@@ -219,23 +235,28 @@ def main() -> None:
     if args.publish:
         print("직접 주제 발행은 Queue V2 lineage와 durable attempt를 우회하므로 차단합니다.")
         sys.exit(2)
+    if args.no_factcheck:
+        print("--no-factcheck는 호환 옵션입니다. 근거 검증 게이트는 계속 실행됩니다.")
 
-    from src.pipeline import run_pipeline
-    res = run_pipeline(
+    from src.services.generation_service import collect_verified_lineage, execute_generation
+
+    print("\n[알고 Manual] 원문과 보조 출처 수집 → 근거 계보 구성 중...")
+    source_lineage = collect_verified_lineage(topic)
+    res = execute_generation(
         topic=topic,
-        num_cards=args.cards, handle=args.handle,
+        source_lineage=source_lineage,
+        num_cards=args.cards,
+        handle=args.handle,
         force_dalle=args.dalle, force_refresh=args.refresh,
-        publish=args.publish and not args.dry_run,
-        publish_threads=args.threads and not args.dry_run,
-        publish_blog=args.blog and not args.dry_run,
-        ig_base_url=args.ig_url,
         select_angle=args.angle,
-        auto=True,
         human_approval=args.approve or args.publish,
+        auto=not (args.approve or args.publish),
         template=args.template,
-        fact_check=not args.no_factcheck,
         make_reels=args.reels,
     )
+    if not res.generation_succeeded:
+        print(f"생성 실패: {res.failure_stage} / {res.error_code}")
+        sys.exit(1)
 
 
 if __name__ == "__main__":

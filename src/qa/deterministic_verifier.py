@@ -118,11 +118,17 @@ class DeterministicVerifier:
                     raise QualityGateError("EVIDENCE_ID_UNKNOWN", f"Evidence ID {ev_id} not found in lineage.", claim.claim_id)
                 ev = evidence_map[ev_id]
 
-                # Check article ID / source URL mismatch
-                if ev.article_id != lineage.article_id:
-                    raise QualityGateError("EVIDENCE_ARTICLE_MISMATCH", f"Evidence {ev_id} is from a different article.", claim.claim_id)
-                if claim.source_url and ev.source_url and claim.source_url != ev.source_url:
-                    raise QualityGateError("SOURCE_URL_MISMATCH", f"Claim source URL doesn't match evidence URL.", claim.claim_id)
+                # Multi-source lineage is allowed.  The evidence ID is the
+                # authoritative link; a claim-level URL, when present, must
+                # identify at least one of its cited passages.
+
+            cited_urls = {evidence_map[ev_id].source_url for ev_id in claim.evidence_ids}
+            if claim.source_url and claim.source_url not in cited_urls:
+                raise QualityGateError(
+                    "SOURCE_URL_MISMATCH",
+                    "Claim source URL doesn't match any cited evidence URL.",
+                    claim.claim_id,
+                )
 
             # Extract combined evidence text for this claim
             combined_evidence_text = " ".join([evidence_map[ev_id].text for ev_id in claim.evidence_ids])
