@@ -14,6 +14,17 @@ def test_powershell_startup_discovers_project_python_and_checks_ports():
     assert "throw \"$Name 시작 실패" in source
 
 
+def test_dashboard_loads_dotenv_before_database_import():
+    source = (ROOT / "src" / "dashboard" / "app.py").read_text(encoding="utf-8")
+
+    dotenv_load = 'load_dotenv(ROOT / ".env", override=False)'
+    database_import = "from src.db import ("
+
+    assert dotenv_load in source
+    assert database_import in source
+    assert source.index(dotenv_load) < source.index(database_import)
+
+
 def test_batch_startup_uses_repository_relative_path():
     source = (ROOT / "start_services.bat").read_text(encoding="utf-8")
 
