@@ -165,6 +165,32 @@ def test_script_assembler_makes_headline_number_the_primary_visual():
     assert slide.visual_labels[0] == "기업가치"
 
 
+def test_script_assembler_localizes_approximate_english_visual_label():
+    claim = Claim(
+        claim_id="c1",
+        display_title="Cognition의 서버 비용",
+        editorial_role="limitation",
+        claim_text="Cognition은 서버 클러스터에 매년 수억 달러를 지출하고 있다.",
+        claim_type="numerical",
+        entities=["Cognition"],
+        numbers=[
+            NormalizedNumber(
+                raw_text="hundreds of millions",
+                normalized_value=100_000_000,
+                unit="dollars",
+                subject="연간 서버 비용",
+            )
+        ],
+        evidence_ids=["e1"],
+        verification_status="verified",
+    )
+
+    slide = ScriptAssembler.assemble("Cognition 투자", [claim]).content_slides[0]
+
+    assert slide.accent == "수억 달러"
+    assert slide.visual_values == ["수억 달러"]
+
+
 def test_script_assembler_selects_distinct_visuals_by_editorial_role():
     claims = [
         _claim(1, "mechanism", "작동 방식", "입력을 분석하고 검증 단계를 거쳐 결과를 제공하는 구조다."),

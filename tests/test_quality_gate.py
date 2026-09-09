@@ -193,6 +193,103 @@ def test_korean_man_matches_equivalent_english_million(mock_lineage):
     assert claim.verification_status == "verified"
 
 
+@pytest.mark.parametrize(
+    "raw_text",
+    ["hundreds of millions", "수억 달러"],
+)
+def test_approximate_hundreds_of_millions_remains_source_grounded(
+    mock_lineage,
+    raw_text,
+):
+    evidence = EvidencePassage(
+        evidence_id="e-approx",
+        article_id="a1",
+        text=(
+            "Cognition leases an Nvidia server cluster that costs hundreds "
+            "of millions of dollars annually."
+        ),
+        source_url="http://test.com",
+        content_hash="approx-hash",
+    )
+    lineage = mock_lineage.model_copy(update={"evidence_passages": [evidence]})
+    claim = Claim(
+        claim_id="c-approx",
+        claim_text="Cognition은 서버 클러스터에 매년 수억 달러를 지출한다.",
+        claim_type="numerical",
+        entities=["Cognition"],
+        numbers=[
+            NormalizedNumber(
+                raw_text=raw_text,
+                normalized_value=Decimal("100000000"),
+                unit="dollars",
+            )
+        ],
+        evidence_ids=["e-approx"],
+    )
+
+    DeterministicVerifier.verify_claims([claim], lineage)
+
+    assert claim.verification_status == "verified"
+
+
+def test_approximate_magnitude_mismatch_still_fails_closed(mock_lineage):
+    evidence = EvidencePassage(
+        evidence_id="e-approx",
+        article_id="a1",
+        text="The cluster costs hundreds of millions of dollars annually.",
+        source_url="http://test.com",
+        content_hash="approx-hash",
+    )
+    lineage = mock_lineage.model_copy(update={"evidence_passages": [evidence]})
+    claim = Claim(
+        claim_id="c-approx",
+        claim_text="이 클러스터에는 매년 수십억 달러가 든다.",
+        claim_type="numerical",
+        numbers=[
+            NormalizedNumber(
+                raw_text="수십억 달러",
+                normalized_value=Decimal("1000000000"),
+                unit="달러",
+            )
+        ],
+        evidence_ids=["e-approx"],
+    )
+
+    with pytest.raises(QualityGateError) as exc:
+        DeterministicVerifier.verify_claims([claim], lineage)
+
+    assert exc.value.error_code == "NUMBER_UNSUPPORTED"
+
+
+def test_exact_english_scaled_number_does_not_become_approximate(mock_lineage):
+    evidence = EvidencePassage(
+        evidence_id="e-exact",
+        article_id="a1",
+        text="Cognition reached a $48 billion valuation.",
+        source_url="http://test.com",
+        content_hash="exact-hash",
+    )
+    lineage = mock_lineage.model_copy(update={"evidence_passages": [evidence]})
+    claim = Claim(
+        claim_id="c-exact",
+        claim_text="Cognition의 기업가치는 480억 달러다.",
+        claim_type="numerical",
+        entities=["Cognition"],
+        numbers=[
+            NormalizedNumber(
+                raw_text="$48 billion",
+                normalized_value=Decimal("48000000000"),
+                unit="dollars",
+            )
+        ],
+        evidence_ids=["e-exact"],
+    )
+
+    DeterministicVerifier.verify_claims([claim], lineage)
+
+    assert claim.verification_status == "verified"
+
+
 def test_48_billion_matches_480_eok_dollars(mock_lineage):
     evidence = EvidencePassage(
         evidence_id="e-valuation",
