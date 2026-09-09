@@ -1,0 +1,141 @@
+from unittest.mock import patch
+
+import pytest
+
+from src.agents.verifier import _AIScore, _rule_check, verify
+from src.persona import Persona
+from src.qa.deterministic_verifier import QualityGateError
+from src.qa.editorial_quality_gate import validate_claim_editorial_quality
+from src.qa.script_assembler import ScriptAssembler
+from src.schemas.card_news import Claim
+
+
+def _claim(index: int, role: str, title: str, body: str) -> Claim:
+    return Claim(
+        claim_id=f"c{index}",
+        display_title=title,
+        editorial_role=role,
+        claim_text=body,
+        claim_type="factual",
+        evidence_ids=["e1"],
+        verification_status="verified",
+    )
+
+
+def _distinct_claims() -> list[Claim]:
+    return [
+        _claim(
+            1,
+            "context",
+            "공개 배경부터 확인",
+            "연구팀은 이번 발표에서 모델 개발 배경과 검증 대상이 된 작업 범위를 공식 문서로 함께 공개했고 적용 조건도 명시했다.",
+        ),
+        _claim(
+            2,
+            "change",
+            "이전 방식과 달라진 점",
+            "새 버전은 기존 처리 단계 두 개를 하나로 통합해 사용자가 거쳐야 하는 설정 절차와 반복 작업을 줄였다고 설명했다.",
+        ),
+        _claim(
+            3,
+            "evidence",
+            "측정 결과가 보여준 것",
+            "공개된 시험에서는 동일한 입력 조건과 평가 기준을 적용해 이전 버전과 새 버전의 결과와 처리 과정을 비교했다.",
+        ),
+        _claim(
+            4,
+            "limitation",
+            "해석할 때 남은 한계",
+            "발표 자료는 제한된 시험 환경의 결과이므로 실제 서비스와 다양한 입력 조건에서도 같은 성능인지 추가 확인이 필요하다.",
+        ),
+    ]
+
+
+def test_editorial_claim_gate_accepts_distinct_story_roles():
+    validate_claim_editorial_quality(
+        _distinct_claims(),
+        topic="모델 개발 발표",
+        target_content_slides=4,
+    )
+
+
+def test_editorial_claim_gate_rejects_thin_six_card_story():
+    with pytest.raises(QualityGateError) as exc:
+        validate_claim_editorial_quality(
+            _distinct_claims()[:2],
+            topic="모델 개발 발표",
+            target_content_slides=4,
+        )
+
+    assert exc.value.error_code == "EDITORIAL_COVERAGE_INSUFFICIENT"
+
+
+def test_editorial_claim_gate_rejects_repeated_card_points():
+    claims = _distinct_claims()
+    claims[1] = claims[0].model_copy(
+        update={"claim_id": "c2", "editorial_role": "change"}
+    )
+
+    with pytest.raises(QualityGateError) as exc:
+        validate_claim_editorial_quality(
+            claims,
+            topic="모델 개발 발표",
+            target_content_slides=4,
+        )
+
+    assert exc.value.error_code == "EDITORIAL_CLAIM_REDUNDANT"
+
+
+def test_editorial_claim_gate_rejects_generic_topic_drift():
+    with pytest.raises(QualityGateError) as exc:
+        validate_claim_editorial_quality(
+            _distinct_claims(),
+            topic="AI 용어 정복: 당신이 알아야 할 필수 용어들",
+            target_content_slides=4,
+        )
+
+    assert exc.value.error_code == "EDITORIAL_TOPIC_MISMATCH"
+
+
+def test_rule_check_rejects_truncated_headline():
+    script = ScriptAssembler.assemble("테스트", _distinct_claims(), num_cards=6)
+    script.slides[1].title = "완결되지 않은 제목…"
+
+    errors = _rule_check(script, expected_count=6)
+
+    assert any("말줄임표" in error for error in errors)
+
+
+def test_long_topic_produces_complete_cover_title_and_enough_hashtags():
+    script = ScriptAssembler.assemble(
+        "OpenAI 새 추론 모델이 공개한 긴 벤치마크 결과",
+        _distinct_claims(),
+        num_cards=6,
+    )
+
+    assert len(script.slides[0].title) <= 22
+    assert not script.slides[0].title.endswith(("…", "..."))
+    assert len(script.hashtags) >= 5
+
+
+def test_ai_editorial_gate_requires_every_quality_axis_to_pass():
+    script = ScriptAssembler.assemble("테스트", _distinct_claims(), num_cards=6)
+    low_readability = _AIScore(
+        hook_power=9,
+        readability=6,
+        brand_tone=9,
+        info_quality=9,
+        naturalness=9,
+        completeness=9,
+        feedback="슬라이드2의 문장을 더 짧게 정리하세요.",
+    )
+
+    with patch("src.agents.verifier._rule_check", return_value=[]), patch(
+        "src.agents.verifier._ai_evaluate",
+        return_value=low_readability,
+    ):
+        result = verify(script, Persona(), expected_count=6)
+
+    assert result.score > 7
+    assert result.passed is False
+    assert "가독성" in result.feedback

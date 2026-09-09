@@ -1293,11 +1293,13 @@ def _run_pipeline_job(job_id: str, topic: str, auto: bool, make_reels: bool) -> 
     sys.stdout = _StreamCapture()
 
     try:
+        selected_item = None
         if auto:
             from src.agents.news_collector import collect_and_select
             sel = collect_and_select()
             _emit(q, "topic", sel.topic)
             actual_topic = sel.topic
+            selected_item = sel.selected_item
         else:
             actual_topic = topic
 
@@ -1332,7 +1334,14 @@ def _run_pipeline_job(job_id: str, topic: str, auto: bool, make_reels: bool) -> 
             "color": _resolved_p.primary_color,
         }))
         _emit(q, "log", "🔎 원문과 보조 출처를 수집해 검증 가능한 근거를 구성합니다.")
-        source_lineage = collect_verified_lineage(actual_topic)
+        if auto and selected_item is None:
+            raise RuntimeError("AUTO_SELECTED_SOURCE_MISSING")
+        source_lineage = collect_verified_lineage(
+            actual_topic,
+            selected_title=selected_item.title if selected_item else "",
+            selected_url=selected_item.url if selected_item else "",
+            selected_content=selected_item.summary if selected_item else "",
+        )
         result = execute_generation(
             topic=actual_topic,
             source_lineage=source_lineage,

@@ -1,7 +1,7 @@
 import re
 import unicodedata
 from decimal import Decimal, InvalidOperation
-from typing import List, Dict, Tuple, Optional
+from typing import Iterable, List, Dict, Tuple, Optional
 from src.schemas.card_news import Claim, SourceLineage
 
 class QualityGateError(Exception):
@@ -22,6 +22,129 @@ ALLOWED_ALIASES = {
 }
 
 
+_SCALE_FACTORS = {
+    "천": Decimal("1000"),
+    "만": Decimal("10000"),
+    "십만": Decimal("100000"),
+    "백만": Decimal("1000000"),
+    "천만": Decimal("10000000"),
+    "억": Decimal("100000000"),
+    "십억": Decimal("1000000000"),
+    "백억": Decimal("10000000000"),
+    "천억": Decimal("100000000000"),
+    "조": Decimal("1000000000000"),
+    "k": Decimal("1000"),
+    "thousand": Decimal("1000"),
+    "m": Decimal("1000000"),
+    "million": Decimal("1000000"),
+    "b": Decimal("1000000000"),
+    "billion": Decimal("1000000000"),
+    "t": Decimal("1000000000000"),
+    "trillion": Decimal("1000000000000"),
+}
+
+_KOREAN_SCALE_PATTERN = r"(?:천억|백억|십억|천만|백만|십만|조|억|만|천)"
+_ENGLISH_SCALE_PATTERN = r"(?:trillion|billion|million|thousand|[kmbt](?![A-Za-z]))"
+_UNIT_PATTERN = (
+    r"(?:퍼센트|percentage|percent|%|달러|dollars?|usd|원|krw|won|"
+    r"명|people|persons?|users?|customers?|employees?|개|items?|parameters?|"
+    r"tokens?|companies?|models?|곳|places?|locations?|개월|months?|년|years?|"
+    r"일|days?|시간|hours?|분|minutes?|초|seconds?|배|times?|x(?![A-Za-z]))"
+)
+_NUMBER_PATTERN = r"\d[\d,]*(?:\.\d+)?"
+
+_KOREAN_SCALED_PART_RE = re.compile(
+    rf"(?P<number>{_NUMBER_PATTERN})\s*(?P<scale>{_KOREAN_SCALE_PATTERN})",
+    re.IGNORECASE,
+)
+_KOREAN_COMPOUND_NUMBER_RE = re.compile(
+    rf"(?<![\w.])(?P<expression>"
+    rf"{_NUMBER_PATTERN}\s*{_KOREAN_SCALE_PATTERN}"
+    rf"(?:\s*{_NUMBER_PATTERN}\s*{_KOREAN_SCALE_PATTERN})+)"
+    rf"\s*(?P<unit>{_UNIT_PATTERN})?",
+    re.IGNORECASE,
+)
+_NUMBER_MENTION_RE = re.compile(
+    rf"(?<![\w.])(?P<currency>[$₩])?\s*"
+    rf"(?P<number>{_NUMBER_PATTERN})\s*"
+    rf"(?P<scale>{_KOREAN_SCALE_PATTERN}|{_ENGLISH_SCALE_PATTERN})?\s*"
+    rf"(?P<unit>{_UNIT_PATTERN})?",
+    re.IGNORECASE,
+)
+
+
+def _to_decimal(raw: str) -> Optional[Decimal]:
+    try:
+        return Decimal(raw.replace(",", ""))
+    except InvalidOperation:
+        return None
+
+
+def _canonical_unit(raw_unit: str = "", currency: str = "") -> str:
+    unit = unicodedata.normalize("NFKC", raw_unit or "").strip().lower()
+    if currency == "$" or unit in {"달러", "dollar", "dollars", "usd"}:
+        return "usd"
+    if currency == "₩" or unit in {"원", "krw", "won"}:
+        return "krw"
+    if unit in {"%", "퍼센트", "percent", "percentage"}:
+        return "percent"
+    if unit in {"명", "people", "person", "persons", "user", "users", "customer", "customers", "employee", "employees"}:
+        return "people"
+    if unit in {"개", "item", "items", "parameter", "parameters", "token", "tokens", "company", "companies", "model", "models"}:
+        return "count"
+    if unit in {"곳", "place", "places", "location", "locations"}:
+        return "place"
+    if unit in {"일", "day", "days"}:
+        return "day"
+    if unit in {"개월", "month", "months"}:
+        return "month"
+    if unit in {"년", "year", "years"}:
+        return "year"
+    if unit in {"시간", "hour", "hours"}:
+        return "hour"
+    if unit in {"분", "minute", "minutes"}:
+        return "minute"
+    if unit in {"초", "second", "seconds"}:
+        return "second"
+    if unit in {"배", "time", "times", "x"}:
+        return "multiplier"
+    return ""
+
+
+def _extract_number_mentions(text: str) -> Iterable[Tuple[Decimal, str]]:
+    """Yield canonical numeric values and semantic units from Korean/English text."""
+    normalized = unicodedata.normalize("NFKC", text or "")
+    compound_spans: list[tuple[int, int]] = []
+
+    # Korean large numbers are often additive (for example, 1억 500만 = 105M).
+    for compound in _KOREAN_COMPOUND_NUMBER_RE.finditer(normalized):
+        total = Decimal("0")
+        valid = True
+        for part in _KOREAN_SCALED_PART_RE.finditer(compound.group("expression")):
+            value = _to_decimal(part.group("number"))
+            factor = _SCALE_FACTORS.get(part.group("scale").lower())
+            if value is None or factor is None:
+                valid = False
+                break
+            total += value * factor
+        if valid:
+            compound_spans.append(compound.span("expression"))
+            yield total, _canonical_unit(compound.group("unit") or "")
+
+    for match in _NUMBER_MENTION_RE.finditer(normalized):
+        if any(start <= match.start() < end for start, end in compound_spans):
+            continue
+        value = _to_decimal(match.group("number"))
+        if value is None:
+            continue
+        scale = (match.group("scale") or "").lower()
+        value *= _SCALE_FACTORS.get(scale, Decimal("1"))
+        yield value, _canonical_unit(
+            match.group("unit") or "",
+            match.group("currency") or "",
+        )
+
+
 def normalize_text(text: str) -> str:
     """Normalize text using NFKC, lowercase, remove extra spaces and punctuation."""
     if not text:
@@ -35,41 +158,8 @@ def normalize_text(text: str) -> str:
 
 
 def parse_number_with_qualifier(text: str) -> Tuple[Optional[Decimal], str]:
-    """Parse a string to extract canonical number and its qualifier (unit, %, etc)."""
-    # Ex: "30%", "1.5 million", "3개 기업", "13"
-    text = unicodedata.normalize('NFKC', text).lower()
-
-    # Try to extract the first decimal-like pattern
-    match = re.search(r'([\d]+(?:[\.,]\d+)?)', text)
-    if not match:
-        return None, ""
-
-    num_str = match.group(1).replace(',', '')
-    try:
-        val = Decimal(num_str)
-    except InvalidOperation:
-        return None, ""
-
-    # Extract qualifiers
-    qualifier = ""
-    if "%" in text or "퍼센트" in text:
-        qualifier = "%"
-    elif "개" in text:
-        qualifier = "개"
-    elif "명" in text:
-        qualifier = "명"
-    elif "곳" in text:
-        qualifier = "곳"
-    elif "원" in text:
-        qualifier = "원"
-    elif "달러" in text or "$" in text:
-        qualifier = "달러"
-    elif "만" in text:
-        qualifier = "만"
-    elif "억" in text:
-        qualifier = "억"
-
-    return val, qualifier
+    """Return the first canonical value/unit, including Korean/English scales."""
+    return next(iter(_extract_number_mentions(text)), (None, ""))
 
 
 class DeterministicVerifier:
@@ -161,19 +251,23 @@ class DeterministicVerifier:
 
             # 3. Check Numbers
             for num_obj in claim.numbers:
-                val = num_obj.normalized_value
-                qual = num_obj.unit
+                parsed_claim = list(_extract_number_mentions(num_obj.raw_text))
+                if parsed_claim:
+                    val, qual = parsed_claim[0]
+                    declared_unit = _canonical_unit(num_obj.unit)
+                    if not qual and declared_unit:
+                        qual = declared_unit
+                else:
+                    val = num_obj.normalized_value
+                    qual = _canonical_unit(num_obj.unit)
 
-                found = False
-                # Simple extraction of all numbers in evidence
-                words = combined_evidence_text.split()
-                for word in words:
-                    ev_val, ev_qual = parse_number_with_qualifier(word)
-                    if ev_val is not None:
-                        # 3 != 13, 1.5 != 15 etc since Decimal(3) != Decimal(13)
-                        if val == ev_val and qual == ev_qual:
-                            found = True
-                            break
+                # Compare canonical values after magnitude conversion. Units remain
+                # fail-closed, so 30% cannot validate 30 people and 3 days cannot
+                # validate 3 items.
+                found = any(
+                    val == ev_val and qual == ev_qual
+                    for ev_val, ev_qual in _extract_number_mentions(combined_evidence_text)
+                )
                 if not found:
                     raise QualityGateError("NUMBER_UNSUPPORTED", f"Number '{num_obj.raw_text}' not supported by evidence.", claim.claim_id)
 

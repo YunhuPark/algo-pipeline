@@ -84,6 +84,10 @@ class Claim(BaseModel):
     """LLM이 생성한 독립적인 사실/주장 단위"""
     claim_id: str = Field(..., min_length=1)
     claim_text: str = Field(..., min_length=1)
+    display_title: str = Field(default="", max_length=22)
+    editorial_role: Literal[
+        "context", "change", "mechanism", "evidence", "limitation", "impact", "cta", "detail"
+    ] = "detail"
     claim_type: Literal["factual", "numerical", "attributed_statement", "inference", "opinion", "cta"]
     entities: List[str] = Field(default_factory=list)
     numbers: List[NormalizedNumber] = Field(default_factory=list)

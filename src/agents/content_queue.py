@@ -101,7 +101,8 @@ def _fill_from_news(count: int) -> list[int]:
             # A selected headline without a real source cannot become
             # publication evidence. Keep the queue fail-closed before the
             # follow-up article fetch.
-            if not getattr(news, "source_items", None):
+            selected_item = getattr(news, "selected_item", None)
+            if selected_item is None:
                 print("  [ContentQueue] 검증 가능한 뉴스 출처 없음 — 큐 추가 생략")
                 continue
 
@@ -111,13 +112,17 @@ def _fill_from_news(count: int) -> list[int]:
                 topic = f"{topic} (심화)"
             seen_topics.add(topic)
 
-            # Headline snippets are selection candidates, not publication
-            # evidence.  Fetch the selected article body and corroborating
-            # sources before the item becomes publishable Queue V2 data.
+            # Keep the editor-selected article URL as the primary evidence.
+            # Re-searching a generated topic here can silently switch events.
             from src.agents import trend_analyzer
             from src.services.generation_service import build_queue_metadata
 
-            report = trend_analyzer.run(topic, max_results=5)
+            report = trend_analyzer.build_locked_source_report(
+                topic,
+                title=selected_item.title,
+                url=selected_item.url,
+                content=selected_item.summary,
+            )
             metadata = build_queue_metadata(topic, report)
             row_id = enqueue_v2(
                 metadata,

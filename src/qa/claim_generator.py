@@ -4,12 +4,26 @@ from typing import Any, Callable, List
 
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_openai import ChatOpenAI
+from pydantic import ValidationError
 
 from src.qa.deterministic_verifier import QualityGateError
 from src.schemas.card_news import Claim, SourceLineage
 
 
 MAX_GENERATED_CLAIMS = 12
+MAX_CLAIM_RESPONSE_ATTEMPTS = 2
+
+_RETRYABLE_RESPONSE_ERRORS = {
+    "CLAIM_RESPONSE_EMPTY",
+    "CLAIM_RESPONSE_INVALID_JSON",
+    "CLAIM_RESPONSE_INVALID_ROOT",
+    "CLAIM_LIST_MISSING",
+    "CLAIM_LIST_INVALID",
+    "CLAIMS_EMPTY",
+    "CLAIM_LIMIT_EXCEEDED",
+    "CLAIM_SCHEMA_INVALID",
+    "CLAIM_ID_DUPLICATE",
+}
 
 _CLAIM_SYSTEM_PROMPT = """
 당신은 사실 관계를 엄밀하게 분리하는 분석기입니다.
@@ -20,6 +34,8 @@ _CLAIM_SYSTEM_PROMPT = """
   "claims": [
     {{
       "claim_id": "c1",
+      "display_title": "독립적으로 읽히는 10~18자 제목",
+      "editorial_role": "context" | "change" | "mechanism" | "evidence" | "limitation" | "impact" | "cta",
       "claim_text": "원문에서 추출한 구체적 주장 문장",
       "claim_type": "factual" | "numerical" | "attributed_statement" | "inference" | "opinion" | "cta",
       "entities": ["언급된 고유명사", "회사명", "인명"],
@@ -35,6 +51,12 @@ _CLAIM_SYSTEM_PROMPT = """
 2. 외부 일반 지식을 결합하지 마십시오.
 3. 숫자가 포함된 문장은 반드시 numerical type을 사용하고, numbers 배열에 해당 숫자를 명시하십시오.
 4. CTA 타입은 반드시 마지막에 하나만 넣고, 원문과 관련이 없는 "지금 당장 써보세요", "위험합니다" 식의 과도한 선동을 피하십시오.
+5. 영문 규모 단위를 한국어로 바꾸면 값을 정확히 환산하십시오. 예: 1.05 million = 105만, 105 million = 1억 500만.
+6. 검증 오류 피드백이 있으면 문제가 된 주장을 삭제하거나 원문 표기와 정확히 일치하도록 다시 작성하십시오.
+7. 기본 6장 카드뉴스용으로 서로 다른 내용의 non-CTA Claim 4개와, 필요하면 마지막 CTA Claim 1개를 만드십시오.
+8. non-CTA Claim은 context/change/mechanism/evidence/limitation/impact 중 최소 3가지 역할을 사용하고 같은 사실을 표현만 바꿔 반복하지 마십시오.
+9. display_title은 10~18자의 자연스러운 한국어 완결형 제목이어야 하며 말줄임표를 쓰지 마십시오. claim_text에 없는 사실을 추가하면 안 됩니다.
+10. claim_text는 카드 한 장에서 독립적으로 이해되는 60~110자의 자연스러운 한국어로 작성하십시오. 고유명사·수치의 의미와 비교 기준을 생략하지 마십시오.
 """
 
 class ClaimGenerationError(QualityGateError, ValueError):
@@ -47,7 +69,7 @@ class ClaimGenerator:
         self._llm_factory = llm_factory or self._build_default_llm
         self.prompt = ChatPromptTemplate.from_messages([
             ("system", _CLAIM_SYSTEM_PROMPT),
-            ("human", "원문:\n{evidence}"),
+            ("human", "카드뉴스 주제:\n{topic}\n\n원문:\n{evidence}\n\n{schema_feedback}"),
         ])
 
     @staticmethod
@@ -123,30 +145,8 @@ class ClaimGenerator:
             )
         return data
 
-    def generate_claims(self, lineage: SourceLineage) -> List[Claim]:
-        if not lineage.is_verified_ready or not lineage.evidence_passages:
-            raise ClaimGenerationError(
-                "CLAIM_EVIDENCE_MISSING",
-                "Verified SourceLineage evidence is required for claim generation.",
-            )
-
-        evidence_text = "\n\n".join(
-            f"[ID: {ev.evidence_id}]\n{ev.text}" for ev in lineage.evidence_passages
-        )
-
-        try:
-            chain = self.prompt | self._get_llm()
-            response = chain.invoke({"evidence": evidence_text})
-        except QualityGateError:
-            raise
-        except Exception as exc:
-            raise ClaimGenerationError(
-                "CLAIM_GENERATION_FAILED",
-                f"Claim generator request failed: {type(exc).__name__}",
-            ) from exc
-
-        data = self._parse_response_content(getattr(response, "content", None))
-
+    @staticmethod
+    def _build_claims(data: dict[str, Any], lineage: SourceLineage) -> List[Claim]:
         claims: list[Claim] = []
         seen_ids: set[str] = set()
         for index, raw_claim in enumerate(data["claims"]):
@@ -171,6 +171,15 @@ class ClaimGenerator:
                 claim = Claim.model_validate(
                     {**raw_claim, "source_url": raw_claim.get("source_url") or cited_source}
                 )
+            except ValidationError as exc:
+                issues = ", ".join(
+                    f"{'.'.join(str(part) for part in error['loc'])}:{error['type']}"
+                    for error in exc.errors(include_url=False, include_context=False, include_input=False)
+                )
+                raise ClaimGenerationError(
+                    "CLAIM_SCHEMA_INVALID",
+                    f"Claim at index {index} failed schema validation ({issues}).",
+                ) from exc
             except Exception as exc:
                 raise ClaimGenerationError(
                     "CLAIM_SCHEMA_INVALID",
@@ -185,3 +194,59 @@ class ClaimGenerator:
             seen_ids.add(claim.claim_id)
             claims.append(claim)
         return claims
+
+    def generate_claims(
+        self,
+        lineage: SourceLineage,
+        validation_feedback: str = "",
+    ) -> List[Claim]:
+        if not lineage.is_verified_ready or not lineage.evidence_passages:
+            raise ClaimGenerationError(
+                "CLAIM_EVIDENCE_MISSING",
+                "Verified SourceLineage evidence is required for claim generation.",
+            )
+
+        evidence_text = "\n\n".join(
+            f"[ID: {ev.evidence_id}]\n{ev.text}" for ev in lineage.evidence_passages
+        )
+        schema_feedback = validation_feedback.strip()
+
+        for attempt in range(1, MAX_CLAIM_RESPONSE_ATTEMPTS + 1):
+            try:
+                chain = self.prompt | self._get_llm()
+                response = chain.invoke({
+                    "topic": lineage.topic,
+                    "evidence": evidence_text,
+                    "schema_feedback": schema_feedback,
+                })
+            except QualityGateError:
+                raise
+            except Exception as exc:
+                raise ClaimGenerationError(
+                    "CLAIM_GENERATION_FAILED",
+                    f"Claim generator request failed: {type(exc).__name__}",
+                ) from exc
+
+            try:
+                data = self._parse_response_content(getattr(response, "content", None))
+                return self._build_claims(data, lineage)
+            except ClaimGenerationError as exc:
+                if (
+                    attempt >= MAX_CLAIM_RESPONSE_ATTEMPTS
+                    or exc.error_code not in _RETRYABLE_RESPONSE_ERRORS
+                ):
+                    raise
+                print(
+                    "[QualityGate] Claim JSON 형식이 유효하지 않아 "
+                    f"자동 재시도합니다 ({attempt}/{MAX_CLAIM_RESPONSE_ATTEMPTS - 1}, "
+                    f"{exc.error_code})."
+                )
+                schema_feedback = (
+                    "이전 응답은 아래 이유로 스키마 검증에 실패했습니다. "
+                    "원문의 사실만 사용하여 전체 JSON 객체를 처음부터 다시 생성하세요. "
+                    "모든 claim에는 claim_id, claim_text, 허용된 claim_type, entities 배열, "
+                    "numbers 배열, dates 배열, evidence_ids 배열이 있어야 합니다. "
+                    f"검증 오류: {exc}"
+                )
+
+        raise AssertionError("unreachable")

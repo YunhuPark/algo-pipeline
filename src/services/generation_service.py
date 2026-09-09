@@ -73,12 +73,27 @@ def build_queue_metadata(
     )
 
 
-def collect_verified_lineage(topic: str, *, max_results: int = 5) -> SourceLineage:
+def collect_verified_lineage(
+    topic: str,
+    *,
+    max_results: int = 5,
+    selected_title: str = "",
+    selected_url: str = "",
+    selected_content: str = "",
+) -> SourceLineage:
     """Collect full article text before any content generation starts."""
 
     from src.agents import trend_analyzer
 
-    report = trend_analyzer.run(topic, max_results=max_results)
+    if selected_title or selected_url:
+        report = trend_analyzer.build_locked_source_report(
+            topic,
+            title=selected_title,
+            url=selected_url,
+            content=selected_content,
+        )
+    else:
+        report = trend_analyzer.run(topic, max_results=max_results)
     return build_verified_lineage(topic, report)
 
 
