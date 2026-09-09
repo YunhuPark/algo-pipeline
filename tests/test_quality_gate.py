@@ -164,6 +164,91 @@ def test_number_1_5_vs_15(mock_lineage):
         DeterministicVerifier.verify_claims([claim], mock_lineage)
     assert exc.value.error_code == "NUMBER_UNSUPPORTED"
 
+
+def test_korean_man_matches_equivalent_english_million(mock_lineage):
+    evidence = EvidencePassage(
+        evidence_id="e-scale",
+        article_id="a1",
+        text="The model processes 1.05 million tokens in this benchmark.",
+        source_url="http://test.com",
+        content_hash="scale-hash",
+    )
+    lineage = mock_lineage.model_copy(update={"evidence_passages": [evidence]})
+    claim = Claim(
+        claim_id="c-scale",
+        claim_text="이 벤치마크에서 105만 개의 토큰을 처리했다.",
+        claim_type="numerical",
+        numbers=[
+            NormalizedNumber(
+                raw_text="105만 개",
+                normalized_value=Decimal("105"),
+                unit="개",
+            )
+        ],
+        evidence_ids=["e-scale"],
+    )
+
+    DeterministicVerifier.verify_claims([claim], lineage)
+
+    assert claim.verification_status == "verified"
+
+
+def test_korean_compound_scale_matches_english_m_suffix(mock_lineage):
+    evidence = EvidencePassage(
+        evidence_id="e-compound",
+        article_id="a1",
+        text="The model contains 105M parameters.",
+        source_url="http://test.com",
+        content_hash="compound-hash",
+    )
+    lineage = mock_lineage.model_copy(update={"evidence_passages": [evidence]})
+    claim = Claim(
+        claim_id="c-compound",
+        claim_text="이 모델은 1억 500만 개의 파라미터를 포함한다.",
+        claim_type="numerical",
+        numbers=[
+            NormalizedNumber(
+                raw_text="1억 500만 개",
+                normalized_value=Decimal("105000000"),
+                unit="개",
+            )
+        ],
+        evidence_ids=["e-compound"],
+    )
+
+    DeterministicVerifier.verify_claims([claim], lineage)
+
+    assert claim.verification_status == "verified"
+
+
+def test_korean_105_man_does_not_match_english_105_million(mock_lineage):
+    evidence = EvidencePassage(
+        evidence_id="e-mismatch",
+        article_id="a1",
+        text="The model contains 105M parameters.",
+        source_url="http://test.com",
+        content_hash="mismatch-hash",
+    )
+    lineage = mock_lineage.model_copy(update={"evidence_passages": [evidence]})
+    claim = Claim(
+        claim_id="c-mismatch",
+        claim_text="이 모델은 105만 개의 파라미터를 포함한다.",
+        claim_type="numerical",
+        numbers=[
+            NormalizedNumber(
+                raw_text="105만 개",
+                normalized_value=Decimal("105"),
+                unit="개",
+            )
+        ],
+        evidence_ids=["e-mismatch"],
+    )
+
+    with pytest.raises(QualityGateError) as exc:
+        DeterministicVerifier.verify_claims([claim], lineage)
+
+    assert exc.value.error_code == "NUMBER_UNSUPPORTED"
+
 def test_number_unit_mismatch(mock_lineage):
     # 30% vs 30명
     claim = Claim(
@@ -312,6 +397,39 @@ def test_semantic_critic_overgeneralization(mock_lineage):
     with pytest.raises(QualityGateError) as exc:
         run_semantic_critic([claim], mock_lineage, llm=mock_llm)
     assert exc.value.error_code == "CLAIM_CONTRADICTED"
+
+
+def test_semantic_critic_also_checks_generated_display_title(mock_lineage):
+    import json
+
+    prompts = []
+
+    def invoke(prompt):
+        prompts.append(str(prompt))
+
+        class Resp:
+            content = json.dumps({
+                "verdict": "supported",
+                "reason": "제목과 본문이 원문에 의해 지지됩니다.",
+                "confidence": 1.0,
+                "claim_id": "c1",
+                "evidence_ids": ["e1"],
+            })
+
+        return Resp()
+
+    claim = Claim(
+        claim_id="c1",
+        display_title="OpenAI 새 모델 공개",
+        claim_text="OpenAI는 최근 새로운 모델을 발표했다.",
+        claim_type="factual",
+        evidence_ids=["e1"],
+        verification_status="verified",
+    )
+
+    SemanticCritic(llm=RunnableLambda(invoke)).critique_claim(claim, mock_lineage)
+
+    assert "카드 제목: OpenAI 새 모델 공개" in prompts[0]
 
 # --- SEMANTIC CRITIC SYSTEM TESTS ---
 def test_semantic_critic_claim_id_mismatch(mock_lineage):

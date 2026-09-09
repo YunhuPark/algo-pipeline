@@ -23,15 +23,37 @@ def _shorten(text: str, limit: int) -> str:
     return clean[: max(1, limit - 1)].rstrip() + "…"
 
 
+def _fit_cover_title(text: str, limit: int = 22) -> str:
+    """Fit a cover title without leaving a visibly truncated headline."""
+
+    clean = re.sub(r"\s+", " ", text).strip().rstrip(".!?")
+    if len(clean) <= limit:
+        return clean
+
+    first_clause = re.split(r"[:：|·—–]", clean, maxsplit=1)[0].strip()
+    if 6 <= len(first_clause) <= limit:
+        return first_clause
+
+    fitted: list[str] = []
+    for word in clean.split():
+        candidate = " ".join([*fitted, word])
+        if len(candidate) > limit:
+            break
+        fitted.append(word)
+    return " ".join(fitted) if fitted else clean[:limit].rstrip()
+
+
 def _claim_headline(claim: Claim) -> str:
     """Derive a specific headline without generating any new factual text."""
 
+    if claim.display_title.strip():
+        return claim.display_title.strip()
     first_clause = re.split(r"[.!?\n]", claim.claim_text, maxsplit=1)[0]
     return _shorten(first_clause, 22)
 
 
 def _hashtags(topic: str, claims: List[Claim]) -> list[str]:
-    tags = ["#알고", "#카드뉴스", "#뉴스분석", "#팩트체크"]
+    tags = ["#알고", "#카드뉴스", "#뉴스분석", "#팩트체크", "#인사이트"]
     candidates = [topic]
     candidates.extend(entity for claim in claims for entity in claim.entities)
     for item in candidates:
@@ -68,7 +90,7 @@ class ScriptAssembler:
         slides.append(Slide(
             slide_number=1,
             slide_type="cover",
-            title=_shorten(topic, 22),
+            title=_fit_cover_title(topic, 22),
             body=_ANGLE_HOOKS.get(
                 editorial_angle,
                 "원문 근거로 핵심과 의미를 정리했습니다.",

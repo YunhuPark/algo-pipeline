@@ -20,7 +20,9 @@ Phase 2. AI 자기평가 (GPT-4o-mini)
 """
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
+from difflib import SequenceMatcher
 
 from langchain_openai import ChatOpenAI
 from langchain_core.prompts import ChatPromptTemplate
@@ -80,6 +82,8 @@ def _rule_check(script: CardNewsScript, expected_count: int) -> list[str]:
         # 글자 수
         if len(slide.title) > MAX_TITLE_LEN:
             errors.append(f"{label} 제목 {len(slide.title)}자 (최대 {MAX_TITLE_LEN}자)")
+        if slide.title.rstrip().endswith(("…", "...")):
+            errors.append(f"{label} 제목이 말줄임표로 끝남")
         if len(slide.body) > MAX_BODY_LEN:
             errors.append(f"{label} 본문 {len(slide.body)}자 (최대 {MAX_BODY_LEN}자)")
         # content 슬라이드만 최소 길이 체크 (cover/cta는 짧아도 됨)
@@ -116,6 +120,17 @@ def _rule_check(script: CardNewsScript, expected_count: int) -> list[str]:
                 if pat in text:
                     errors.append(f"슬라이드{slide.slide_number} AI 문체 감지: '{pat}'")
                     break
+
+    # 내용만 조금 바꾼 반복 카드는 정보량을 부풀리므로 차단한다.
+    content_slides = [slide for slide in script.slides if slide.slide_type == "content"]
+    for index, left in enumerate(content_slides):
+        for right in content_slides[index + 1:]:
+            left_copy = re.sub(r"[^0-9a-z가-힣]", "", left.body.lower())
+            right_copy = re.sub(r"[^0-9a-z가-힣]", "", right.body.lower())
+            if SequenceMatcher(None, left_copy, right_copy).ratio() >= 0.84:
+                errors.append(
+                    f"슬라이드{left.slide_number}·{right.slide_number} 내용이 지나치게 유사함"
+                )
 
     return errors
 
@@ -230,7 +245,11 @@ def verify(
         "완성도": ai.completeness,
     }
     avg = sum(scores.values()) / len(scores)
-    passed = avg >= PASS_THRESHOLD
+    # 평균만 보면 한 항목의 치명적인 실패가 다른 점수에 가려질 수 있다.
+    # 모든 편집 품질 축이 기준을 넘어야 렌더링을 허용한다.
+    passed = avg >= PASS_THRESHOLD and all(
+        score >= PASS_THRESHOLD for score in scores.values()
+    )
 
     feedback = ""
     if not passed:

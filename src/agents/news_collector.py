@@ -55,11 +55,13 @@ class NewsSelection:
     reason: str         # 선택 이유
     context: str        # 배경 정보 (content_creator에 주입)
     source_items: list[NewsItem] = field(default_factory=list)
+    selected_item: NewsItem | None = None
 
 
 # ── Pydantic 스키마 (structured output) ──────────────────
 
 class _SelectedTopic(BaseModel):
+    selected_index: int
     topic: str
     reason: str
     context: str
@@ -140,7 +142,11 @@ _SYSTEM = """
 - 설명할 내용이 충분히 있어서 6장 카드뉴스를 채울 수 있는 주제
 - AI, IT, 비즈니스, 사회 이슈 중 파급력이 큰 것
 - 지나치게 특정 정치적 편향이 없는 것
+- 원문 출처와 사건이 명확하고, 서로 다른 핵심 사실을 4개 이상 뽑을 수 있는 기사
+- 선택한 한 기사의 고유명사·제품명·핵심 수치를 topic에 그대로 유지할 것
+- "AI 필수 용어", "알아야 할 것", "최신 트렌드" 같은 포괄적 주제로 바꾸지 말 것
 
+selected_index: 선택한 헤드라인의 번호 (1부터 시작)
 topic: 카드뉴스 제목으로 쓸 간결한 주제명 (예: "애플 AI 전략 대전환")
 reason: 왜 이 주제를 선택했는지 한 줄
 context: 카드뉴스 작성에 필요한 핵심 배경 정보 3~5문장
@@ -184,15 +190,22 @@ def collect_and_select() -> NewsSelection:
 
     rss_items = _parse_rss_feeds()
     tavily_items = _fetch_tavily_trends()
-    all_items = rss_items + tavily_items
+    all_items = [
+        item
+        for item in rss_items + tavily_items
+        if item.title.strip() and item.url.startswith(("http://", "https://"))
+    ]
 
     if not all_items:
         raise RuntimeError("수집된 뉴스가 없습니다. 네트워크 연결을 확인하세요.")
 
     print(f"  [NewsCollector] 총 {len(all_items)}개 기사 → GPT-4o 주제 선택 중...")
     selected = _select_topic_with_gpt(all_items)
+    selected_index = max(1, min(selected.selected_index, min(len(all_items), 40)))
+    selected_item = all_items[selected_index - 1]
 
     print(f"  [NewsCollector] 선택된 주제: {selected.topic}")
+    print(f"  [NewsCollector] 고정 원문: {selected_item.title}")
     print(f"  [NewsCollector] 이유: {selected.reason}")
 
     return NewsSelection(
@@ -200,6 +213,7 @@ def collect_and_select() -> NewsSelection:
         reason=selected.reason,
         context=selected.context,
         source_items=all_items[:10],
+        selected_item=selected_item,
     )
 
 

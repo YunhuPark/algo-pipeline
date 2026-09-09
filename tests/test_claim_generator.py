@@ -34,6 +34,42 @@ def test_claim_generator_normal(lineage):
     assert claims[0].claim_type == "factual"
     assert claims[0].source_url == lineage.source_url
 
+
+def test_claim_generator_retries_once_after_schema_error(lineage):
+    responses = iter([
+        '{"claims": [{"claim_id": "c1", "claim_type": "factual"}]}',
+        '{"claims": [{"claim_text": "text", "claim_type": "factual", "claim_id": "c1", "entities": [], "numbers": [], "dates": [], "evidence_ids": ["ev_1"]}]}',
+    ])
+    calls = []
+
+    def respond(prompt):
+        calls.append(prompt)
+        return AIMessage(content=next(responses))
+
+    generator = ClaimGenerator(llm=RunnableLambda(respond))
+    claims = generator.generate_claims(lineage)
+
+    assert len(calls) == 2
+    assert claims[0].claim_id == "c1"
+    assert "검증 오류" in str(calls[1])
+
+
+def test_claim_generator_schema_retry_is_bounded(lineage):
+    calls = []
+
+    def respond(_):
+        calls.append(1)
+        return AIMessage(content='{"claims": [{"claim_id": "c1", "claim_type": "factual"}]}')
+
+    generator = ClaimGenerator(llm=RunnableLambda(respond))
+
+    with pytest.raises(ClaimGenerationError) as exc:
+        generator.generate_claims(lineage)
+
+    assert exc.value.error_code == "CLAIM_SCHEMA_INVALID"
+    assert len(calls) == 2
+    assert "claim_text:missing" in str(exc.value)
+
 def test_claim_generator_markdown_fence(lineage):
     generator = generator_with_response('```json\n{"claims": [{"claim_text": "text", "claim_type": "factual", "claim_id": "c1"}]}\n```')
     claims = generator.generate_claims(lineage)

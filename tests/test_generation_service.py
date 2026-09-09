@@ -8,7 +8,11 @@ import pytest
 
 from src.schemas.card_news import TrendReport, TrendResult
 from src.schemas.content_package import PipelineResult
-from src.services.generation_service import build_verified_lineage, execute_generation
+from src.services.generation_service import (
+    build_verified_lineage,
+    collect_verified_lineage,
+    execute_generation,
+)
 
 
 def test_build_verified_lineage_preserves_multiple_source_urls():
@@ -58,6 +62,85 @@ def test_lineage_keeps_primary_source_for_legacy_compatibility():
     assert lineage.source_title == "주 기사"
     assert lineage.source_url == "https://example.com/a"
     assert lineage.evidence_passages[0].article_id == lineage.article_id
+
+
+def test_collect_verified_lineage_locks_selected_article_instead_of_researching():
+    report = TrendReport(
+        query="구체적 사건",
+        results=[
+            TrendResult(
+                title="선택된 원문",
+                url="https://example.com/selected",
+                content="충분한 원문 " * 200,
+                score=2.0,
+            )
+        ],
+    )
+
+    with patch(
+        "src.agents.trend_analyzer.build_locked_source_report",
+        return_value=report,
+    ) as locked, patch("src.agents.trend_analyzer.run") as research:
+        lineage = collect_verified_lineage(
+            "구체적 사건",
+            selected_title="선택된 원문",
+            selected_url="https://example.com/selected",
+            selected_content="RSS 요약",
+        )
+
+    locked.assert_called_once_with(
+        "구체적 사건",
+        title="선택된 원문",
+        url="https://example.com/selected",
+        content="RSS 요약",
+    )
+    research.assert_not_called()
+    assert lineage.source_url == "https://example.com/selected"
+
+
+def test_locked_source_report_preserves_selected_url():
+    from src.agents import trend_analyzer
+
+    enriched = TrendResult(
+        title="선택된 원문",
+        url="https://example.com/selected",
+        content="충분한 원문 " * 200,
+        score=2.0,
+    )
+    with patch(
+        "src.agents.trend_analyzer._enrich_article",
+        return_value=enriched,
+    ):
+        report = trend_analyzer.build_locked_source_report(
+            "구체적 사건",
+            title=enriched.title,
+            url=enriched.url,
+            content="RSS 요약",
+        )
+
+    assert report.results[0].url == "https://example.com/selected"
+    assert report.results[0].title == "선택된 원문"
+
+
+def test_locked_source_report_rejects_thin_article_after_enrichment():
+    from src.agents import trend_analyzer
+
+    thin = TrendResult(
+        title="얇은 원문",
+        url="https://example.com/thin",
+        content="짧은 요약",
+        score=2.0,
+    )
+    with patch(
+        "src.agents.trend_analyzer._enrich_article",
+        return_value=thin,
+    ), pytest.raises(ValueError, match="LOCKED_SOURCE_CONTENT_INSUFFICIENT"):
+        trend_analyzer.build_locked_source_report(
+            "구체적 사건",
+            title=thin.title,
+            url=thin.url,
+            content=thin.content,
+        )
 
 
 def test_human_approval_cannot_be_silently_automatic():

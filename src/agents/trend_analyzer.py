@@ -622,6 +622,45 @@ def _pick_best_article(articles: list[TrendResult], topic: str) -> TrendResult:
     )
 
 
+def build_locked_source_report(
+    topic: str,
+    *,
+    title: str,
+    url: str,
+    content: str = "",
+    min_content_length: int = 1000,
+) -> TrendReport:
+    """Enrich the exact article selected by the automatic news editor.
+
+    The selected URL remains the primary evidence.  Automatic generation must
+    not turn a headline into a new query and silently switch to another event.
+    """
+
+    if not title.strip() or not url.startswith(("http://", "https://")):
+        raise ValueError("LOCKED_SOURCE_INVALID")
+
+    locked = _enrich_article(
+        TrendResult(
+            title=title.strip(),
+            url=url,
+            content=content.strip(),
+            score=2.0,
+        )
+    )
+    if len(locked.content.strip()) < min_content_length:
+        raise ValueError("LOCKED_SOURCE_CONTENT_INSUFFICIENT")
+
+    return TrendReport(
+        query=topic,
+        results=[locked],
+        summary=(
+            "선택한 원문을 고정하여 생성합니다.\n"
+            f"기사 제목: {locked.title}\n"
+            f"출처: {locked.url}\n\n{locked.content}"
+        ),
+    )
+
+
 # ── 메인 ─────────────────────────────────────────────────
 
 def run(topic: str, max_results: int = 7, ignored_titles: set | None = None) -> TrendReport:
