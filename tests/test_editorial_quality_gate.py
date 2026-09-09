@@ -97,6 +97,26 @@ def test_editorial_claim_gate_rejects_generic_topic_drift():
     assert exc.value.error_code == "EDITORIAL_TOPIC_MISMATCH"
 
 
+def test_editorial_claim_gate_uses_locked_source_title_for_relevance():
+    claims = _distinct_claims()
+    claims[0] = claims[0].model_copy(
+        update={
+            "display_title": "Cognition 투자 변화",
+            "claim_text": (
+                "Cognition은 이번 투자 발표에서 기업가치와 조달 규모를 공개했고, "
+                "AI 코딩 사업 확장을 위한 향후 운영 방향도 함께 설명했다."
+            ),
+        }
+    )
+
+    validate_claim_editorial_quality(
+        claims,
+        topic="AI 코딩 시장의 새로운 가능성",
+        source_title="Cognition hits $48B valuation in AI coding market",
+        target_content_slides=4,
+    )
+
+
 def test_rule_check_rejects_truncated_headline():
     script = ScriptAssembler.assemble("테스트", _distinct_claims(), num_cards=6)
     script.slides[1].title = "완결되지 않은 제목…"

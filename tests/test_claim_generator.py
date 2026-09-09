@@ -170,3 +170,24 @@ def test_claim_generator_factory_failure_is_fail_closed(lineage):
 
     assert exc.value.error_code == "CLAIM_GENERATION_FAILED"
     assert "provider unavailable" not in str(exc.value)
+
+
+def test_claim_generator_prompt_includes_locked_source_title(lineage):
+    calls = []
+
+    def respond(prompt):
+        calls.append(str(prompt))
+        return AIMessage(
+            content=(
+                '{"claims": [{"claim_text": "Test passage", '
+                '"claim_type": "factual", "claim_id": "c1", '
+                '"evidence_ids": ["ev_1"]}]}'
+            )
+        )
+
+    generator = ClaimGenerator(llm=RunnableLambda(respond))
+    generator.generate_claims(
+        lineage.model_copy(update={"source_title": "Cognition hits $48B valuation"})
+    )
+
+    assert "Cognition hits $48B valuation" in calls[0]

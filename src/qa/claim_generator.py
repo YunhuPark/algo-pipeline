@@ -57,6 +57,8 @@ _CLAIM_SYSTEM_PROMPT = """
 8. non-CTA Claim은 context/change/mechanism/evidence/limitation/impact 중 최소 3가지 역할을 사용하고 같은 사실을 표현만 바꿔 반복하지 마십시오.
 9. display_title은 10~18자의 자연스러운 한국어 완결형 제목이어야 하며 말줄임표를 쓰지 마십시오. claim_text에 없는 사실을 추가하면 안 됩니다.
 10. claim_text는 카드 한 장에서 독립적으로 이해되는 60~110자의 자연스러운 한국어로 작성하십시오. 고유명사·수치의 의미와 비교 기준을 생략하지 마십시오.
+11. entities 배열에는 각 Claim이 인용한 Evidence에 실제로 등장하는 고유명사의 원문 철자만 넣으십시오. 근거에 없는 번역명·상위 조직·업계명은 넣지 마십시오.
+12. 모든 Claim은 카드뉴스 주제와 고정 원문 제목이 가리키는 동일한 사건을 설명해야 합니다. 최소 2개 Claim의 display_title 또는 claim_text에 원문의 핵심 고유명사를 명시하십시오.
 """
 
 class ClaimGenerationError(QualityGateError, ValueError):
@@ -69,7 +71,11 @@ class ClaimGenerator:
         self._llm_factory = llm_factory or self._build_default_llm
         self.prompt = ChatPromptTemplate.from_messages([
             ("system", _CLAIM_SYSTEM_PROMPT),
-            ("human", "카드뉴스 주제:\n{topic}\n\n원문:\n{evidence}\n\n{schema_feedback}"),
+            (
+                "human",
+                "카드뉴스 주제:\n{topic}\n\n고정 원문 제목:\n{source_title}"
+                "\n\n원문 Evidence:\n{evidence}\n\n{schema_feedback}",
+            ),
         ])
 
     @staticmethod
@@ -229,6 +235,7 @@ class ClaimGenerator:
                 chain = self.prompt | self._get_llm()
                 response = chain.invoke({
                     "topic": lineage.topic,
+                    "source_title": lineage.source_title,
                     "evidence": evidence_text,
                     "schema_feedback": schema_feedback,
                 })
