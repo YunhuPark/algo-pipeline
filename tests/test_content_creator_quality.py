@@ -207,7 +207,11 @@ def test_content_creator_still_blocks_after_bounded_grounding_retry(lineage):
         )
 
     generator = SequenceClaimGenerator(
-        [[unsupported_claim("claim-bad-1")], [unsupported_claim("claim-bad-2")]]
+        [
+            [unsupported_claim("claim-bad-1")],
+            [unsupported_claim("claim-bad-2")],
+            [unsupported_claim("claim-bad-3")],
+        ]
     )
     creator = ContentCreator(
         brand_persona=MagicMock(),
@@ -223,9 +227,62 @@ def test_content_creator_still_blocks_after_bounded_grounding_retry(lineage):
         )
 
     assert exc.value.error_code == "NUMBER_UNSUPPORTED"
-    assert len(generator.feedback) == 2
+    assert len(generator.feedback) == 3
     assert "NUMBER_UNSUPPORTED" in generator.feedback[1]
+    assert "NUMBER_UNSUPPORTED" in generator.feedback[2]
     assert creator.last_fact_check_report is None
+
+
+def test_content_creator_accumulates_feedback_across_repair_attempts(lineage):
+    unsupported = Claim(
+        claim_id="claim-bad-number",
+        claim_text="새 모델은 105만 개의 토큰을 처리한다.",
+        claim_type="numerical",
+        numbers=[
+            NormalizedNumber(
+                raw_text="105만 개",
+                normalized_value=Decimal("105"),
+                unit="개",
+            )
+        ],
+        evidence_ids=["evidence-1"],
+        source_url=lineage.source_url,
+    )
+    missing_headline = Claim(
+        claim_id="claim-missing-headline",
+        claim_text=SUPPORTED_TEXT,
+        editorial_role="change",
+        claim_type="factual",
+        entities=["OpenAI"],
+        evidence_ids=["evidence-1"],
+        source_url=lineage.source_url,
+    )
+    corrected = missing_headline.model_copy(
+        update={
+            "claim_id": "claim-corrected",
+            "display_title": "OpenAI 새 모델 공개",
+        }
+    )
+    generator = SequenceClaimGenerator(
+        [[unsupported], [missing_headline], [corrected]]
+    )
+    creator = ContentCreator(
+        brand_persona=MagicMock(),
+        claim_generator=generator,
+        semantic_llm=supported_critic(),
+        editorial_evaluator=passing_editorial,
+    )
+
+    creator.run(
+        topic=lineage.topic,
+        trend_report=TrendReport(query=lineage.topic, results=[]),
+        num_cards=3,
+        source_lineage=lineage,
+    )
+
+    assert "NUMBER_UNSUPPORTED" in generator.feedback[2]
+    assert "EDITORIAL_HEADLINE_MISSING" in generator.feedback[2]
+    assert creator.last_fact_check_report.confirmed == 1
 
 
 def test_content_creator_retries_missing_editorial_headline(lineage):
