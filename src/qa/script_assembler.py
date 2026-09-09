@@ -1,7 +1,7 @@
 import re
 from typing import List
 
-from src.schemas.card_news import Claim, CardNewsScript, Slide
+from src.schemas.card_news import Claim, CardNewsScript, NormalizedNumber, Slide
 
 
 _ANGLE_HOOKS = {
@@ -52,17 +52,51 @@ def _claim_headline(claim: Claim) -> str:
     return _shorten(first_clause, 22)
 
 
-def _primary_number(claim: Claim) -> str:
+_APPROXIMATE_ENGLISH_LABELS = {
+    "thousands": "수천",
+    "tens of thousands": "수만",
+    "hundreds of thousands": "수십만",
+    "millions": "수백만",
+    "tens of millions": "수천만",
+    "hundreds of millions": "수억",
+    "billions": "수십억",
+    "tens of billions": "수백억",
+    "hundreds of billions": "수천억",
+    "trillions": "수조",
+}
+
+
+def _display_number(number: NormalizedNumber) -> str:
+    """Render an approximate English source label naturally in Korean."""
+
+    raw = re.sub(r"\s+", " ", number.raw_text).strip()
+    lowered = raw.lower()
+    is_dollars = bool(
+        re.search(r"\b(?:dollars?|usd)\b", lowered)
+        or number.unit.strip().lower() in {"달러", "dollar", "dollars", "usd"}
+    )
+    magnitude = re.sub(
+        r"\s+of\s+(?:dollars?|usd)\s*$",
+        "",
+        lowered,
+    ).strip()
+    localized = _APPROXIMATE_ENGLISH_LABELS.get(magnitude)
+    if localized:
+        return f"{localized} 달러" if is_dollars else localized
+    return raw
+
+
+def _primary_number(claim: Claim) -> NormalizedNumber | None:
     """Prefer the verified number named by the headline, then the largest value."""
 
     if not claim.numbers:
-        return ""
+        return None
     normalized_title = re.sub(r"\s+", "", claim.display_title)
     for number in claim.numbers:
         normalized_raw = re.sub(r"\s+", "", number.raw_text)
         if normalized_raw and normalized_raw in normalized_title:
-            return number.raw_text
-    return max(claim.numbers, key=lambda item: abs(item.normalized_value)).raw_text
+            return number
+    return max(claim.numbers, key=lambda item: abs(item.normalized_value))
 
 
 def _visual_type(claim: Claim) -> str:
@@ -129,14 +163,15 @@ class ScriptAssembler:
         content_claims = [c for c in verified_claims if c.claim_type != "cta"]
         max_content_slides = max(1, (num_cards or 6) - 2)
         for c in content_claims[:max_content_slides]:
-            accent = _primary_number(c) if c.numbers else ""
+            primary_number = _primary_number(c)
+            accent = _display_number(primary_number) if primary_number else ""
             if not accent and c.entities:
                 accent = c.entities[0]
             visual_numbers = sorted(
                 c.numbers,
-                key=lambda item: item.raw_text != accent,
+                key=lambda item: item is not primary_number,
             )[:3]
-            visual_values = [item.raw_text for item in visual_numbers]
+            visual_values = [_display_number(item) for item in visual_numbers]
             visual_labels = [item.subject.strip() for item in visual_numbers]
             if not visual_values and c.entities:
                 visual_values = [c.entities[0]]

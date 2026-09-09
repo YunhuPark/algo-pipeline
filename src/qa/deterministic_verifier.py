@@ -72,6 +72,42 @@ _NUMBER_MENTION_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Approximate newsworthy magnitudes must not be coerced into one exact value.
+# Compare their scale band instead: ``hundreds of millions`` and ``수억``
+# both describe band 8, while still requiring compatible semantic units.
+_ENGLISH_APPROXIMATE_NUMBER_RE = re.compile(
+    rf"(?<![A-Za-z0-9])"
+    rf"(?:(?P<prefix>tens|hundreds)\s+of\s+)?"
+    rf"(?P<scale>thousands?|millions?|billions?|trillions?)"
+    rf"(?:\s+of)?\s*(?P<unit>{_UNIT_PATTERN})?"
+    rf"(?![A-Za-z0-9])",
+    re.IGNORECASE,
+)
+_KOREAN_APPROXIMATE_NUMBER_RE = re.compile(
+    rf"(?<![가-힣A-Za-z0-9])수\s*"
+    rf"(?P<scale>천억|백억|십억|천만|백만|십만|조|억|만|천)"
+    rf"\s*(?P<unit>{_UNIT_PATTERN})?",
+    re.IGNORECASE,
+)
+_ENGLISH_APPROXIMATE_EXPONENTS = {
+    "thousand": 3,
+    "million": 6,
+    "billion": 9,
+    "trillion": 12,
+}
+_KOREAN_APPROXIMATE_EXPONENTS = {
+    "천": 3,
+    "만": 4,
+    "십만": 5,
+    "백만": 6,
+    "천만": 7,
+    "억": 8,
+    "십억": 9,
+    "백억": 10,
+    "천억": 11,
+    "조": 12,
+}
+
 _ENGLISH_MONTHS = {
     "january": 1,
     "february": 2,
@@ -183,6 +219,32 @@ def _extract_number_mentions(text: str) -> Iterable[Tuple[Decimal, str]]:
         yield value, _canonical_unit(
             match.group("unit") or "",
             match.group("currency") or "",
+        )
+
+
+def _extract_approximate_number_mentions(text: str) -> Iterable[Tuple[int, str]]:
+    """Yield magnitude bands without inventing precision for vague amounts."""
+
+    normalized = unicodedata.normalize("NFKC", text or "")
+    for match in _ENGLISH_APPROXIMATE_NUMBER_RE.finditer(normalized):
+        preceding = normalized[: match.start()].rstrip()
+        if preceding and (preceding[-1].isdigit() or preceding[-1] in "$₩."):
+            # ``48 billion`` is an exact amount handled by the Decimal parser,
+            # not an approximate ``billions`` magnitude.
+            continue
+        scale = match.group("scale").lower().rstrip("s")
+        exponent = _ENGLISH_APPROXIMATE_EXPONENTS[scale]
+        prefix = (match.group("prefix") or "").lower()
+        if prefix == "tens":
+            exponent += 1
+        elif prefix == "hundreds":
+            exponent += 2
+        yield exponent, _canonical_unit(match.group("unit") or "")
+
+    for match in _KOREAN_APPROXIMATE_NUMBER_RE.finditer(normalized):
+        yield (
+            _KOREAN_APPROXIMATE_EXPONENTS[match.group("scale")],
+            _canonical_unit(match.group("unit") or ""),
         )
 
 
@@ -383,23 +445,37 @@ class DeterministicVerifier:
 
             # 3. Check Numbers
             for num_obj in claim.numbers:
-                parsed_claim = list(_extract_number_mentions(num_obj.raw_text))
-                if parsed_claim:
-                    val, qual = parsed_claim[0]
-                    declared_unit = _canonical_unit(num_obj.unit)
+                declared_unit = _canonical_unit(num_obj.unit)
+                approximate_claim = list(
+                    _extract_approximate_number_mentions(num_obj.raw_text)
+                )
+                if approximate_claim:
+                    magnitude, qual = approximate_claim[0]
                     if not qual and declared_unit:
                         qual = declared_unit
+                    found = any(
+                        magnitude == ev_magnitude and qual == ev_qual
+                        for ev_magnitude, ev_qual in _extract_approximate_number_mentions(
+                            combined_evidence_text
+                        )
+                    )
                 else:
-                    val = num_obj.normalized_value
-                    qual = _canonical_unit(num_obj.unit)
+                    parsed_claim = list(_extract_number_mentions(num_obj.raw_text))
+                    if parsed_claim:
+                        val, qual = parsed_claim[0]
+                        if not qual and declared_unit:
+                            qual = declared_unit
+                    else:
+                        val = num_obj.normalized_value
+                        qual = declared_unit
 
-                # Compare canonical values after magnitude conversion. Units remain
-                # fail-closed, so 30% cannot validate 30 people and 3 days cannot
-                # validate 3 items.
-                found = any(
-                    val == ev_val and qual == ev_qual
-                    for ev_val, ev_qual in _extract_number_mentions(combined_evidence_text)
-                )
+                    # Compare canonical values after magnitude conversion. Units remain
+                    # fail-closed, so 30% cannot validate 30 people and 3 days cannot
+                    # validate 3 items.
+                    found = any(
+                        val == ev_val and qual == ev_qual
+                        for ev_val, ev_qual in _extract_number_mentions(combined_evidence_text)
+                    )
                 if not found:
                     raise QualityGateError("NUMBER_UNSUPPORTED", f"Number '{num_obj.raw_text}' not supported by evidence.", claim.claim_id)
 
