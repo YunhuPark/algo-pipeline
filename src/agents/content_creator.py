@@ -155,6 +155,44 @@ class ContentCreator:
                     f"자동 재생성합니다 ({attempt}/{MAX_CLAIM_QUALITY_ATTEMPTS - 1}, "
                     f"{exc.error_code}{claim_label})."
                 )
+                failed_claim = next(
+                    (claim for claim in claims if claim.claim_id == exc.claim_id),
+                    None,
+                )
+                evidence_by_id = {
+                    item.evidence_id: item
+                    for item in source_lineage.evidence_passages
+                }
+                cited_evidence = "\n".join(
+                    f"[{evidence_id}] {evidence_by_id[evidence_id].text}"
+                    for evidence_id in (
+                        failed_claim.evidence_ids if failed_claim else []
+                    )
+                    if evidence_id in evidence_by_id
+                )
+                targeted_feedback = ""
+                if exc.error_code in {"NUMBERS_MISSING", "NUMBER_UNSUPPORTED"}:
+                    targeted_feedback = (
+                        " 숫자 오류를 고칠 때는 인용 근거의 숫자 표기를 그대로 복사하는 것을 우선하세요. "
+                        "한국어 억 단위로 환산한다면 1 billion=10억입니다. "
+                        "예: $48 billion=$48B=480억 달러이며 48억 달러가 아닙니다."
+                    )
+                elif exc.error_code == "DATE_UNSUPPORTED":
+                    targeted_feedback = (
+                        " 날짜 오류를 고칠 때는 인용 근거의 날짜를 그대로 사용하고, "
+                        "원문에 없는 연도·월·일을 보충하지 마세요."
+                    )
+                elif exc.error_code in {
+                    "CLAIM_CONTRADICTED",
+                    "CLAIM_INSUFFICIENT_EVIDENCE",
+                }:
+                    targeted_feedback = (
+                        " 의미 검증에 실패한 Claim은 추론으로 보완하지 말고, "
+                        "인용 근거에 직접 쓰인 사실만 충실하게 번역하거나 요약하세요."
+                    )
+                if cited_evidence:
+                    targeted_feedback += f"\n문제가 된 Claim의 인용 근거:\n{cited_evidence[:1600]}"
+
                 current_failure_feedback = (
                     "이전 Claim 세트가 사실 또는 편집 품질 검증에 실패했습니다. "
                     "문제가 된 주장을 삭제하거나 인용한 evidence 범위 안에서 정확히 다시 작성하세요. "
@@ -163,6 +201,7 @@ class ContentCreator:
                     "CTA Claim은 만들지 말고 모든 Claim에 정확한 evidence_ids를 넣으세요. "
                     "각 카드는 서로 다른 역할과 정보를 가져야 하며 제목은 말줄임표 없이 완결하세요. "
                     f"검증 오류: {exc.error_code}{claim_label} - {exc}"
+                    f"{targeted_feedback}"
                 )
                 validation_feedback = "\n".join(
                     item

@@ -186,6 +186,8 @@ def test_content_creator_retries_grounding_failure_with_verifier_feedback(lineag
     assert script.topic == lineage.topic
     assert generator.feedback[0] == ""
     assert "NUMBER_UNSUPPORTED" in generator.feedback[1]
+    assert "1 billion=10억" in generator.feedback[1]
+    assert SUPPORTED_TEXT in generator.feedback[1]
     assert creator.last_fact_check_report.confirmed == 1
 
 
