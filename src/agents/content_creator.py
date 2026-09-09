@@ -19,7 +19,7 @@ from src.qa.script_assembler import ScriptAssembler
 from src.schemas.fact_check import FactCheckReport
 
 
-MAX_CLAIM_QUALITY_ATTEMPTS = 2
+MAX_CLAIM_QUALITY_ATTEMPTS = 3
 
 _RETRYABLE_CLAIM_QUALITY_ERRORS = {
     "EVIDENCE_MISSING",
@@ -100,7 +100,7 @@ class ContentCreator:
             raise QualityGateError("LEGACY_LINEAGE_UNVERIFIED", "Cannot generate new content with unverified legacy source lineage.")
 
         # 2~4. Claim 생성 + Quality Gate. 근거 불일치가 발생하면 검증
-        # 피드백을 전달해 한 번만 재생성하고, 두 번째 실패는 그대로 차단한다.
+        # 피드백을 누적해 최대 두 번 재생성하고, 세 번째 실패는 차단한다.
         requested_cards = num_cards or 6
         target_content_slides = max(1, requested_cards - 2)
         validation_feedback = "\n".join(
@@ -155,12 +155,19 @@ class ContentCreator:
                     f"자동 재생성합니다 ({attempt}/{MAX_CLAIM_QUALITY_ATTEMPTS - 1}, "
                     f"{exc.error_code}{claim_label})."
                 )
-                validation_feedback = (
+                current_failure_feedback = (
                     "이전 Claim 세트가 사실 또는 편집 품질 검증에 실패했습니다. "
                     "문제가 된 주장을 삭제하거나 인용한 evidence 범위 안에서 정확히 다시 작성하세요. "
                     "숫자는 원문 표기를 유지하거나 수학적으로 동일한 값으로만 환산하세요. "
+                    "원문에 명시되지 않은 단체, 행사, 평가, 원인 또는 전망을 추가하지 마세요. "
+                    "CTA Claim은 만들지 말고 모든 Claim에 정확한 evidence_ids를 넣으세요. "
                     "각 카드는 서로 다른 역할과 정보를 가져야 하며 제목은 말줄임표 없이 완결하세요. "
                     f"검증 오류: {exc.error_code}{claim_label} - {exc}"
+                )
+                validation_feedback = "\n".join(
+                    item
+                    for item in (validation_feedback, current_failure_feedback)
+                    if item
                 )
 
         if script is None:

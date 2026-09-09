@@ -35,6 +35,21 @@ def test_claim_generator_normal(lineage):
     assert claims[0].source_url == lineage.source_url
 
 
+def test_claim_generator_discards_llm_cta(lineage):
+    generator = generator_with_response(
+        '{"claims": ['
+        '{"claim_text": "Test passage", "claim_type": "factual", '
+        '"claim_id": "c1", "evidence_ids": ["ev_1"]},'
+        '{"claim_text": "지금 확인하세요", "claim_type": "cta", '
+        '"claim_id": "c2", "evidence_ids": []}'
+        ']}'
+    )
+
+    claims = generator.generate_claims(lineage)
+
+    assert [claim.claim_id for claim in claims] == ["c1"]
+
+
 def test_claim_generator_retries_once_after_schema_error(lineage):
     responses = iter([
         '{"claims": [{"claim_id": "c1", "claim_type": "factual"}]}',

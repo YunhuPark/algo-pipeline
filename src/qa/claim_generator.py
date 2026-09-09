@@ -37,7 +37,7 @@ _CLAIM_SYSTEM_PROMPT = """
       "display_title": "독립적으로 읽히는 10~18자 제목",
       "editorial_role": "context" | "change" | "mechanism" | "evidence" | "limitation" | "impact" | "cta",
       "claim_text": "원문에서 추출한 구체적 주장 문장",
-      "claim_type": "factual" | "numerical" | "attributed_statement" | "inference" | "opinion" | "cta",
+      "claim_type": "factual" | "numerical" | "attributed_statement" | "inference" | "opinion",
       "entities": ["언급된 고유명사", "회사명", "인명"],
       "numbers": [{{"raw_text": "3개", "normalized_value": 3.0, "unit": "개", "qualifier": "", "subject": ""}}],
       "dates": [{{"raw_text": "2026년 7월", "normalized_date": "2026-07", "precision": "month", "is_relative": false, "reference_date": ""}}],
@@ -50,10 +50,10 @@ _CLAIM_SYSTEM_PROMPT = """
 1. "3가지", "5가지"처럼 임의로 개수를 정하여 숫자를 만들어내지 마십시오.
 2. 외부 일반 지식을 결합하지 마십시오.
 3. 숫자가 포함된 문장은 반드시 numerical type을 사용하고, numbers 배열에 해당 숫자를 명시하십시오.
-4. CTA 타입은 반드시 마지막에 하나만 넣고, 원문과 관련이 없는 "지금 당장 써보세요", "위험합니다" 식의 과도한 선동을 피하십시오.
+4. CTA Claim은 생성하지 마십시오. 마지막 CTA 카드는 검증된 Claim과 분리하여 시스템이 안전한 고정 문구로 생성합니다.
 5. 영문 규모 단위를 한국어로 바꾸면 값을 정확히 환산하십시오. 예: 1.05 million = 105만, 105 million = 1억 500만.
 6. 검증 오류 피드백이 있으면 문제가 된 주장을 삭제하거나 원문 표기와 정확히 일치하도록 다시 작성하십시오.
-7. 기본 6장 카드뉴스용으로 서로 다른 내용의 non-CTA Claim 4개와, 필요하면 마지막 CTA Claim 1개를 만드십시오.
+7. 기본 6장 카드뉴스용으로 서로 다른 내용의 non-CTA Claim 4개를 만드십시오. 모든 Claim은 비어 있지 않은 evidence_ids를 가져야 합니다.
 8. non-CTA Claim은 context/change/mechanism/evidence/limitation/impact 중 최소 3가지 역할을 사용하고 같은 사실을 표현만 바꿔 반복하지 마십시오.
 9. display_title은 10~18자의 자연스러운 한국어 완결형 제목이어야 하며 말줄임표를 쓰지 마십시오. claim_text에 없는 사실을 추가하면 안 됩니다.
 10. claim_text는 카드 한 장에서 독립적으로 이해되는 60~110자의 자연스러운 한국어로 작성하십시오. 고유명사·수치의 의미와 비교 기준을 생략하지 마십시오.
@@ -155,6 +155,13 @@ class ClaimGenerator:
                     "CLAIM_SCHEMA_INVALID",
                     f"Claim at index {index} must be an object.",
                 )
+
+            # CTA copy is a presentation concern.  The assembler supplies a
+            # deterministic source-safe CTA, so an LLM-generated CTA must not
+            # consume factual verification or retry budget.
+            if raw_claim.get("claim_type") == "cta":
+                continue
+
             try:
                 cited_ids = raw_claim.get("evidence_ids") or []
                 evidence_by_id = {
@@ -193,6 +200,12 @@ class ClaimGenerator:
                 )
             seen_ids.add(claim.claim_id)
             claims.append(claim)
+
+        if not claims:
+            raise ClaimGenerationError(
+                "CLAIMS_EMPTY",
+                "Claim generator returned no factual content claims.",
+            )
         return claims
 
     def generate_claims(
