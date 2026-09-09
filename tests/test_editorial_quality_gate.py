@@ -7,7 +7,7 @@ from src.persona import Persona
 from src.qa.deterministic_verifier import QualityGateError
 from src.qa.editorial_quality_gate import validate_claim_editorial_quality
 from src.qa.script_assembler import ScriptAssembler
-from src.schemas.card_news import Claim
+from src.schemas.card_news import Claim, NormalizedNumber
 
 
 def _claim(index: int, role: str, title: str, body: str) -> Claim:
@@ -136,6 +136,45 @@ def test_long_topic_produces_complete_cover_title_and_enough_hashtags():
     assert len(script.slides[0].title) <= 22
     assert not script.slides[0].title.endswith(("…", "..."))
     assert len(script.hashtags) >= 5
+
+
+def test_script_assembler_makes_headline_number_the_primary_visual():
+    claim = Claim(
+        claim_id="c1",
+        display_title="Cognition의 480억 달러 가치",
+        editorial_role="context",
+        claim_text=(
+            "Cognition은 20억 달러를 조달했고 기업가치는 480억 달러로 "
+            "평가됐다고 발표했다."
+        ),
+        claim_type="numerical",
+        entities=["Cognition"],
+        numbers=[
+            NormalizedNumber(raw_text="20억 달러", normalized_value=2_000_000_000, unit="USD", subject="조달액"),
+            NormalizedNumber(raw_text="480억 달러", normalized_value=48_000_000_000, unit="USD", subject="기업가치"),
+        ],
+        evidence_ids=["e1"],
+        verification_status="verified",
+    )
+
+    slide = ScriptAssembler.assemble("Cognition 투자", [claim]).content_slides[0]
+
+    assert slide.accent == "480억 달러"
+    assert slide.visual_type == "hero_stat"
+    assert slide.visual_values[0] == "480억 달러"
+    assert slide.visual_labels[0] == "기업가치"
+
+
+def test_script_assembler_selects_distinct_visuals_by_editorial_role():
+    claims = [
+        _claim(1, "mechanism", "작동 방식", "입력을 분석하고 검증 단계를 거쳐 결과를 제공하는 구조다."),
+        _claim(2, "limitation", "남은 한계", "제한된 환경에서만 확인돼 추가 검증이 필요하다."),
+        _claim(3, "impact", "시장 영향", "개발 도구를 선택하는 기업의 판단 기준에 영향을 줄 수 있다."),
+    ]
+
+    slides = ScriptAssembler.assemble("검증된 변화", claims, num_cards=5).content_slides
+
+    assert [slide.visual_type for slide in slides] == ["process", "warning", "impact"]
 
 
 def test_ai_editorial_gate_requires_every_quality_axis_to_pass():

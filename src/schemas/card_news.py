@@ -16,6 +16,25 @@ class Slide(BaseModel):
     body: str = Field(..., description="본문 설명 텍스트 (60자 이상 130자 이하, 줄바꿈 \\n 허용, 사람이 쓴 것처럼 자연스럽게)")
     emoji: str = Field(default="", description="장식 이모지 1개 (없으면 빈 문자열)")
     accent: str = Field(default="", description="강조 수치·인용 (예: '73% 증가', 15자 이내, 없으면 빈 문자열)")
+    visual_type: Literal[
+        "auto",
+        "hero_stat",
+        "comparison",
+        "process",
+        "entity",
+        "warning",
+        "impact",
+    ] = Field(default="auto", description="근거 데이터로 결정되는 시각 레이아웃")
+    visual_values: List[str] = Field(
+        default_factory=list,
+        max_length=3,
+        description="시각화에 표시할 검증된 수치·고유명사",
+    )
+    visual_labels: List[str] = Field(
+        default_factory=list,
+        max_length=3,
+        description="visual_values의 근거 기반 레이블",
+    )
 
 
 class CardNewsScript(BaseModel):

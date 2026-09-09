@@ -2206,6 +2206,9 @@ def edit_slide():
                 body=s["body"],
                 emoji=s.get("emoji", ""),
                 accent=s.get("accent", ""),
+                visual_type=s.get("visual_type", "auto"),
+                visual_values=s.get("visual_values", []),
+                visual_labels=s.get("visual_labels", []),
             )
             for s in slides
         ]
