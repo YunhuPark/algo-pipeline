@@ -52,6 +52,33 @@ def _claim_headline(claim: Claim) -> str:
     return _shorten(first_clause, 22)
 
 
+def _primary_number(claim: Claim) -> str:
+    """Prefer the verified number named by the headline, then the largest value."""
+
+    if not claim.numbers:
+        return ""
+    normalized_title = re.sub(r"\s+", "", claim.display_title)
+    for number in claim.numbers:
+        normalized_raw = re.sub(r"\s+", "", number.raw_text)
+        if normalized_raw and normalized_raw in normalized_title:
+            return number.raw_text
+    return max(claim.numbers, key=lambda item: abs(item.normalized_value)).raw_text
+
+
+def _visual_type(claim: Claim) -> str:
+    if claim.editorial_role == "mechanism":
+        return "process"
+    if claim.editorial_role == "limitation":
+        return "warning"
+    if claim.editorial_role == "impact":
+        return "impact"
+    if claim.editorial_role == "change" and len(claim.numbers) >= 2:
+        return "comparison"
+    if claim.numbers:
+        return "hero_stat"
+    return "entity"
+
+
 def _hashtags(topic: str, claims: List[Claim]) -> list[str]:
     tags = ["#알고", "#카드뉴스", "#뉴스분석", "#팩트체크", "#인사이트"]
     candidates = [topic]
@@ -102,18 +129,27 @@ class ScriptAssembler:
         content_claims = [c for c in verified_claims if c.claim_type != "cta"]
         max_content_slides = max(1, (num_cards or 6) - 2)
         for c in content_claims[:max_content_slides]:
-            accent = ""
-            if c.numbers:
-                accent = c.numbers[0].raw_text
-            elif c.entities:
+            accent = _primary_number(c) if c.numbers else ""
+            if not accent and c.entities:
                 accent = c.entities[0]
+            visual_numbers = sorted(
+                c.numbers,
+                key=lambda item: item.raw_text != accent,
+            )[:3]
+            visual_values = [item.raw_text for item in visual_numbers]
+            visual_labels = [item.subject.strip() for item in visual_numbers]
+            if not visual_values and c.entities:
+                visual_values = [c.entities[0]]
 
             slides.append(Slide(
                 slide_number=len(slides) + 1,
                 slide_type="content",
                 title=_claim_headline(c),
                 body=c.claim_text,
-                accent=accent
+                accent=accent,
+                visual_type=_visual_type(c),
+                visual_values=visual_values,
+                visual_labels=visual_labels,
             ))
 
         # 3. CTA slide
