@@ -193,6 +193,70 @@ def test_korean_man_matches_equivalent_english_million(mock_lineage):
     assert claim.verification_status == "verified"
 
 
+def test_48_billion_matches_480_eok_dollars(mock_lineage):
+    evidence = EvidencePassage(
+        evidence_id="e-valuation",
+        article_id="a1",
+        text="Cognition raised $2 billion at a $48B valuation.",
+        source_url="http://test.com",
+        content_hash="valuation-hash",
+    )
+    lineage = mock_lineage.model_copy(update={"evidence_passages": [evidence]})
+    claim = Claim(
+        claim_id="c-valuation",
+        claim_text="Cognition은 20억 달러를 조달하며 기업가치 480억 달러를 인정받았다.",
+        claim_type="numerical",
+        entities=["Cognition"],
+        numbers=[
+            NormalizedNumber(
+                raw_text="20억 달러",
+                normalized_value=Decimal("2000000000"),
+                unit="달러",
+            ),
+            NormalizedNumber(
+                raw_text="480억 달러",
+                normalized_value=Decimal("48000000000"),
+                unit="달러",
+            ),
+        ],
+        evidence_ids=["e-valuation"],
+    )
+
+    DeterministicVerifier.verify_claims([claim], lineage)
+
+    assert claim.verification_status == "verified"
+
+
+def test_48_billion_does_not_match_48_eok_dollars(mock_lineage):
+    evidence = EvidencePassage(
+        evidence_id="e-valuation",
+        article_id="a1",
+        text="Cognition reached a $48 billion valuation.",
+        source_url="http://test.com",
+        content_hash="valuation-hash",
+    )
+    lineage = mock_lineage.model_copy(update={"evidence_passages": [evidence]})
+    claim = Claim(
+        claim_id="c-valuation",
+        claim_text="Cognition의 기업가치는 48억 달러다.",
+        claim_type="numerical",
+        entities=["Cognition"],
+        numbers=[
+            NormalizedNumber(
+                raw_text="48억 달러",
+                normalized_value=Decimal("4800000000"),
+                unit="달러",
+            )
+        ],
+        evidence_ids=["e-valuation"],
+    )
+
+    with pytest.raises(QualityGateError) as exc:
+        DeterministicVerifier.verify_claims([claim], lineage)
+
+    assert exc.value.error_code == "NUMBER_UNSUPPORTED"
+
+
 def test_korean_compound_scale_matches_english_m_suffix(mock_lineage):
     evidence = EvidencePassage(
         evidence_id="e-compound",
