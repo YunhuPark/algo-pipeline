@@ -110,7 +110,7 @@ def test_locked_source_report_preserves_selected_url():
     with patch(
         "src.agents.trend_analyzer._enrich_article",
         return_value=enriched,
-    ):
+    ) as enrich:
         report = trend_analyzer.build_locked_source_report(
             "구체적 사건",
             title=enriched.title,
@@ -120,6 +120,7 @@ def test_locked_source_report_preserves_selected_url():
 
     assert report.results[0].url == "https://example.com/selected"
     assert report.results[0].title == "선택된 원문"
+    assert enrich.call_args.kwargs["min_length"] == 1000
 
 
 def test_locked_source_report_rejects_thin_article_after_enrichment():
