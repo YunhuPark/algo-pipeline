@@ -20,6 +20,7 @@ from pydantic import BaseModel
 from tavily import TavilyClient
 
 from src.config import OPENAI_API_KEY, TAVILY_API_KEY, LLM_MODEL
+from src.utils.rss_content import extract_feed_entry_content
 
 # ── RSS 피드 목록 (한국 + 글로벌 주요 뉴스) ───────────────
 RSS_FEEDS = [
@@ -138,7 +139,9 @@ def _parse_rss_feeds(limit_hours: int = HOURS_LIMIT) -> list[NewsItem]:
                     continue
 
                 title   = getattr(entry, "title",   "").strip()
-                summary = getattr(entry, "summary",  "").strip()[:300]
+                # content:encoded가 있으면 전문을 보존한다. 300자 preview만
+                # 저장하면 Tavily extract가 실패하는 순간 근거가 사라진다.
+                summary = extract_feed_entry_content(entry)
                 link    = getattr(entry, "link",     "")
 
                 if not title:
