@@ -1,15 +1,41 @@
 import json
+from pathlib import Path
 
 from PIL import Image, ImageChops
+import pytest
 
 import src.agents.design_renderer as renderer
 from src.schemas.card_news import CardNewsScript, Slide
 
 
 def _use_test_fonts(monkeypatch):
-    regular = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
-    bold = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
-    monkeypatch.setattr(renderer, "_find_font", lambda kind="bold": bold if kind == "bold" else regular)
+    candidates = [
+        (
+            Path("C:/Windows/Fonts/malgun.ttf"),
+            Path("C:/Windows/Fonts/malgunbd.ttf"),
+        ),
+        (
+            Path("C:/Windows/Fonts/arial.ttf"),
+            Path("C:/Windows/Fonts/arialbd.ttf"),
+        ),
+        (
+            Path("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"),
+            Path("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"),
+        ),
+    ]
+    available = next(
+        ((regular, bold) for regular, bold in candidates if regular.exists() and bold.exists()),
+        None,
+    )
+    if available is None:
+        pytest.skip("No portable test font pair is installed")
+
+    regular, bold = (str(path) for path in available)
+    monkeypatch.setattr(
+        renderer,
+        "_find_font",
+        lambda kind="bold": bold if kind == "bold" else regular,
+    )
 
 
 def _slide(visual_type: str, **updates) -> Slide:
