@@ -191,6 +191,64 @@ def test_content_creator_retries_grounding_failure_with_verifier_feedback(lineag
     assert creator.last_fact_check_report.confirmed == 1
 
 
+def test_content_creator_repairs_unambiguous_billion_localization_without_retry(lineage):
+    valuation_text = (
+        "Cognition reached a $48B valuation after announcing its latest funding round."
+    )
+    valuation_evidence = EvidencePassage(
+        evidence_id="evidence-valuation",
+        article_id="article-1",
+        text=valuation_text,
+        source_url=lineage.source_url,
+        content_hash="valuation-hash",
+    )
+    valuation_lineage = lineage.model_copy(
+        update={
+            "topic": "Cognition 투자",
+            "source_title": "Cognition reaches $48B valuation",
+            "evidence_passages": [valuation_evidence],
+        }
+    )
+    mistranslated = Claim(
+        claim_id="claim-valuation",
+        display_title="Cognition 48억 달러 가치",
+        claim_text=(
+            "Cognition은 최근 투자 유치 발표 이후 기업가치 48억 달러를 "
+            "인정받으며 AI 코딩 시장에서 주목받았다."
+        ),
+        editorial_role="change",
+        claim_type="numerical",
+        entities=["Cognition"],
+        numbers=[
+            NormalizedNumber(
+                raw_text="48억 달러",
+                normalized_value=Decimal("4800000000"),
+                unit="달러",
+            )
+        ],
+        evidence_ids=["evidence-valuation"],
+        source_url=lineage.source_url,
+    )
+    generator = StubClaimGenerator([mistranslated])
+    creator = ContentCreator(
+        brand_persona=MagicMock(),
+        claim_generator=generator,
+        semantic_llm=supported_critic(),
+        editorial_evaluator=passing_editorial,
+    )
+
+    script = creator.run(
+        topic=valuation_lineage.topic,
+        trend_report=TrendReport(query=valuation_lineage.topic, results=[]),
+        num_cards=3,
+        source_lineage=valuation_lineage,
+    )
+
+    assert generator.calls == 1
+    assert script.content_slides[0].accent == "480억 달러"
+    assert "480억 달러" in script.content_slides[0].body
+
+
 def test_content_creator_still_blocks_after_bounded_grounding_retry(lineage):
     def unsupported_claim(claim_id):
         return Claim(

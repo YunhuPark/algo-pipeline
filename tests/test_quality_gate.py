@@ -1,6 +1,10 @@
 import pytest
 from decimal import Decimal
-from src.qa.deterministic_verifier import DeterministicVerifier, QualityGateError
+from src.qa.deterministic_verifier import (
+    DeterministicVerifier,
+    QualityGateError,
+    repair_source_backed_numeric_localizations,
+)
 from src.qa.semantic_critic import SemanticCritic, SemanticCriticResult, run_semantic_critic
 from src.qa.editorial_verifier import validate_edited_slide
 from src.schemas.card_news import SourceLineage, EvidencePassage, Claim, NormalizedNumber, NormalizedDate
@@ -352,6 +356,70 @@ def test_48_billion_does_not_match_48_eok_dollars(mock_lineage):
         DeterministicVerifier.verify_claims([claim], lineage)
 
     assert exc.value.error_code == "NUMBER_UNSUPPORTED"
+
+
+def test_repairs_unambiguous_48_billion_to_480_eok_localization(mock_lineage):
+    evidence = EvidencePassage(
+        evidence_id="e-valuation",
+        article_id="a1",
+        text="Cognition reached a $48B valuation.",
+        source_url="http://test.com",
+        content_hash="valuation-hash",
+    )
+    lineage = mock_lineage.model_copy(update={"evidence_passages": [evidence]})
+    claim = Claim(
+        claim_id="c-valuation",
+        display_title="Cognition 48억 달러 가치",
+        claim_text="Cognition의 기업가치는 48억 달러로 평가됐다.",
+        claim_type="numerical",
+        entities=["Cognition"],
+        numbers=[
+            NormalizedNumber(
+                raw_text="48억 달러",
+                normalized_value=Decimal("4800000000"),
+                unit="달러",
+            )
+        ],
+        evidence_ids=["e-valuation"],
+    )
+
+    repaired, repairs = repair_source_backed_numeric_localizations([claim], lineage)
+
+    assert repairs == [("c-valuation", "48억 달러", "480억 달러")]
+    assert repaired[0].display_title == "Cognition 480억 달러 가치"
+    assert repaired[0].claim_text == "Cognition의 기업가치는 480억 달러로 평가됐다."
+    assert repaired[0].numbers[0].raw_text == "480억 달러"
+    assert repaired[0].numbers[0].normalized_value == Decimal("48000000000")
+    DeterministicVerifier.verify_claims(repaired, lineage)
+
+
+def test_does_not_repair_unrelated_unsupported_amount(mock_lineage):
+    evidence = EvidencePassage(
+        evidence_id="e-valuation",
+        article_id="a1",
+        text="Cognition reached a $49B valuation.",
+        source_url="http://test.com",
+        content_hash="valuation-hash",
+    )
+    lineage = mock_lineage.model_copy(update={"evidence_passages": [evidence]})
+    claim = Claim(
+        claim_id="c-valuation",
+        claim_text="Cognition의 기업가치는 48억 달러로 평가됐다.",
+        claim_type="numerical",
+        numbers=[
+            NormalizedNumber(
+                raw_text="48억 달러",
+                normalized_value=Decimal("4800000000"),
+                unit="달러",
+            )
+        ],
+        evidence_ids=["e-valuation"],
+    )
+
+    repaired, repairs = repair_source_backed_numeric_localizations([claim], lineage)
+
+    assert repairs == []
+    assert repaired[0] == claim
 
 
 def test_korean_compound_scale_matches_english_m_suffix(mock_lineage):
