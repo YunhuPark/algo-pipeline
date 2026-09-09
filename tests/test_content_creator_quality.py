@@ -345,6 +345,106 @@ def test_content_creator_accumulates_feedback_across_repair_attempts(lineage):
     assert creator.last_fact_check_report.confirmed == 1
 
 
+def test_factual_failures_do_not_consume_editorial_coverage_repair(lineage):
+    def unsupported_claim(claim_id):
+        return Claim(
+            claim_id=claim_id,
+            claim_text="새 모델은 105만 개의 토큰을 처리한다고 발표됐다.",
+            claim_type="numerical",
+            numbers=[
+                NormalizedNumber(
+                    raw_text="105만 개",
+                    normalized_value=Decimal("105"),
+                    unit="개",
+                )
+            ],
+            evidence_ids=["evidence-1"],
+            source_url=lineage.source_url,
+        )
+
+    valid_claims = [
+        Claim(
+            claim_id="claim-context",
+            display_title="OpenAI 발표 배경",
+            claim_text=(
+                "OpenAI는 공식 문서를 통해 새로운 모델의 발표 배경과 적용 범위를 "
+                "구체적으로 설명하며 이용자가 확인할 기준을 함께 공개했다."
+            ),
+            editorial_role="context",
+            claim_type="factual",
+            entities=["OpenAI"],
+            evidence_ids=["evidence-1"],
+            source_url=lineage.source_url,
+        ),
+        Claim(
+            claim_id="claim-change",
+            display_title="새 모델의 핵심 변화",
+            claim_text=(
+                "이번 발표에서는 새 모델이 제공하는 주요 기능과 실제로 사용할 수 있는 "
+                "범위가 함께 제시돼 이전보다 변화의 경계가 명확해졌다."
+            ),
+            editorial_role="change",
+            claim_type="factual",
+            entities=["OpenAI"],
+            evidence_ids=["evidence-1"],
+            source_url=lineage.source_url,
+        ),
+        Claim(
+            claim_id="claim-evidence",
+            display_title="공식 문서가 밝힌 근거",
+            claim_text=(
+                "공개된 공식 문서는 주요 기능뿐 아니라 제공 범위까지 함께 담아, "
+                "새 모델에 관한 설명을 직접 확인할 수 있는 근거를 제시했다."
+            ),
+            editorial_role="evidence",
+            claim_type="factual",
+            entities=["OpenAI"],
+            evidence_ids=["evidence-1"],
+            source_url=lineage.source_url,
+        ),
+        Claim(
+            claim_id="claim-impact",
+            display_title="이용자가 확인할 변화",
+            claim_text=(
+                "이용자는 발표된 기능과 제공 범위를 나란히 확인함으로써 새 모델을 "
+                "어디까지 활용할 수 있는지 공식 설명 안에서 판단할 수 있게 됐다."
+            ),
+            editorial_role="impact",
+            claim_type="factual",
+            entities=["OpenAI"],
+            evidence_ids=["evidence-1"],
+            source_url=lineage.source_url,
+        ),
+    ]
+    generator = SequenceClaimGenerator(
+        [
+            [unsupported_claim("claim-bad-1")],
+            [unsupported_claim("claim-bad-2")],
+            valid_claims[:3],
+            valid_claims,
+        ]
+    )
+    creator = ContentCreator(
+        brand_persona=MagicMock(),
+        claim_generator=generator,
+        semantic_llm=supported_critic(),
+        editorial_evaluator=passing_editorial,
+    )
+
+    script = creator.run(
+        topic=lineage.topic,
+        trend_report=TrendReport(query=lineage.topic, results=[]),
+        num_cards=6,
+        source_lineage=lineage,
+    )
+
+    assert len(generator.feedback) == 4
+    assert "NUMBER_UNSUPPORTED" in generator.feedback[2]
+    assert "EDITORIAL_COVERAGE_INSUFFICIENT" in generator.feedback[3]
+    assert len(script.slides) == 6
+    assert creator.last_fact_check_report.confirmed == 4
+
+
 def test_content_creator_retries_topic_drift_with_locked_source_context(lineage):
     drift_lineage = lineage.model_copy(
         update={

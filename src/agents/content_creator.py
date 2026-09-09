@@ -23,9 +23,10 @@ from src.qa.script_assembler import ScriptAssembler
 from src.schemas.fact_check import FactCheckReport
 
 
-MAX_CLAIM_QUALITY_ATTEMPTS = 3
+MAX_CLAIM_QUALITY_ATTEMPTS = 5
+MAX_CLAIM_QUALITY_REPAIRS_PER_CLASS = 2
 
-_RETRYABLE_CLAIM_QUALITY_ERRORS = {
+_FACTUAL_CLAIM_QUALITY_ERRORS = {
     "EVIDENCE_MISSING",
     "EVIDENCE_ID_UNKNOWN",
     "SOURCE_URL_MISMATCH",
@@ -38,6 +39,9 @@ _RETRYABLE_CLAIM_QUALITY_ERRORS = {
     "CTA_POLICY_VIOLATION",
     "CLAIM_CONTRADICTED",
     "CLAIM_INSUFFICIENT_EVIDENCE",
+}
+
+_EDITORIAL_CLAIM_QUALITY_ERRORS = {
     "EDITORIAL_COVERAGE_INSUFFICIENT",
     "EDITORIAL_HEADLINE_MISSING",
     "EDITORIAL_HEADLINE_INVALID",
@@ -47,6 +51,16 @@ _RETRYABLE_CLAIM_QUALITY_ERRORS = {
     "EDITORIAL_TOPIC_MISMATCH",
     "EDITORIAL_QUALITY_FAILED",
 }
+
+_RETRYABLE_CLAIM_QUALITY_ERRORS = (
+    _FACTUAL_CLAIM_QUALITY_ERRORS | _EDITORIAL_CLAIM_QUALITY_ERRORS
+)
+
+
+def _failure_class(error_code: str) -> str:
+    if error_code in _FACTUAL_CLAIM_QUALITY_ERRORS:
+        return "factual"
+    return "editorial"
 
 
 def _is_listicle_topic(topic: str) -> bool:
@@ -103,14 +117,16 @@ class ContentCreator:
         if not source_lineage or not source_lineage.is_verified_ready:
             raise QualityGateError("LEGACY_LINEAGE_UNVERIFIED", "Cannot generate new content with unverified legacy source lineage.")
 
-        # 2~4. Claim 생성 + Quality Gate. 근거 불일치가 발생하면 검증
-        # 피드백을 누적해 최대 두 번 재생성하고, 세 번째 실패는 차단한다.
+        # 2~4. Claim 생성 + Quality Gate. 사실 오류와 편집 오류는 각각
+        # 최대 두 번만 수리한다. 한 종류의 오류가 다른 종류의 수리 기회를
+        # 소진하지 않으며, 전체 생성 횟수도 다섯 번으로 제한한다.
         requested_cards = num_cards or 6
         target_content_slides = max(1, requested_cards - 2)
         validation_feedback = "\n".join(
             item.strip() for item in (feedback, disputed_notes) if item.strip()
         )
         script: CardNewsScript | None = None
+        repair_counts = {"factual": 0, "editorial": 0}
         for attempt in range(1, MAX_CLAIM_QUALITY_ATTEMPTS + 1):
             if validation_feedback:
                 claims = self.claim_generator.generate_claims(
@@ -158,16 +174,22 @@ class ContentCreator:
                 print(f"[EditorialGate] {editorial_result.summary()}")
                 break
             except QualityGateError as exc:
+                failure_class = _failure_class(exc.error_code)
                 if (
                     attempt >= MAX_CLAIM_QUALITY_ATTEMPTS
                     or exc.error_code not in _RETRYABLE_CLAIM_QUALITY_ERRORS
+                    or repair_counts[failure_class]
+                    >= MAX_CLAIM_QUALITY_REPAIRS_PER_CLASS
                 ):
                     raise
+                repair_counts[failure_class] += 1
 
                 claim_label = f" (claim_id={exc.claim_id})" if exc.claim_id else ""
                 print(
                     "[QualityGate] Claim 또는 편집 품질 검증에 실패하여 "
-                    f"자동 재생성합니다 ({attempt}/{MAX_CLAIM_QUALITY_ATTEMPTS - 1}, "
+                    f"자동 재생성합니다 ({failure_class} "
+                    f"{repair_counts[failure_class]}/"
+                    f"{MAX_CLAIM_QUALITY_REPAIRS_PER_CLASS}, "
                     f"{exc.error_code}{claim_label})."
                 )
                 failed_claim = next(
