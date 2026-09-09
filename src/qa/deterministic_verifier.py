@@ -71,6 +71,15 @@ _NUMBER_MENTION_RE = re.compile(
     rf"(?P<unit>{_UNIT_PATTERN})?",
     re.IGNORECASE,
 )
+_KOREAN_EOK_USD_RE = re.compile(
+    rf"(?<![\w.])(?P<number>{_NUMBER_PATTERN})\s*억\s*(?P<unit>달러|usd)",
+    re.IGNORECASE,
+)
+_ENGLISH_BILLION_USD_RE = re.compile(
+    rf"(?<![\w.])(?P<currency>\$)?\s*(?P<number>{_NUMBER_PATTERN})\s*"
+    rf"(?:billion|b(?![A-Za-z]))\s*(?P<unit>dollars?|usd)?",
+    re.IGNORECASE,
+)
 
 # Approximate newsworthy magnitudes must not be coerced into one exact value.
 # Compare their scale band instead: ``hundreds of millions`` and ``수억``
@@ -246,6 +255,150 @@ def _extract_approximate_number_mentions(text: str) -> Iterable[Tuple[int, str]]
             _KOREAN_APPROXIMATE_EXPONENTS[match.group("scale")],
             _canonical_unit(match.group("unit") or ""),
         )
+
+
+def _number_supported_by_evidence(num_obj, evidence_text: str) -> bool:
+    """Return whether one declared number is supported by its cited evidence."""
+
+    declared_unit = _canonical_unit(num_obj.unit)
+    approximate_claim = list(
+        _extract_approximate_number_mentions(num_obj.raw_text)
+    )
+    if approximate_claim:
+        magnitude, qual = approximate_claim[0]
+        if not qual and declared_unit:
+            qual = declared_unit
+        return any(
+            magnitude == ev_magnitude and qual == ev_qual
+            for ev_magnitude, ev_qual in _extract_approximate_number_mentions(
+                evidence_text
+            )
+        )
+
+    parsed_claim = list(_extract_number_mentions(num_obj.raw_text))
+    if parsed_claim:
+        value, qual = parsed_claim[0]
+        if not qual and declared_unit:
+            qual = declared_unit
+    else:
+        value = num_obj.normalized_value
+        qual = declared_unit
+
+    return any(
+        value == evidence_value and qual == evidence_unit
+        for evidence_value, evidence_unit in _extract_number_mentions(evidence_text)
+    )
+
+
+def _plain_decimal(value: Decimal) -> str:
+    text = format(value, "f")
+    return text.rstrip("0").rstrip(".") if "." in text else text
+
+
+def _billion_to_eok_replacement(raw_text: str, evidence_text: str) -> tuple[str, Decimal] | None:
+    """Repair one unambiguous ``$N billion`` -> ``N0억 달러`` scale slip.
+
+    This intentionally covers only a narrow mechanical localization error. It
+    does not guess among evidence amounts or relax numeric verification.
+    """
+
+    claim_match = _KOREAN_EOK_USD_RE.fullmatch(
+        unicodedata.normalize("NFKC", raw_text or "").strip()
+    )
+    if not claim_match:
+        return None
+    claim_coefficient = _to_decimal(claim_match.group("number"))
+    if claim_coefficient is None:
+        return None
+
+    candidates: set[Decimal] = set()
+    for match in _ENGLISH_BILLION_USD_RE.finditer(
+        unicodedata.normalize("NFKC", evidence_text or "")
+    ):
+        if not match.group("currency") and not match.group("unit"):
+            continue
+        coefficient = _to_decimal(match.group("number"))
+        if coefficient == claim_coefficient:
+            candidates.add(coefficient * _SCALE_FACTORS["billion"])
+
+    if len(candidates) != 1:
+        return None
+    canonical_value = candidates.pop()
+    eok_value = canonical_value / _SCALE_FACTORS["억"]
+    replacement = f"{_plain_decimal(eok_value)}억 달러"
+    if replacement == claim_match.group(0):
+        return None
+    return replacement, canonical_value
+
+
+def repair_source_backed_numeric_localizations(
+    claims: List[Claim],
+    lineage: SourceLineage,
+) -> tuple[List[Claim], list[tuple[str, str, str]]]:
+    """Repair only exact, source-backed billion-to-eok translation slips.
+
+    The original list is left untouched. Every repair records
+    ``(claim_id, old_text, new_text)`` for observable pipeline logging.
+    """
+
+    evidence_map = {ev.evidence_id: ev for ev in lineage.evidence_passages}
+    repaired_claims: list[Claim] = []
+    repairs: list[tuple[str, str, str]] = []
+
+    for claim in claims:
+        combined_evidence_text = " ".join(
+            evidence_map[evidence_id].text
+            for evidence_id in claim.evidence_ids
+            if evidence_id in evidence_map
+        )
+        replacements: dict[str, tuple[str, Decimal]] = {}
+        repaired_numbers = []
+        for number in claim.numbers:
+            repair = None
+            if not _number_supported_by_evidence(number, combined_evidence_text):
+                repair = _billion_to_eok_replacement(
+                    number.raw_text,
+                    combined_evidence_text,
+                )
+            if repair is None:
+                repaired_numbers.append(number)
+                continue
+
+            replacement, canonical_value = repair
+            replacements[number.raw_text] = (replacement, canonical_value)
+            repaired_numbers.append(
+                number.model_copy(
+                    update={
+                        "raw_text": replacement,
+                        "normalized_value": canonical_value,
+                        "unit": "달러",
+                    }
+                )
+            )
+            repairs.append((claim.claim_id, number.raw_text, replacement))
+
+        if not replacements:
+            repaired_claims.append(claim)
+            continue
+
+        display_title = claim.display_title
+        claim_text = claim.claim_text
+        for old_text, (new_text, _) in replacements.items():
+            display_title = display_title.replace(old_text, new_text)
+            claim_text = claim_text.replace(old_text, new_text)
+        repaired_claims.append(
+            claim.model_copy(
+                update={
+                    "display_title": display_title,
+                    "claim_text": claim_text,
+                    "numbers": repaired_numbers,
+                    "verification_status": "pending",
+                    "verification_reason": "",
+                }
+            )
+        )
+
+    return repaired_claims, repairs
 
 
 def normalize_text(text: str) -> str:
@@ -445,38 +598,7 @@ class DeterministicVerifier:
 
             # 3. Check Numbers
             for num_obj in claim.numbers:
-                declared_unit = _canonical_unit(num_obj.unit)
-                approximate_claim = list(
-                    _extract_approximate_number_mentions(num_obj.raw_text)
-                )
-                if approximate_claim:
-                    magnitude, qual = approximate_claim[0]
-                    if not qual and declared_unit:
-                        qual = declared_unit
-                    found = any(
-                        magnitude == ev_magnitude and qual == ev_qual
-                        for ev_magnitude, ev_qual in _extract_approximate_number_mentions(
-                            combined_evidence_text
-                        )
-                    )
-                else:
-                    parsed_claim = list(_extract_number_mentions(num_obj.raw_text))
-                    if parsed_claim:
-                        val, qual = parsed_claim[0]
-                        if not qual and declared_unit:
-                            qual = declared_unit
-                    else:
-                        val = num_obj.normalized_value
-                        qual = declared_unit
-
-                    # Compare canonical values after magnitude conversion. Units remain
-                    # fail-closed, so 30% cannot validate 30 people and 3 days cannot
-                    # validate 3 items.
-                    found = any(
-                        val == ev_val and qual == ev_qual
-                        for ev_val, ev_qual in _extract_number_mentions(combined_evidence_text)
-                    )
-                if not found:
+                if not _number_supported_by_evidence(num_obj, combined_evidence_text):
                     raise QualityGateError("NUMBER_UNSUPPORTED", f"Number '{num_obj.raw_text}' not supported by evidence.", claim.claim_id)
 
             # 4. Check Dates

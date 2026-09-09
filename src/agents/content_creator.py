@@ -12,7 +12,11 @@ from typing import Optional
 from src.schemas.card_news import CardNewsScript, TrendReport, SourceLineage
 from src.persona import load_persona, Persona
 from src.qa.claim_generator import ClaimGenerator
-from src.qa.deterministic_verifier import DeterministicVerifier, QualityGateError
+from src.qa.deterministic_verifier import (
+    DeterministicVerifier,
+    QualityGateError,
+    repair_source_backed_numeric_localizations,
+)
 from src.qa.editorial_quality_gate import validate_claim_editorial_quality
 from src.qa.semantic_critic import run_semantic_critic
 from src.qa.script_assembler import ScriptAssembler
@@ -116,6 +120,16 @@ class ContentCreator:
             else:
                 # Keep the first call compatible with injected legacy test doubles.
                 claims = self.claim_generator.generate_claims(source_lineage)
+
+            claims, numeric_repairs = repair_source_backed_numeric_localizations(
+                claims,
+                source_lineage,
+            )
+            for claim_id, old_text, new_text in numeric_repairs:
+                print(
+                    "[QualityGate] 인용 근거에 따라 숫자 단위 환산을 교정했습니다 "
+                    f"(claim_id={claim_id}, '{old_text}' -> '{new_text}')."
+                )
 
             try:
                 DeterministicVerifier.verify_claims(claims, source_lineage)
