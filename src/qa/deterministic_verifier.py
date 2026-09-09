@@ -72,6 +72,47 @@ _NUMBER_MENTION_RE = re.compile(
     re.IGNORECASE,
 )
 
+_ENGLISH_MONTHS = {
+    "january": 1,
+    "february": 2,
+    "march": 3,
+    "april": 4,
+    "may": 5,
+    "june": 6,
+    "july": 7,
+    "august": 8,
+    "september": 9,
+    "october": 10,
+    "november": 11,
+    "december": 12,
+}
+_ENGLISH_MONTH_PATTERN = "|".join(
+    month.title() for month in _ENGLISH_MONTHS
+)
+_ISO_DATE_RE = re.compile(
+    r"(?<!\d)(?P<year>\d{4})[-/.](?P<month>\d{1,2})"
+    r"(?:[-/.](?P<day>\d{1,2}))?(?!\d)"
+)
+_KOREAN_DATE_RE = re.compile(
+    r"(?:(?P<year>\d{4})\s*년\s*)?"
+    r"(?P<month>\d{1,2})\s*월"
+    r"(?:\s*(?P<day>\d{1,2})\s*일)?"
+)
+_ENGLISH_MONTH_DAY_RE = re.compile(
+    rf"\b(?P<month>{_ENGLISH_MONTH_PATTERN})\s+"
+    r"(?P<day>\d{1,2})(?:st|nd|rd|th)?"
+    r"(?:,?\s+(?P<year>\d{4}))?\b"
+)
+_ENGLISH_DAY_MONTH_RE = re.compile(
+    rf"\b(?P<day>\d{{1,2}})(?:st|nd|rd|th)?\s+"
+    rf"(?P<month>{_ENGLISH_MONTH_PATTERN})"
+    r"(?:\s+(?P<year>\d{4}))?\b"
+)
+_ENGLISH_MONTH_YEAR_RE = re.compile(
+    rf"\b(?P<month>{_ENGLISH_MONTH_PATTERN})\s+(?P<year>\d{{4}})\b"
+)
+_ENGLISH_MONTH_RE = re.compile(rf"\b(?P<month>{_ENGLISH_MONTH_PATTERN})\b")
+
 
 def _to_decimal(raw: str) -> Optional[Decimal]:
     try:
@@ -160,6 +201,97 @@ def normalize_text(text: str) -> str:
 def parse_number_with_qualifier(text: str) -> Tuple[Optional[Decimal], str]:
     """Return the first canonical value/unit, including Korean/English scales."""
     return next(iter(_extract_number_mentions(text)), (None, ""))
+
+
+def _valid_date_key(
+    year: str | None,
+    month: str | int,
+    day: str | int | None,
+) -> tuple[int | None, int, int | None] | None:
+    """Return a comparable date key without inventing missing precision."""
+    month_value = int(month)
+    day_value = int(day) if day else None
+    if not 1 <= month_value <= 12:
+        return None
+    if day_value is not None and not 1 <= day_value <= 31:
+        return None
+    return int(year) if year else None, month_value, day_value
+
+
+def _extract_date_mentions(text: str) -> set[tuple[int | None, int, int | None]]:
+    """Extract Korean, ISO, and unambiguous English month expressions.
+
+    English month matching is deliberately case-sensitive.  This recognizes
+    the calendar month ``May`` without treating the modal verb ``may`` as a
+    date.
+    """
+    mentions: set[tuple[int | None, int, int | None]] = set()
+    normalized = unicodedata.normalize("NFKC", text or "")
+
+    for pattern in (_ISO_DATE_RE, _KOREAN_DATE_RE):
+        for match in pattern.finditer(normalized):
+            key = _valid_date_key(
+                match.group("year"),
+                match.group("month"),
+                match.group("day"),
+            )
+            if key:
+                mentions.add(key)
+
+    for pattern in (_ENGLISH_MONTH_DAY_RE, _ENGLISH_DAY_MONTH_RE):
+        for match in pattern.finditer(normalized):
+            month = _ENGLISH_MONTHS[match.group("month").lower()]
+            key = _valid_date_key(match.group("year"), month, match.group("day"))
+            if key:
+                mentions.add(key)
+
+    for match in _ENGLISH_MONTH_YEAR_RE.finditer(normalized):
+        month = _ENGLISH_MONTHS[match.group("month").lower()]
+        key = _valid_date_key(match.group("year"), month, None)
+        if key:
+            mentions.add(key)
+
+    for match in _ENGLISH_MONTH_RE.finditer(normalized):
+        month = _ENGLISH_MONTHS[match.group("month").lower()]
+        mentions.add((None, month, None))
+
+    return mentions
+
+
+def _date_keys_compatible(
+    claim_date: tuple[int | None, int, int | None],
+    evidence_date: tuple[int | None, int, int | None],
+) -> bool:
+    """Match only the precision asserted by the claim's raw date text."""
+    claim_year, claim_month, claim_day = claim_date
+    evidence_year, evidence_month, evidence_day = evidence_date
+    if claim_month != evidence_month:
+        return False
+    if claim_year is not None and claim_year != evidence_year:
+        return False
+    if claim_day is not None and claim_day != evidence_day:
+        return False
+    return True
+
+
+def _date_supported_by_evidence(
+    raw_text: str,
+    normalized_date: str,
+    combined_evidence_text: str,
+) -> bool:
+    norm_evidence_text = normalize_text(combined_evidence_text)
+    if normalize_text(raw_text) in norm_evidence_text:
+        return True
+    if normalized_date and normalized_date in combined_evidence_text:
+        return True
+
+    claim_dates = _extract_date_mentions(raw_text)
+    evidence_dates = _extract_date_mentions(combined_evidence_text)
+    return bool(claim_dates) and any(
+        _date_keys_compatible(claim_date, evidence_date)
+        for claim_date in claim_dates
+        for evidence_date in evidence_dates
+    )
 
 
 class DeterministicVerifier:
@@ -273,8 +405,11 @@ class DeterministicVerifier:
 
             # 4. Check Dates
             for date_obj in claim.dates:
-                # Basic check to see if the date text appears in the evidence
-                if normalize_text(date_obj.raw_text) not in norm_evidence_text and date_obj.normalized_date not in combined_evidence_text:
+                if not _date_supported_by_evidence(
+                    date_obj.raw_text,
+                    date_obj.normalized_date,
+                    combined_evidence_text,
+                ):
                     raise QualityGateError("DATE_UNSUPPORTED", f"Date '{date_obj.raw_text}' not supported by evidence.", claim.claim_id)
                 # Fail if relative date converted to arbitrary absolute date
                 if date_obj.is_relative and not date_obj.raw_text:

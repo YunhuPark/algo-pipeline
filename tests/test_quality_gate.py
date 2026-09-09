@@ -288,6 +288,97 @@ def test_date_relative_absolute_mismatch(mock_lineage):
         DeterministicVerifier.verify_claims([claim], mock_lineage)
     assert exc.value.error_code == "DATE_UNSUPPORTED"
 
+
+def test_korean_month_matches_english_month_name(mock_lineage):
+    evidence = EvidencePassage(
+        evidence_id="e-date",
+        article_id="a1",
+        text="Cognition introduced the coding product in May.",
+        source_url="http://test.com",
+        content_hash="date-hash",
+    )
+    lineage = mock_lineage.model_copy(update={"evidence_passages": [evidence]})
+    claim = Claim(
+        claim_id="c-date",
+        claim_text="Cognition은 5월에 코딩 제품을 공개했다.",
+        claim_type="factual",
+        entities=["Cognition"],
+        dates=[
+            NormalizedDate(
+                raw_text="5월",
+                normalized_date="--05",
+                precision="month",
+                is_relative=False,
+            )
+        ],
+        evidence_ids=["e-date"],
+    )
+
+    DeterministicVerifier.verify_claims([claim], lineage)
+
+    assert claim.verification_status == "verified"
+
+
+def test_korean_month_does_not_match_different_english_month(mock_lineage):
+    evidence = EvidencePassage(
+        evidence_id="e-date",
+        article_id="a1",
+        text="Cognition introduced the coding product in June.",
+        source_url="http://test.com",
+        content_hash="date-hash",
+    )
+    lineage = mock_lineage.model_copy(update={"evidence_passages": [evidence]})
+    claim = Claim(
+        claim_id="c-date",
+        claim_text="Cognition은 5월에 코딩 제품을 공개했다.",
+        claim_type="factual",
+        entities=["Cognition"],
+        dates=[
+            NormalizedDate(
+                raw_text="5월",
+                normalized_date="--05",
+                precision="month",
+                is_relative=False,
+            )
+        ],
+        evidence_ids=["e-date"],
+    )
+
+    with pytest.raises(QualityGateError) as exc:
+        DeterministicVerifier.verify_claims([claim], lineage)
+
+    assert exc.value.error_code == "DATE_UNSUPPORTED"
+
+
+def test_lowercase_modal_may_is_not_treated_as_date(mock_lineage):
+    evidence = EvidencePassage(
+        evidence_id="e-date",
+        article_id="a1",
+        text="The product may improve coding workflows.",
+        source_url="http://test.com",
+        content_hash="date-hash",
+    )
+    lineage = mock_lineage.model_copy(update={"evidence_passages": [evidence]})
+    claim = Claim(
+        claim_id="c-date",
+        claim_text="제품은 5월에 공개됐다.",
+        claim_type="factual",
+        dates=[
+            NormalizedDate(
+                raw_text="5월",
+                normalized_date="--05",
+                precision="month",
+                is_relative=False,
+            )
+        ],
+        evidence_ids=["e-date"],
+    )
+
+    with pytest.raises(QualityGateError) as exc:
+        DeterministicVerifier.verify_claims([claim], lineage)
+
+    assert exc.value.error_code == "DATE_UNSUPPORTED"
+
 # --- SEMANTIC CRITIC TESTS (Meaning Distortion) ---
 def get_mock_llm(verdict="contradicted", reason="reason", confidence=1.0, claim_id="c1", evidence_ids=["e1"]):
     import json
