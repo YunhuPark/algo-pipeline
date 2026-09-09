@@ -7,6 +7,7 @@ NewsCollector — 최신 뉴스 자동 수집 + GPT-4o 주제 선택
 """
 from __future__ import annotations
 
+import re
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
@@ -65,6 +66,53 @@ class _SelectedTopic(BaseModel):
     topic: str
     reason: str
     context: str
+
+
+_SOURCE_ANCHOR_STOPWORDS = {
+    "about",
+    "after",
+    "ai",
+    "amid",
+    "and",
+    "are",
+    "but",
+    "for",
+    "from",
+    "how",
+    "into",
+    "new",
+    "says",
+    "the",
+    "this",
+    "what",
+    "when",
+    "why",
+    "with",
+}
+
+
+def _source_anchor(source_title: str) -> str:
+    """Return the first likely proper-name anchor from an English headline."""
+
+    for token in re.findall(r"[A-Za-z][A-Za-z0-9.+-]*", source_title or ""):
+        if len(token) < 2 or token.lower() in _SOURCE_ANCHOR_STOPWORDS:
+            continue
+        if token[0].isupper() or any(char.isupper() or char.isdigit() for char in token[1:]):
+            return token
+    return ""
+
+
+def _ensure_source_locked_topic(topic: str, source_title: str) -> str:
+    """Keep the selected article's proper name in an otherwise generic topic."""
+
+    clean_topic = (topic or "").strip()
+    anchor = _source_anchor(source_title)
+    if not anchor:
+        return clean_topic
+    pattern = rf"(?<![A-Za-z0-9]){re.escape(anchor)}(?![A-Za-z0-9])"
+    if re.search(pattern, clean_topic, flags=re.IGNORECASE):
+        return clean_topic
+    return f"{anchor} {clean_topic}".strip()
 
 
 # ── RSS 수집 ──────────────────────────────────────────────
@@ -203,13 +251,22 @@ def collect_and_select() -> NewsSelection:
     selected = _select_topic_with_gpt(all_items)
     selected_index = max(1, min(selected.selected_index, min(len(all_items), 40)))
     selected_item = all_items[selected_index - 1]
+    source_locked_topic = _ensure_source_locked_topic(
+        selected.topic,
+        selected_item.title,
+    )
 
-    print(f"  [NewsCollector] 선택된 주제: {selected.topic}")
+    if source_locked_topic != selected.topic.strip():
+        print(
+            "  [NewsCollector] 원문 고유명사 복원: "
+            f"'{selected.topic}' → '{source_locked_topic}'"
+        )
+    print(f"  [NewsCollector] 선택된 주제: {source_locked_topic}")
     print(f"  [NewsCollector] 고정 원문: {selected_item.title}")
     print(f"  [NewsCollector] 이유: {selected.reason}")
 
     return NewsSelection(
-        topic=selected.topic,
+        topic=source_locked_topic,
         reason=selected.reason,
         context=selected.context,
         source_items=all_items[:10],

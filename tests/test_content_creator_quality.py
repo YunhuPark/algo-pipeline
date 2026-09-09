@@ -287,6 +287,43 @@ def test_content_creator_accumulates_feedback_across_repair_attempts(lineage):
     assert creator.last_fact_check_report.confirmed == 1
 
 
+def test_content_creator_retries_topic_drift_with_locked_source_context(lineage):
+    drift_lineage = lineage.model_copy(
+        update={
+            "topic": "AI 용어 정복: 당신이 알아야 할 필수 용어들",
+            "source_title": "Cognition hits $48B valuation",
+        }
+    )
+    claim = Claim(
+        claim_id="claim-drifted",
+        claim_text=SUPPORTED_TEXT,
+        display_title="OpenAI 새 모델 공개",
+        editorial_role="change",
+        claim_type="factual",
+        entities=["OpenAI"],
+        evidence_ids=["evidence-1"],
+        source_url=lineage.source_url,
+    )
+    generator = SequenceClaimGenerator([[claim], [claim], [claim]])
+    creator = ContentCreator(
+        brand_persona=MagicMock(),
+        claim_generator=generator,
+        semantic_llm=supported_critic(),
+    )
+
+    with pytest.raises(QualityGateError) as exc:
+        creator.run(
+            topic=drift_lineage.topic,
+            trend_report=TrendReport(query=drift_lineage.topic, results=[]),
+            num_cards=3,
+            source_lineage=drift_lineage,
+        )
+
+    assert exc.value.error_code == "EDITORIAL_TOPIC_MISMATCH"
+    assert "Cognition hits $48B valuation" in generator.feedback[1]
+    assert "최소 2개 Claim" in generator.feedback[1]
+
+
 def test_content_creator_retries_missing_editorial_headline(lineage):
     missing_headline = Claim(
         claim_id="claim-missing-headline",

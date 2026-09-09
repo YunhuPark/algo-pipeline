@@ -99,6 +99,7 @@ def validate_claim_editorial_quality(
     *,
     topic: str,
     target_content_slides: int,
+    source_title: str = "",
 ) -> None:
     """Reject thin, repetitive claim sets before rendering expensive images."""
 
@@ -110,7 +111,7 @@ def validate_claim_editorial_quality(
         )
 
     selected = content_claims[:target_content_slides]
-    topic_tokens = _topic_tokens(topic)
+    topic_tokens = _topic_tokens(topic) | _topic_tokens(source_title)
     claim_tokens = _topic_tokens(
         " ".join(
             [

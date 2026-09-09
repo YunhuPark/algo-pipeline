@@ -124,6 +124,7 @@ class ContentCreator:
                     claims,
                     topic=source_lineage.topic,
                     target_content_slides=target_content_slides,
+                    source_title=source_lineage.source_title,
                 )
                 script = ScriptAssembler.assemble(
                     topic=source_lineage.topic,
@@ -182,6 +183,11 @@ class ContentCreator:
                         " 날짜 오류를 고칠 때는 인용 근거의 날짜를 그대로 사용하고, "
                         "원문에 없는 연도·월·일을 보충하지 마세요."
                     )
+                elif exc.error_code == "ENTITY_UNSUPPORTED":
+                    targeted_feedback = (
+                        " entities 배열은 해당 Claim이 인용한 Evidence에 실제로 등장하는 "
+                        "고유명사의 원문 철자만 사용하세요. 번역명이나 추정한 조직명은 제거하세요."
+                    )
                 elif exc.error_code in {
                     "CLAIM_CONTRADICTED",
                     "CLAIM_INSUFFICIENT_EVIDENCE",
@@ -189,6 +195,13 @@ class ContentCreator:
                     targeted_feedback = (
                         " 의미 검증에 실패한 Claim은 추론으로 보완하지 말고, "
                         "인용 근거에 직접 쓰인 사실만 충실하게 번역하거나 요약하세요."
+                    )
+                elif exc.error_code == "EDITORIAL_TOPIC_MISMATCH":
+                    targeted_feedback = (
+                        " 전체 Claim을 다른 일반론으로 바꾸지 마세요. "
+                        f"카드뉴스 주제 '{source_lineage.topic}'와 고정 원문 제목 "
+                        f"'{source_lineage.source_title}'이 가리키는 한 사건만 설명하세요. "
+                        "최소 2개 Claim의 제목 또는 본문에 원문의 핵심 고유명사를 직접 명시하세요."
                     )
                 if cited_evidence:
                     targeted_feedback += f"\n문제가 된 Claim의 인용 근거:\n{cited_evidence[:1600]}"
