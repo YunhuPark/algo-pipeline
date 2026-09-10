@@ -1,13 +1,14 @@
 import json
 import os
 import re
+from decimal import Decimal, InvalidOperation
 from typing import Any, Callable, List
 
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_openai import ChatOpenAI
 from pydantic import ValidationError
 
-from src.qa.deterministic_verifier import QualityGateError
+from src.qa.deterministic_verifier import QualityGateError, parse_number_with_qualifier
 from src.qa.editorial_intent import is_roundup_topic
 from src.schemas.card_news import Claim, SourceLineage
 
@@ -35,6 +36,17 @@ _RANGE_SPLITTERS = (
         r"^\s*(?P<left>.+?)\s*(?:에서|부터|[~～]|\bto\b)\s*(?P<right>.+?)\s*$",
         re.IGNORECASE,
     ),
+)
+
+_EVIDENCE_NUMBER_CANDIDATE_RE = re.compile(
+    r"(?<![\w.])(?:[$₩]\s*)?\d[\d,]*(?:\.\d+)?\s*"
+    r"(?:천억|백억|십억|천만|백만|십만|조|억|만|천|"
+    r"trillion|billion|million|thousand|[kmbt](?![A-Za-z]))?\s*"
+    r"(?:퍼센트|percentage|percent|%|달러|dollars?|usd|원|krw|won|"
+    r"명|people|persons?|users?|customers?|employees?|개|items?|parameters?|"
+    r"tokens?|companies?|models?|곳|places?|locations?|개월|months?|년|years?|"
+    r"일|days?|시간|hours?|분|minutes?|초|seconds?|배|times?|x(?![A-Za-z]))?",
+    re.IGNORECASE,
 )
 
 _RETRYABLE_RESPONSE_ERRORS = {
@@ -91,6 +103,8 @@ _CLAIM_SYSTEM_PROMPT = """
 18. numbers의 normalized_value는 반드시 단일 JSON 숫자 또는 숫자로만 된 문자열이어야 합니다. 배열, 객체, "7.2 billion"처럼 단위가 섞인 문자열을 넣지 마십시오.
 19. 범위에 두 끝점이 모두 필요하면 하나의 normalized_value에 배열을 넣지 말고 numbers에 두 객체로 분리하십시오. 예: Evidence가 "$7.2 billion to $7.45 billion"이면 numbers는 [{{"raw_text":"$7.2 billion","normalized_value":7200000000,"unit":"dollars"}}, {{"raw_text":"$7.45 billion","normalized_value":7450000000,"unit":"dollars"}}]처럼 각 끝점을 스칼라 값으로 기록하십시오.
 20. numbers.raw_text에는 실제 claim_text에 사용한 수치 표현과 최대한 동일한 문자열을 넣으십시오. 각 숫자는 반드시 인용한 Evidence에서 직접 확인되어야 합니다.
+21. normalized_value는 raw_text의 숫자를 단위까지 반영한 실제 값이어야 합니다. 예: "$7.2 billion"의 normalized_value는 7200000000입니다. raw_text를 "720 billion dollars"로 바꾸면 값이 720000000000이 되어 전혀 다른 주장입니다. 소수점을 제거하거나 10배·100배 키우지 마십시오.
+22. 숫자 오류 재시도에서는 새 숫자를 만들지 말고 문제가 된 Claim의 인용 Evidence에서 숫자 표현 하나를 문자 그대로 복사해 raw_text와 claim_text에 사용하십시오.
 """
 
 
@@ -193,6 +207,92 @@ def _normalize_claim_payload(raw_claim: dict[str, Any]) -> dict[str, Any]:
     return payload
 
 
+def _canonical_declared_unit(unit: str) -> str:
+    """Map a declared unit through the verifier's canonical parser."""
+
+    _, canonical = parse_number_with_qualifier(f"1 {unit}".strip())
+    return canonical
+
+
+def _evidence_number_candidates(evidence_text: str) -> list[tuple[str, Decimal, str]]:
+    """Return exact evidence number phrases with verifier-canonical values."""
+
+    candidates: list[tuple[str, Decimal, str]] = []
+    for match in _EVIDENCE_NUMBER_CANDIDATE_RE.finditer(evidence_text or ""):
+        raw = match.group(0).strip()
+        if not raw:
+            continue
+        value, unit = parse_number_with_qualifier(raw)
+        if value is None:
+            continue
+        candidates.append((raw, value, unit))
+    return candidates
+
+
+def _align_claim_number_text_to_evidence(claim: Claim, evidence_text: str) -> Claim:
+    """Repair only raw-text/normalized-value inconsistencies using cited evidence.
+
+    The normalized numeric value is never changed here. A raw string is replaced
+    only when (1) its own parsed value disagrees with normalized_value, and
+    (2) exactly one cited evidence phrase has that normalized value and a
+    compatible semantic unit. If normalized_value is also wrong, nothing is
+    repaired and the deterministic Quality Gate still fails closed.
+    """
+
+    evidence_candidates = _evidence_number_candidates(evidence_text)
+    if not evidence_candidates or not claim.numbers:
+        return claim
+
+    replacements: dict[str, str] = {}
+    repaired_numbers = []
+    for number in claim.numbers:
+        raw_value, raw_unit = parse_number_with_qualifier(number.raw_text)
+        declared_unit = _canonical_declared_unit(number.unit)
+        effective_raw_unit = raw_unit or declared_unit
+
+        if raw_value == number.normalized_value:
+            repaired_numbers.append(number)
+            continue
+
+        matching_raws = {
+            raw
+            for raw, evidence_value, evidence_unit in evidence_candidates
+            if evidence_value == number.normalized_value
+            and (
+                (effective_raw_unit and evidence_unit == effective_raw_unit)
+                or (not effective_raw_unit and declared_unit and evidence_unit == declared_unit)
+            )
+        }
+        if len(matching_raws) != 1:
+            repaired_numbers.append(number)
+            continue
+
+        replacement = next(iter(matching_raws))
+        if replacement == number.raw_text:
+            repaired_numbers.append(number)
+            continue
+
+        replacements[number.raw_text] = replacement
+        repaired_numbers.append(number.model_copy(update={"raw_text": replacement}))
+
+    if not replacements:
+        return claim
+
+    display_title = claim.display_title
+    claim_text = claim.claim_text
+    for old_text, new_text in replacements.items():
+        display_title = display_title.replace(old_text, new_text)
+        claim_text = claim_text.replace(old_text, new_text)
+
+    return claim.model_copy(
+        update={
+            "display_title": display_title,
+            "claim_text": claim_text,
+            "numbers": repaired_numbers,
+        }
+    )
+
+
 class ClaimGenerator:
     def __init__(self, llm=None, llm_factory: Callable[[], Any] | None = None):
         self._llm = llm
@@ -284,6 +384,9 @@ class ClaimGenerator:
     def _build_claims(data: dict[str, Any], lineage: SourceLineage) -> List[Claim]:
         claims: list[Claim] = []
         seen_ids: set[str] = set()
+        evidence_by_id = {
+            item.evidence_id: item for item in lineage.evidence_passages
+        }
         for index, raw_claim in enumerate(data["claims"]):
             if not isinstance(raw_claim, dict):
                 raise ClaimGenerationError(
@@ -297,9 +400,6 @@ class ClaimGenerator:
             try:
                 normalized_claim = _normalize_claim_payload(raw_claim)
                 cited_ids = normalized_claim.get("evidence_ids") or []
-                evidence_by_id = {
-                    item.evidence_id: item for item in lineage.evidence_passages
-                }
                 cited_source = next(
                     (
                         evidence_by_id[evidence_id].source_url
@@ -313,6 +413,15 @@ class ClaimGenerator:
                         **normalized_claim,
                         "source_url": normalized_claim.get("source_url") or cited_source,
                     }
+                )
+                cited_evidence_text = " ".join(
+                    evidence_by_id[evidence_id].text
+                    for evidence_id in cited_ids
+                    if evidence_id in evidence_by_id
+                )
+                claim = _align_claim_number_text_to_evidence(
+                    claim,
+                    cited_evidence_text,
                 )
             except ValidationError as exc:
                 issues = ", ".join(
