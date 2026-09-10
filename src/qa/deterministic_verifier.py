@@ -21,6 +21,45 @@ ALLOWED_ALIASES = {
     "google": ["alphabet"],
 }
 
+# Entity verification is reserved for named entities. The Claim schema already
+# filters these exact common nouns, but model_copy/model_construct and legacy
+# deserialization paths can bypass Pydantic field validators. Keep the same
+# narrow fail-safe at the verification boundary so generic metadata such as
+# "시장" cannot cause a false ENTITY_UNSUPPORTED failure. Unsupported proper
+# nouns remain subject to the normal fail-closed entity gate.
+_GENERIC_ENTITY_TERMS = frozenset({
+    "시장",
+    "업계",
+    "산업",
+    "기술",
+    "서비스",
+    "기능",
+    "제품",
+    "사용자",
+    "소비자",
+    "고객",
+    "기업",
+    "회사",
+    "분야",
+    "발표",
+    "뉴스",
+    "데이터",
+    "플랫폼",
+    "기기",
+    "개발자",
+    "모델",
+    "보안",
+    "프라이버시",
+    "매출",
+    "가격",
+    "성장",
+    "전망",
+    "경쟁",
+    "변화",
+    "영향",
+    "제한",
+})
+
 
 _SCALE_FACTORS = {
     "천": Decimal("1000"),
@@ -692,7 +731,7 @@ class DeterministicVerifier:
             # 2. Check Entities (Token/Boundary based)
             for entity in claim.entities:
                 norm_ent = normalize_text(entity)
-                if not norm_ent:
+                if not norm_ent or norm_ent in _GENERIC_ENTITY_TERMS:
                     continue
 
                 # Expand aliases
