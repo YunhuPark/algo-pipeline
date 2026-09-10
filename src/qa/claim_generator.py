@@ -13,6 +13,7 @@ from pydantic import ValidationError
 from src.qa.deterministic_verifier import (
     ALLOWED_ALIASES,
     QualityGateError,
+    _number_supported_by_evidence,
     normalize_text,
     parse_number_with_qualifier,
 )
@@ -85,6 +86,7 @@ _RETRYABLE_RESPONSE_ERRORS = {
     "CLAIM_SCHEMA_INVALID",
     "CLAIM_ID_DUPLICATE",
     "CLAIM_ENTITY_UNSUPPORTED",
+    "CLAIM_NUMBER_UNSUPPORTED",
 }
 
 _CLAIM_SYSTEM_PROMPT = """
@@ -135,6 +137,7 @@ _CLAIM_SYSTEM_PROMPT = """
 24. 출력 직전에 각 entities 항목을 자신이 선택한 evidence_ids의 원문과 대조하십시오. 해당 고유명사의 정확한 표면 문자열이 선택한 Evidence에 없으면 그 evidence_id를 사용하면 안 됩니다. 전체 Claim을 다른 근거 기반 사실로 교체하거나, 실제로 그 고유명사를 포함하면서 Claim 전체를 뒷받침하는 Evidence의 ID를 선택하십시오.
 25. 제품 세대·시리즈 번호·모델 번호를 주제나 연도에서 추론하지 마십시오. 예를 들어 Evidence 어디에도 "Apple Watch Series 12"가 문자 그대로 없으면 WWDC 2026이라는 주제만 보고 "Apple Watch Series 12"를 만들면 안 됩니다. Series 11, Series 12, Ultra 4 같은 버전명은 Evidence에 정확히 존재할 때만 사용할 수 있습니다.
 26. ENTITY_UNSUPPORTED 피드백으로 지적된 고유명사는 다음 응답에서 특별히 금지된 값으로 취급하십시오. 그 문자열이 실제로 선택한 evidence_ids 안에 문자 그대로 존재하고 Claim 전체를 뒷받침하는 경우에만 다시 사용할 수 있습니다. 그렇지 않으면 그 entity만 억지로 지우지 말고, 해당 고유명사에 의존하는 Claim 전체를 삭제하고 다른 Evidence-backed Claim으로 교체하십시오.
+27. 출력 직전에 각 numbers 항목도 자신이 선택한 evidence_ids의 원문과 대조하십시오. Evidence가 "$7.2 billion"이라고 쓰면 "720 billion dollars"처럼 소수점이나 scale을 바꾸지 마십시오. 숫자·통화·단위 표면형을 가능한 한 원문에서 그대로 복사하고, normalized_value만 그 표면형의 실제 값으로 계산하십시오.
 """
 
 
@@ -527,6 +530,30 @@ def _raise_for_unsupported_claim_entities(claim: Claim, evidence_text: str) -> N
         )
 
 
+def _raise_for_unsupported_claim_numbers(claim: Claim, evidence_text: str) -> None:
+    """Reject numeric metadata that the cited passages do not support.
+
+    This mirrors the deterministic numeric gate before the claim leaves the
+    generator. It does not widen accepted conversions; it only gives the LLM a
+    targeted chance to copy the source notation correctly before the outer
+    factual retry budget is consumed.
+    """
+
+    for number in claim.numbers:
+        if _number_supported_by_evidence(number, evidence_text):
+            continue
+        raise ClaimGenerationError(
+            "CLAIM_NUMBER_UNSUPPORTED",
+            (
+                f"Claim {claim.claim_id} uses number '{number.raw_text}' that is not "
+                "supported by its cited evidence. Copy the numeric expression from "
+                "the cited Evidence exactly and compute normalized_value from that "
+                "surface form; do not move decimals or change scale/unit notation."
+            ),
+            claim.claim_id,
+        )
+
+
 class ClaimGenerator:
     def __init__(self, llm=None, llm_factory: Callable[[], Any] | None = None):
         self._llm = llm
@@ -662,6 +689,7 @@ class ClaimGenerator:
                     cited_evidence_text,
                 )
                 _raise_for_unsupported_claim_entities(claim, cited_evidence_text)
+                _raise_for_unsupported_claim_numbers(claim, cited_evidence_text)
             except ClaimGenerationError:
                 raise
             except ValidationError as exc:
@@ -796,6 +824,26 @@ class ClaimGenerator:
                         "Evidence에서 직접 확인되는 서로 다른 사실로 교체하십시오. "
                         "새 Claim의 모든 entities는 자신이 인용한 evidence_ids 텍스트에 "
                         "실제로 등장하는 표면 문자열이어야 합니다."
+                    )
+                    continue
+
+                if exc.error_code == "CLAIM_NUMBER_UNSUPPORTED":
+                    print(
+                        "[QualityGate] Claim number가 인용 근거와 일치하지 않아 "
+                        f"자동 재생성합니다 ({attempt}/{MAX_CLAIM_RESPONSE_ATTEMPTS - 1}, "
+                        f"{exc.error_code})."
+                    )
+                    schema_feedback = (
+                        "[강제 재생성 - NUMBER SUPPORT ERROR]\n"
+                        f"이전 응답 실패: {exc}\n"
+                        "위 오류에 나온 숫자 표현을 다시 사용하지 마십시오. "
+                        "소수점 이동, billion/million scale 변경, 한국어 억/조 단위 환산, "
+                        "통화 단위 보충을 새로 하지 마십시오. 해당 Claim에 필요한 숫자는 "
+                        "선택한 evidence_ids의 원문에서 숫자+통화+단위 표현을 문자 그대로 "
+                        "복사해 claim_text와 numbers.raw_text에 동일하게 사용하십시오. "
+                        "normalized_value는 복사한 원문 숫자의 실제 값으로 계산하십시오. "
+                        "안전하게 표현할 수 없으면 그 숫자 Claim 전체를 삭제하고 다른 "
+                        "Evidence-backed Claim으로 교체하십시오."
                     )
                     continue
 
