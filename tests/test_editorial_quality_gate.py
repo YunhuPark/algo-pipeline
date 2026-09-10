@@ -59,6 +59,38 @@ def test_editorial_claim_gate_accepts_distinct_story_roles():
     )
 
 
+def test_editorial_claim_gate_accepts_concise_visual_copy():
+    claims = _distinct_claims()
+    claims[3] = claims[3].model_copy(
+        update={
+            "claim_text": (
+                "Cognition은 AI 코딩 시장에서 여러 기업이 "
+                "함께 성장할 가능성을 보여줬다."
+            )
+        }
+    )
+
+    validate_claim_editorial_quality(
+        claims,
+        topic="Cognition AI 코딩 시장",
+        target_content_slides=4,
+    )
+
+
+def test_editorial_claim_gate_rejects_copy_below_visual_minimum():
+    claims = _distinct_claims()
+    claims[3] = claims[3].model_copy(update={"claim_text": "너무 짧은 본문이다."})
+
+    with pytest.raises(QualityGateError) as exc:
+        validate_claim_editorial_quality(
+            claims,
+            topic="모델 개발 발표",
+            target_content_slides=4,
+        )
+
+    assert exc.value.error_code == "EDITORIAL_COPY_LENGTH_INVALID"
+
+
 def test_editorial_claim_gate_rejects_thin_six_card_story():
     with pytest.raises(QualityGateError) as exc:
         validate_claim_editorial_quality(
@@ -124,6 +156,16 @@ def test_rule_check_rejects_truncated_headline():
     errors = _rule_check(script, expected_count=6)
 
     assert any("말줄임표" in error for error in errors)
+
+
+def test_rule_check_accepts_concise_visual_copy():
+    script = ScriptAssembler.assemble("테스트", _distinct_claims(), num_cards=6)
+    script.slides[1].body = (
+        "Cognition은 AI 코딩 시장에서 여러 기업이 "
+        "함께 성장할 가능성을 보여줬다."
+    )
+
+    assert _rule_check(script, expected_count=6) == []
 
 
 def test_long_topic_produces_complete_cover_title_and_enough_hashtags():

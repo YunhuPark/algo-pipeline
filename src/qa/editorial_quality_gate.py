@@ -6,7 +6,11 @@ from difflib import SequenceMatcher
 from typing import Iterable
 
 from src.qa.deterministic_verifier import QualityGateError
-from src.schemas.card_news import Claim
+from src.schemas.card_news import (
+    Claim,
+    MAX_CONTENT_BODY_CHARS,
+    MIN_CONTENT_BODY_CHARS,
+)
 
 
 _EDITORIAL_ROLES = {
@@ -149,10 +153,15 @@ def validate_claim_editorial_quality(
         # Match the renderer verifier's visible-character convention: spaces
         # count toward line length while line breaks do not.
         body_length = len(claim.claim_text.replace("\n", ""))
-        if body_length < 60 or body_length > 130:
+        if (
+            body_length < MIN_CONTENT_BODY_CHARS
+            or body_length > MAX_CONTENT_BODY_CHARS
+        ):
             raise QualityGateError(
                 "EDITORIAL_COPY_LENGTH_INVALID",
-                f"Claim copy must be readable on one card (60-130 chars), got {body_length}.",
+                "Claim copy must be readable on one card "
+                f"({MIN_CONTENT_BODY_CHARS}-{MAX_CONTENT_BODY_CHARS} chars), "
+                f"got {body_length}.",
                 claim.claim_id,
             )
 

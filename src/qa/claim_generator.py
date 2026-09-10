@@ -56,7 +56,7 @@ _CLAIM_SYSTEM_PROMPT = """
 7. 기본 6장 카드뉴스용으로 서로 다른 내용의 non-CTA Claim 4개를 만드십시오. 모든 Claim은 비어 있지 않은 evidence_ids를 가져야 합니다.
 8. non-CTA Claim은 context/change/mechanism/evidence/limitation/impact 중 최소 3가지 역할을 사용하고 같은 사실을 표현만 바꿔 반복하지 마십시오.
 9. display_title은 10~18자의 자연스러운 한국어 완결형 제목이어야 하며 말줄임표를 쓰지 마십시오. claim_text에 없는 사실을 추가하면 안 됩니다.
-10. claim_text는 카드 한 장에서 독립적으로 이해되는 60~110자의 자연스러운 한국어로 작성하십시오. 고유명사·수치의 의미와 비교 기준을 생략하지 마십시오.
+10. claim_text는 카드 한 장에서 독립적으로 이해되는 45~90자의 자연스러운 한국어로 작성하십시오. 한 카드에 핵심 사실 하나만 담고, 고유명사·수치의 의미와 비교 기준을 생략하지 마십시오.
 11. entities 배열에는 각 Claim이 인용한 Evidence에 실제로 등장하는 고유명사의 원문 철자만 넣으십시오. 근거에 없는 번역명·상위 조직·업계명은 넣지 마십시오.
 12. 모든 Claim은 카드뉴스 주제와 고정 원문 제목이 가리키는 동일한 사건을 설명해야 합니다. 최소 2개 Claim의 display_title 또는 claim_text에 원문의 핵심 고유명사를 명시하십시오.
 13. 원문이 "hundreds of millions"처럼 범위형 수치를 사용하면 임의의 정확한 금액으로 바꾸지 마십시오. claim_text와 numbers.raw_text에는 "수억 달러"처럼 같은 범위의 자연스러운 한국어 표현을 사용하고 근거의 정밀도를 그대로 유지하십시오.

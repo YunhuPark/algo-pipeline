@@ -29,13 +29,18 @@ from langchain_core.prompts import ChatPromptTemplate
 from pydantic import BaseModel
 
 from src.config import OPENAI_API_KEY
-from src.schemas.card_news import CardNewsScript, Slide
+from src.schemas.card_news import (
+    CardNewsScript,
+    MAX_CONTENT_BODY_CHARS,
+    MIN_CONTENT_BODY_CHARS,
+    Slide,
+)
 from src.persona import Persona
 
 PASS_THRESHOLD = 7.0   # 평균 점수 기준
 MAX_TITLE_LEN  = 22
-MAX_BODY_LEN   = 130
-MIN_BODY_LEN   = 60    # 80 → 60: "짧고 자연스러운 문장" 스타일과 충돌 방지
+MAX_BODY_LEN   = MAX_CONTENT_BODY_CHARS
+MIN_BODY_LEN   = MIN_CONTENT_BODY_CHARS
 
 
 # ── 검증 결과 ─────────────────────────────────────────────

@@ -239,6 +239,13 @@ class ContentCreator:
                         f"'{source_lineage.source_title}'이 가리키는 한 사건만 설명하세요. "
                         "최소 2개 Claim의 제목 또는 본문에 원문의 핵심 고유명사를 직접 명시하세요."
                     )
+                elif exc.error_code == "EDITORIAL_COPY_LENGTH_INVALID":
+                    targeted_feedback = (
+                        " 모든 본문 Claim을 45~90자로 작성하세요. "
+                        "한 카드에는 인용 근거가 직접 뒷받침하는 핵심 사실 "
+                        "하나만 남기고, 길이를 늘리기 위해 새 정보나 평가를 "
+                        "추가하지 마세요."
+                    )
                 if cited_evidence:
                     targeted_feedback += f"\n문제가 된 Claim의 인용 근거:\n{cited_evidence[:1600]}"
 
