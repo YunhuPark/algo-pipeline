@@ -2,10 +2,12 @@
 from __future__ import annotations
 
 import re
+from collections import Counter
 from difflib import SequenceMatcher
 from typing import Iterable
 
 from src.qa.deterministic_verifier import QualityGateError
+from src.qa.editorial_intent import is_roundup_topic
 from src.schemas.card_news import (
     Claim,
     MAX_CONTENT_BODY_CHARS,
@@ -38,6 +40,26 @@ _GENERIC_TOPIC_TOKENS = {
     "기술",
     "새로운",
     "관련",
+    "이번",
+    "발표",
+    "공개",
+    "기능",
+    "추가",
+    "사용",
+    "사용자",
+    "지원",
+    "제공",
+    "내용",
+    "확인",
+    "서비스",
+    "데이터",
+    "정보",
+    "설계",
+    "변화",
+    "영향",
+    "결과",
+    "중요",
+    "설명",
 }
 
 
@@ -96,6 +118,55 @@ def _topic_tokens(text: str) -> set[str]:
                     break
         tokens.add(token)
     return {token for token in tokens if token not in _GENERIC_TOPIC_TOKENS}
+
+
+def _validate_roundup_theme_diversity(topic: str, selected: list[Claim]) -> None:
+    """Prevent explicit recap requests from collapsing into one narrow feature.
+
+    Pairwise duplicate checks catch near-identical copy, but they do not catch a
+    four-card recap where every card discusses a different angle of the same
+    subfeature.  For explicit roundup intent, a non-topic token appearing in at
+    least 75% of the selected cards is treated as a concentration signal.
+
+    Topic anchor tokens (for example ``apple`` and ``wwdc``) are excluded so a
+    legitimate event recap is not penalized for staying on-topic.
+    """
+
+    if not is_roundup_topic(topic) or len(selected) < 4:
+        return
+
+    topic_tokens = _topic_tokens(topic)
+    document_frequency: Counter[str] = Counter()
+    for claim in selected:
+        claim_tokens = _topic_tokens(
+            " ".join(
+                (
+                    claim.display_title,
+                    claim.claim_text,
+                    *claim.entities,
+                )
+            )
+        )
+        document_frequency.update(claim_tokens - topic_tokens)
+
+    threshold = max(3, (len(selected) * 3 + 3) // 4)
+    dominant = sorted(
+        (
+            (token, count)
+            for token, count in document_frequency.items()
+            if count >= threshold
+        ),
+        key=lambda item: (-item[1], item[0]),
+    )
+    if dominant:
+        token, count = dominant[0]
+        raise QualityGateError(
+            "EDITORIAL_COVERAGE_INSUFFICIENT",
+            "Roundup coverage is too narrow: "
+            f"subtopic '{token}' dominates {count}/{len(selected)} content cards. "
+            "Choose distinct announcements, features, limitations, or impacts "
+            "from the available evidence instead of repeatedly expanding one subtopic.",
+        )
 
 
 def validate_claim_editorial_quality(
@@ -172,6 +243,8 @@ def validate_claim_editorial_quality(
             "EDITORIAL_ROLE_DIVERSITY_INSUFFICIENT",
             f"Need {required_role_count} distinct editorial roles, got {sorted(roles)}.",
         )
+
+    _validate_roundup_theme_diversity(topic, selected)
 
     for left, right in _pairs(selected):
         left_title = _normalized_copy(left.display_title)
