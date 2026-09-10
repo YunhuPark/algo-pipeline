@@ -23,8 +23,8 @@ from src.qa.script_assembler import ScriptAssembler
 from src.schemas.fact_check import FactCheckReport
 
 
-MAX_CLAIM_QUALITY_ATTEMPTS = 5
-MAX_CLAIM_QUALITY_REPAIRS_PER_CLASS = 2
+MAX_CLAIM_QUALITY_ATTEMPTS = 6
+MAX_CLAIM_QUALITY_REPAIRS_PER_CLASS = 3
 
 _FACTUAL_CLAIM_QUALITY_ERRORS = {
     "EVIDENCE_MISSING",
@@ -117,9 +117,8 @@ class ContentCreator:
         if not source_lineage or not source_lineage.is_verified_ready:
             raise QualityGateError("LEGACY_LINEAGE_UNVERIFIED", "Cannot generate new content with unverified legacy source lineage.")
 
-        # 2~4. Claim 생성 + Quality Gate. 사실 오류와 편집 오류는 각각
-        # 최대 두 번만 수리한다. 한 종류의 오류가 다른 종류의 수리 기회를
-        # 소진하지 않으며, 전체 생성 횟수도 다섯 번으로 제한한다.
+        # 2~4. Claim 생성 + Quality Gate. 사실/편집 오류는 서로 독립된
+        # bounded repair budget을 사용한다. 품질 기준 자체는 낮추지 않는다.
         requested_cards = num_cards or 6
         target_content_slides = max(1, requested_cards - 2)
         validation_feedback = "\n".join(
@@ -241,10 +240,15 @@ class ContentCreator:
                     )
                 elif exc.error_code == "EDITORIAL_COPY_LENGTH_INVALID":
                     targeted_feedback = (
-                        " 모든 본문 Claim을 45~90자로 작성하세요. "
-                        "한 카드에는 인용 근거가 직접 뒷받침하는 핵심 사실 "
-                        "하나만 남기고, 길이를 늘리기 위해 새 정보나 평가를 "
-                        "추가하지 마세요."
+                        " 길이 오류가 난 Claim만 우선 고쳐 주세요. 모든 본문 Claim은 45~90자로 작성하세요. "
+                        "한 카드에는 인용 근거가 직접 뒷받침하는 핵심 사실 하나만 남기고, "
+                        "길이를 맞추기 위한 새 정보·평가·전망은 추가하지 마세요."
+                    )
+                elif exc.error_code == "EDITORIAL_QUALITY_FAILED":
+                    targeted_feedback = (
+                        " 편집 평가 피드백을 그대로 반영하되 사실을 새로 만들지 마세요. "
+                        "특히 첫 장은 입력 주제를 단순 복사하지 말고 궁금증·효용 중심으로 더 짧게 구성하고, "
+                        "마지막 CTA는 해당 주제에 맞는 질문형 또는 저장 유도형으로 자연스럽게 마무리하세요."
                     )
                 if cited_evidence:
                     targeted_feedback += f"\n문제가 된 Claim의 인용 근거:\n{cited_evidence[:1600]}"
@@ -277,6 +281,7 @@ class ContentCreator:
         )
 
         return script
+
 
 def run(
     topic: str,
