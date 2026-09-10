@@ -125,7 +125,7 @@ _CLAIM_SYSTEM_PROMPT = """
 20. numbers.raw_text에는 실제 claim_text에 사용한 수치 표현과 최대한 동일한 문자열을 넣으십시오. 각 숫자는 반드시 인용한 Evidence에서 직접 확인되어야 합니다.
 21. normalized_value는 raw_text의 숫자를 단위까지 반영한 실제 값이어야 합니다. 예: "$7.2 billion"의 normalized_value는 7200000000입니다. raw_text를 "720 billion dollars"로 바꾸면 값이 720000000000이 되어 전혀 다른 주장입니다. 소수점을 제거하거나 10배·100배 키우지 마십시오.
 22. 숫자 오류 재시도에서는 새 숫자를 만들지 말고 문제가 된 Claim의 인용 Evidence에서 숫자 표현 하나를 문자 그대로 복사해 raw_text와 claim_text에 사용하십시오.
-23. 제품명·기능명·회사명 같은 고유명사는 번역하거나 한글 음역해서 entities에 넣지 마십시오. Evidence가 "Siri recap"이라고 쓰면 entities에는 반드시 "Siri recap"처럼 Evidence의 표면 문자열을 그대로 사용하고 "시리 리캡"으로 바꾸지 마십시오. 가능하면 claim_text와 display_title에서도 같은 원문 표기를 유지하십시오.
+23. 제품명·기능명·회사명 같은 고유명사는 번역하거나 한글 음역해서 entities에 넣지 마십시오. Evidence가 "Siri recap" 또는 "Live Rewind"라고 쓰면 entities에는 Evidence의 표면 문자열을 그대로 사용하고 "시리 리캡", "라이브 리와인드"처럼 바꾸지 마십시오. 가능하면 claim_text와 display_title에서도 같은 원문 표기를 유지하십시오.
 """
 
 
@@ -337,13 +337,30 @@ def _romanize_hangul(text: str) -> str:
     return " ".join("".join(parts).split())
 
 
-def _phonetic_skeleton(text: str) -> str:
-    """Reduce romanized/English loanwords to a conservative consonant key."""
+def _phonetic_spelling(text: str) -> str:
+    """Normalize common Korean/English loanword spelling differences."""
 
-    value = (text or "").lower()
+    value = "".join(char for char in (text or "").lower() if char.isalpha())
     for source, replacement in (("ph", "p"), ("ck", "k"), ("qu", "k")):
         value = value.replace(source, replacement)
     value = value.replace("c", "k").replace("q", "k")
+    # Korean ㄹ commonly represents English L/R and ㅂ commonly represents
+    # English B/V. Collapse only these well-known pairs so that examples such
+    # as 라이브 -> Live can match without opening broad fuzzy matching.
+    value = value.replace("l", "r").replace("v", "b")
+    # Revised Romanization frequently adds terminal "eu" for a final
+    # consonant; English orthography often has a silent terminal e.
+    if value.endswith("eu") and len(value) > 3:
+        value = value[:-2]
+    elif value.endswith("e") and len(value) > 3:
+        value = value[:-1]
+    return value
+
+
+def _phonetic_skeleton(text: str) -> str:
+    """Reduce romanized/English loanwords to a conservative consonant key."""
+
+    value = _phonetic_spelling(text)
     return "".join(
         char
         for char in value
@@ -356,9 +373,9 @@ def _unique_ascii_surface_for_transliteration(entity: str, evidence_text: str) -
 
     Matching is deliberately narrow: the Korean entity must contain at least
     two Hangul tokens, the ASCII candidate must have the same token count and
-    identical consonant skeletons, and the romanized spelling must be similar.
-    If zero or multiple candidates match, no repair is performed and the normal
-    deterministic entity gate remains fail-closed.
+    identical consonant skeletons, and every token's normalized spelling must
+    be similar. If zero or multiple candidates match, no repair is performed
+    and the normal deterministic entity gate remains fail-closed.
     """
 
     clean_entity = " ".join(str(entity or "").split())
@@ -377,14 +394,17 @@ def _unique_ascii_surface_for_transliteration(entity: str, evidence_text: str) -
     evidence_tokens = _ASCII_ENTITY_TOKEN_RE.findall(evidence_text or "")
     matches: dict[str, str] = {}
     token_count = len(romanized_tokens)
-    romanized_flat = "".join(romanized_tokens)
+    target_spellings = [_phonetic_spelling(token) for token in romanized_tokens]
 
     for index in range(0, len(evidence_tokens) - token_count + 1):
         candidate_tokens = evidence_tokens[index:index + token_count]
         if [_phonetic_skeleton(token) for token in candidate_tokens] != target_skeletons:
             continue
-        candidate_flat = "".join(token.lower() for token in candidate_tokens)
-        if SequenceMatcher(None, romanized_flat, candidate_flat).ratio() < 0.68:
+        candidate_spellings = [_phonetic_spelling(token) for token in candidate_tokens]
+        if any(
+            SequenceMatcher(None, target, candidate).ratio() < 0.68
+            for target, candidate in zip(target_spellings, candidate_spellings)
+        ):
             continue
         surface = " ".join(candidate_tokens)
         matches[surface.casefold()] = surface
