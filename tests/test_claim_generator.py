@@ -283,7 +283,7 @@ def test_claim_generator_does_not_guess_unrelated_entity_from_transliteration(li
     assert claims[0].entities == ["클로드 리캡"]
 
 
-def test_claim_generator_does_not_guess_ambiguous_live_entity(lineage):
+def test_claim_generator_does_not_guess_ambiguous_single_token_entity(lineage):
     entity_lineage = lineage.model_copy(update={
         "evidence_passages": [EvidencePassage(
             evidence_id="ev_1", article_id="art_1", source_url="http://test.com",
@@ -291,9 +291,9 @@ def test_claim_generator_does_not_guess_ambiguous_live_entity(lineage):
         )]
     })
     generator = generator_with_response(
-        '{"claims": [{"claim_id": "c1", "claim_text": "라이브 리와인드 관련 설명", '
+        '{"claims": [{"claim_id": "c1", "claim_text": "라이브 관련 설명", '
         '"claim_type": "factual", "editorial_role": "change", '
-        '"entities": ["라이브 리와인드"], "evidence_ids": ["ev_1"]}]}'
+        '"entities": ["라이브"], "evidence_ids": ["ev_1"]}]}'
     )
     claims = generator.generate_claims(entity_lineage)
-    assert claims[0].entities == ["라이브 리와인드"]
+    assert claims[0].entities == ["라이브"]
