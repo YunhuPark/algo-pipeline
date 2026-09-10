@@ -1,5 +1,6 @@
 import json
 import os
+import re
 from typing import Any, Callable, List
 
 from langchain_core.prompts import ChatPromptTemplate
@@ -13,6 +14,28 @@ from src.schemas.card_news import Claim, SourceLineage
 
 MAX_GENERATED_CLAIMS = 12
 MAX_CLAIM_RESPONSE_ATTEMPTS = 2
+
+_ALLOWED_EDITORIAL_ROLES = {
+    "context",
+    "change",
+    "mechanism",
+    "evidence",
+    "limitation",
+    "impact",
+    "detail",
+    "cta",
+}
+
+_RANGE_SPLITTERS = (
+    re.compile(
+        r"^\s*between\s+(?P<left>.+?)\s+and\s+(?P<right>.+?)\s*$",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"^\s*(?P<left>.+?)\s*(?:에서|부터|[~～]|\bto\b)\s*(?P<right>.+?)\s*$",
+        re.IGNORECASE,
+    ),
+)
 
 _RETRYABLE_RESPONSE_ERRORS = {
     "CLAIM_RESPONSE_EMPTY",
@@ -36,7 +59,7 @@ _CLAIM_SYSTEM_PROMPT = """
     {{
       "claim_id": "c1",
       "display_title": "독립적으로 읽히는 10~18자 제목",
-      "editorial_role": "context" | "change" | "mechanism" | "evidence" | "limitation" | "impact" | "cta",
+      "editorial_role": "context" | "change" | "mechanism" | "evidence" | "limitation" | "impact" | "detail",
       "claim_text": "원문에서 추출한 구체적 주장 문장",
       "claim_type": "factual" | "numerical" | "attributed_statement" | "inference" | "opinion",
       "entities": ["언급된 고유명사", "회사명", "인명"],
@@ -62,14 +85,112 @@ _CLAIM_SYSTEM_PROMPT = """
 12. 일반적인 단일 사건 주제라면 모든 Claim이 카드뉴스 주제와 고정 원문 제목이 가리키는 동일한 사건을 설명해야 합니다. 요약·총정리·roundup·recap처럼 여러 핵심 포인트를 요청한 주제라면 고정 원문 한 건으로 범위를 좁히지 말고 제공된 Evidence 전체에서 서로 다른 발표·기능·변화·제한·영향을 선택하십시오. 요약형에서는 4개 카드 중 같은 세부 기능이나 같은 좁은 키워드에 3개 이상 몰리지 않게 하십시오.
 13. 원문이 "hundreds of millions"처럼 범위형 수치를 사용하면 임의의 정확한 금액으로 바꾸지 마십시오. claim_text와 numbers.raw_text에는 "수억 달러"처럼 같은 범위의 자연스러운 한국어 표현을 사용하고 근거의 정밀도를 그대로 유지하십시오.
 14. 요약형 주제에서 서로 다른 출처의 Evidence가 2개 이상 제공되고 각 출처가 주제의 서로 다른 핵심 포인트를 직접 뒷받침한다면 최소 2개 출처를 활용하십시오. 단, 출처 다양성을 맞추기 위해 약한 근거나 관련 없는 사실을 억지로 사용하지 마십시오.
-15. 범위·비교 숫자는 특히 보수적으로 다루십시오. Evidence가 "$7.2 billion to $7.45 billion"처럼 범위를 쓰면 claim_text와 numbers.raw_text도 가능한 한 같은 숫자·통화·단위 표기를 유지하십시오. 검증기가 명시적으로 지원하는 것이 확실하지 않다면 "720억에서 745억 달러"처럼 두 끝점을 동시에 환산하지 마십시오.
+15. 범위·비교 숫자는 특히 보수적으로 다루십시오. Evidence가 "$7.2 billion to $7.45 billion"처럼 범위를 쓰면 claim_text도 가능한 한 같은 숫자·통화·단위 표기를 유지하십시오. 검증기가 명시적으로 지원하는 것이 확실하지 않다면 "720억에서 745억 달러"처럼 두 끝점을 동시에 환산하지 마십시오.
 16. 범위 숫자를 한국어로 자유 변환하지 마십시오. 안전한 선택은 (a) 원문 범위 표기를 그대로 유지하거나, (b) 해당 카드에 꼭 필요한 단일 숫자 한 개만 원문 표기 그대로 사용하는 것입니다. 범위의 두 끝점을 새 단위로 바꿔 조합하거나 추정 단위를 보충하지 마십시오.
-17. numbers.raw_text에는 실제 claim_text에 사용한 수치 표현과 최대한 동일한 문자열을 넣으십시오. 하나의 raw_text 안에 여러 숫자를 넣을 때는 두 끝점이 모두 같은 Evidence에서 직접 확인되는 단순 범위일 때만 허용합니다.
+17. editorial_role은 반드시 context/change/mechanism/evidence/limitation/impact/detail 중 하나의 문자열만 사용하십시오. feature, privacy, security, announcement 같은 새 역할 이름을 만들지 마십시오.
+18. numbers의 normalized_value는 반드시 단일 JSON 숫자 또는 숫자로만 된 문자열이어야 합니다. 배열, 객체, "7.2 billion"처럼 단위가 섞인 문자열을 넣지 마십시오.
+19. 범위에 두 끝점이 모두 필요하면 하나의 normalized_value에 배열을 넣지 말고 numbers에 두 객체로 분리하십시오. 예: Evidence가 "$7.2 billion to $7.45 billion"이면 numbers는 [{{"raw_text":"$7.2 billion","normalized_value":7200000000,"unit":"dollars"}}, {{"raw_text":"$7.45 billion","normalized_value":7450000000,"unit":"dollars"}}]처럼 각 끝점을 스칼라 값으로 기록하십시오.
+20. numbers.raw_text에는 실제 claim_text에 사용한 수치 표현과 최대한 동일한 문자열을 넣으십시오. 각 숫자는 반드시 인용한 Evidence에서 직접 확인되어야 합니다.
 """
 
 
 class ClaimGenerationError(QualityGateError, ValueError):
     """Fail-closed claim extraction error compatible with legacy ValueError callers."""
+
+
+def _split_range_text(raw_text: str) -> tuple[str, str] | None:
+    """Split only explicit two-endpoint range syntax."""
+
+    text = str(raw_text or "").strip()
+    for pattern in _RANGE_SPLITTERS:
+        match = pattern.fullmatch(text)
+        if match:
+            left = match.group("left").strip()
+            right = match.group("right").strip()
+            if left and right:
+                return left, right
+    return None
+
+
+def _endpoint_with_unit(endpoint: str, unit: str) -> str:
+    """Carry an explicitly declared semantic unit onto a bare range endpoint."""
+
+    clean = endpoint.strip()
+    clean_unit = str(unit or "").strip()
+    if not clean_unit:
+        return clean
+
+    lowered = clean.lower()
+    unit_lower = clean_unit.lower()
+    if unit_lower in lowered or "$" in clean or "₩" in clean:
+        return clean
+
+    currency_aliases = {
+        "달러": ("dollar", "dollars", "usd"),
+        "dollar": ("달러", "dollars", "usd"),
+        "dollars": ("달러", "dollar", "usd"),
+        "usd": ("달러", "dollar", "dollars"),
+        "원": ("krw", "won"),
+        "krw": ("원", "won"),
+        "won": ("원", "krw"),
+    }
+    if any(alias in lowered for alias in currency_aliases.get(unit_lower, ())):
+        return clean
+    return f"{clean} {clean_unit}".strip()
+
+
+def _normalize_number_payloads(raw_numbers: Any) -> Any:
+    """Repair only an unambiguous LLM schema mistake for two-value ranges.
+
+    Some JSON responses put ``[start, end]`` into ``normalized_value`` even
+    though the public schema requires one Decimal per number object. When the
+    accompanying raw_text contains an explicit two-endpoint range, split it
+    into two scalar number objects. The deterministic verifier still checks
+    both endpoint values against cited evidence, so this does not relax factual
+    validation. Ambiguous payloads are left untouched and fail closed.
+    """
+
+    if not isinstance(raw_numbers, list):
+        return raw_numbers
+
+    normalized_numbers: list[Any] = []
+    for number in raw_numbers:
+        if not isinstance(number, dict):
+            normalized_numbers.append(number)
+            continue
+
+        normalized_value = number.get("normalized_value")
+        if not isinstance(normalized_value, (list, tuple)) or len(normalized_value) != 2:
+            normalized_numbers.append(number)
+            continue
+
+        endpoints = _split_range_text(str(number.get("raw_text", "")))
+        if endpoints is None:
+            normalized_numbers.append(number)
+            continue
+
+        unit = str(number.get("unit", ""))
+        for endpoint, value in zip(endpoints, normalized_value):
+            split_number = dict(number)
+            split_number["raw_text"] = _endpoint_with_unit(endpoint, unit)
+            split_number["normalized_value"] = value
+            normalized_numbers.append(split_number)
+
+    return normalized_numbers
+
+
+def _normalize_claim_payload(raw_claim: dict[str, Any]) -> dict[str, Any]:
+    """Normalize non-factual metadata without weakening evidence checks."""
+
+    payload = dict(raw_claim)
+    role = payload.get("editorial_role")
+    if role is not None:
+        normalized_role = str(role).strip().lower()
+        payload["editorial_role"] = (
+            normalized_role if normalized_role in _ALLOWED_EDITORIAL_ROLES else "detail"
+        )
+    payload["numbers"] = _normalize_number_payloads(payload.get("numbers", []))
+    return payload
 
 
 class ClaimGenerator:
@@ -174,7 +295,8 @@ class ClaimGenerator:
                 continue
 
             try:
-                cited_ids = raw_claim.get("evidence_ids") or []
+                normalized_claim = _normalize_claim_payload(raw_claim)
+                cited_ids = normalized_claim.get("evidence_ids") or []
                 evidence_by_id = {
                     item.evidence_id: item for item in lineage.evidence_passages
                 }
@@ -187,7 +309,10 @@ class ClaimGenerator:
                     lineage.source_url,
                 )
                 claim = Claim.model_validate(
-                    {**raw_claim, "source_url": raw_claim.get("source_url") or cited_source}
+                    {
+                        **normalized_claim,
+                        "source_url": normalized_claim.get("source_url") or cited_source,
+                    }
                 )
             except ValidationError as exc:
                 issues = ", ".join(
@@ -313,6 +438,10 @@ class ClaimGenerator:
                     "원문의 사실만 사용하여 전체 JSON 객체를 처음부터 다시 생성하세요. "
                     "모든 claim에는 claim_id, claim_text, 허용된 claim_type, entities 배열, "
                     "numbers 배열, dates 배열, evidence_ids 배열이 있어야 합니다. "
+                    "editorial_role은 context/change/mechanism/evidence/limitation/impact/detail 중 "
+                    "하나만 사용하세요. numbers[*].normalized_value는 배열이나 객체가 아니라 "
+                    "단일 숫자여야 합니다. 범위는 두 number 객체로 분리하고 각 끝점의 "
+                    "normalized_value를 스칼라 값으로 기록하세요. "
                     f"검증 오류: {exc}"
                 )
 
