@@ -1,7 +1,9 @@
 import json
 import os
 import re
+import unicodedata
 from decimal import Decimal, InvalidOperation
+from difflib import SequenceMatcher
 from typing import Any, Callable, List
 
 from langchain_core.prompts import ChatPromptTemplate
@@ -47,6 +49,24 @@ _EVIDENCE_NUMBER_CANDIDATE_RE = re.compile(
     r"tokens?|companies?|models?|곳|places?|locations?|개월|months?|년|years?|"
     r"일|days?|시간|hours?|분|minutes?|초|seconds?|배|times?|x(?![A-Za-z]))?",
     re.IGNORECASE,
+)
+_ASCII_ENTITY_TOKEN_RE = re.compile(r"[A-Za-z][A-Za-z0-9+._'-]*")
+_HANGUL_PHRASE_RE = re.compile(r"^[가-힣]+(?:\s+[가-힣]+)+$")
+
+# Revised-Romanization-like spellings are used only as a conservative bridge
+# from a Korean loanword phrase back to one unique ASCII surface already found
+# in the claim's cited evidence. They never create a new entity.
+_HANGUL_INITIALS = (
+    "g", "kk", "n", "d", "tt", "r", "m", "b", "pp", "s", "ss", "",
+    "j", "jj", "ch", "k", "t", "p", "h",
+)
+_HANGUL_VOWELS = (
+    "a", "ae", "ya", "yae", "eo", "e", "yeo", "ye", "o", "wa", "wae",
+    "oe", "yo", "u", "wo", "we", "wi", "yu", "eu", "ui", "i",
+)
+_HANGUL_FINALS = (
+    "", "k", "k", "k", "n", "n", "n", "t", "l", "k", "m", "l", "l",
+    "p", "l", "m", "p", "p", "t", "t", "ng", "t", "t", "k", "t", "p", "h",
 )
 
 _RETRYABLE_RESPONSE_ERRORS = {
@@ -105,6 +125,7 @@ _CLAIM_SYSTEM_PROMPT = """
 20. numbers.raw_text에는 실제 claim_text에 사용한 수치 표현과 최대한 동일한 문자열을 넣으십시오. 각 숫자는 반드시 인용한 Evidence에서 직접 확인되어야 합니다.
 21. normalized_value는 raw_text의 숫자를 단위까지 반영한 실제 값이어야 합니다. 예: "$7.2 billion"의 normalized_value는 7200000000입니다. raw_text를 "720 billion dollars"로 바꾸면 값이 720000000000이 되어 전혀 다른 주장입니다. 소수점을 제거하거나 10배·100배 키우지 마십시오.
 22. 숫자 오류 재시도에서는 새 숫자를 만들지 말고 문제가 된 Claim의 인용 Evidence에서 숫자 표현 하나를 문자 그대로 복사해 raw_text와 claim_text에 사용하십시오.
+23. 제품명·기능명·회사명 같은 고유명사는 번역하거나 한글 음역해서 entities에 넣지 마십시오. Evidence가 "Siri recap"이라고 쓰면 entities에는 반드시 "Siri recap"처럼 Evidence의 표면 문자열을 그대로 사용하고 "시리 리캡"으로 바꾸지 마십시오. 가능하면 claim_text와 display_title에서도 같은 원문 표기를 유지하십시오.
 """
 
 
@@ -293,6 +314,149 @@ def _align_claim_number_text_to_evidence(claim: Claim, evidence_text: str) -> Cl
     )
 
 
+def _romanize_hangul(text: str) -> str:
+    """Romanize Hangul deterministically for conservative loanword matching."""
+
+    parts: list[str] = []
+    for char in unicodedata.normalize("NFKC", text or ""):
+        codepoint = ord(char)
+        if 0xAC00 <= codepoint <= 0xD7A3:
+            offset = codepoint - 0xAC00
+            initial = offset // 588
+            vowel = (offset % 588) // 28
+            final = offset % 28
+            parts.append(
+                _HANGUL_INITIALS[initial]
+                + _HANGUL_VOWELS[vowel]
+                + _HANGUL_FINALS[final]
+            )
+        elif char.isascii() and (char.isalnum() or char.isspace()):
+            parts.append(char.lower())
+        else:
+            parts.append(" ")
+    return " ".join("".join(parts).split())
+
+
+def _phonetic_skeleton(text: str) -> str:
+    """Reduce romanized/English loanwords to a conservative consonant key."""
+
+    value = (text or "").lower()
+    for source, replacement in (("ph", "p"), ("ck", "k"), ("qu", "k")):
+        value = value.replace(source, replacement)
+    value = value.replace("c", "k").replace("q", "k")
+    return "".join(
+        char
+        for char in value
+        if char.isalpha() and char not in "aeiouy"
+    )
+
+
+def _unique_ascii_surface_for_transliteration(entity: str, evidence_text: str) -> str | None:
+    """Find one high-confidence source surface for a multi-token Korean loanword.
+
+    Matching is deliberately narrow: the Korean entity must contain at least
+    two Hangul tokens, the ASCII candidate must have the same token count and
+    identical consonant skeletons, and the romanized spelling must be similar.
+    If zero or multiple candidates match, no repair is performed and the normal
+    deterministic entity gate remains fail-closed.
+    """
+
+    clean_entity = " ".join(str(entity or "").split())
+    if not _HANGUL_PHRASE_RE.fullmatch(clean_entity):
+        return None
+
+    romanized_tokens = _romanize_hangul(clean_entity).split()
+    if len(romanized_tokens) < 2:
+        return None
+    target_skeletons = [_phonetic_skeleton(token) for token in romanized_tokens]
+    if any(not skeleton for skeleton in target_skeletons):
+        return None
+    if sum(len(skeleton) for skeleton in target_skeletons) < 4:
+        return None
+
+    evidence_tokens = _ASCII_ENTITY_TOKEN_RE.findall(evidence_text or "")
+    matches: dict[str, str] = {}
+    token_count = len(romanized_tokens)
+    romanized_flat = "".join(romanized_tokens)
+
+    for index in range(0, len(evidence_tokens) - token_count + 1):
+        candidate_tokens = evidence_tokens[index:index + token_count]
+        if [_phonetic_skeleton(token) for token in candidate_tokens] != target_skeletons:
+            continue
+        candidate_flat = "".join(token.lower() for token in candidate_tokens)
+        if SequenceMatcher(None, romanized_flat, candidate_flat).ratio() < 0.68:
+            continue
+        surface = " ".join(candidate_tokens)
+        matches[surface.casefold()] = surface
+
+    if len(matches) != 1:
+        return None
+    return next(iter(matches.values()))
+
+
+def _align_claim_entities_to_evidence(claim: Claim, evidence_text: str) -> Claim:
+    """Align only unique high-confidence transliterations to cited evidence.
+
+    Exact source-supported entities are unchanged. A Korean multi-token
+    transliteration may be replaced with one unique phonetically compatible
+    ASCII phrase that already occurs in the cited evidence. Unsupported or
+    ambiguous entities are left untouched so DeterministicVerifier still
+    raises ENTITY_UNSUPPORTED.
+    """
+
+    if not claim.entities or not evidence_text:
+        return claim
+
+    normalized_evidence = unicodedata.normalize("NFKC", evidence_text).casefold()
+    replacements: dict[str, str] = {}
+    aligned_entities: list[str] = []
+
+    for entity in claim.entities:
+        clean_entity = str(entity or "").strip()
+        if not clean_entity:
+            continue
+        if unicodedata.normalize("NFKC", clean_entity).casefold() in normalized_evidence:
+            aligned_entities.append(clean_entity)
+            continue
+
+        source_surface = _unique_ascii_surface_for_transliteration(
+            clean_entity,
+            evidence_text,
+        )
+        if source_surface is None:
+            aligned_entities.append(clean_entity)
+            continue
+
+        aligned_entities.append(source_surface)
+        replacements[clean_entity] = source_surface
+
+    deduped_entities: list[str] = []
+    seen_entities: set[str] = set()
+    for entity in aligned_entities:
+        key = unicodedata.normalize("NFKC", entity).casefold()
+        if key in seen_entities:
+            continue
+        seen_entities.add(key)
+        deduped_entities.append(entity)
+
+    if not replacements and deduped_entities == list(claim.entities):
+        return claim
+
+    display_title = claim.display_title
+    claim_text = claim.claim_text
+    for old_text, new_text in replacements.items():
+        display_title = display_title.replace(old_text, new_text)
+        claim_text = claim_text.replace(old_text, new_text)
+
+    return claim.model_copy(
+        update={
+            "display_title": display_title,
+            "claim_text": claim_text,
+            "entities": deduped_entities,
+        }
+    )
+
+
 class ClaimGenerator:
     def __init__(self, llm=None, llm_factory: Callable[[], Any] | None = None):
         self._llm = llm
@@ -420,6 +584,10 @@ class ClaimGenerator:
                     if evidence_id in evidence_by_id
                 )
                 claim = _align_claim_number_text_to_evidence(
+                    claim,
+                    cited_evidence_text,
+                )
+                claim = _align_claim_entities_to_evidence(
                     claim,
                     cited_evidence_text,
                 )
@@ -551,6 +719,8 @@ class ClaimGenerator:
                     "하나만 사용하세요. numbers[*].normalized_value는 배열이나 객체가 아니라 "
                     "단일 숫자여야 합니다. 범위는 두 number 객체로 분리하고 각 끝점의 "
                     "normalized_value를 스칼라 값으로 기록하세요. "
+                    "entities에는 번역/음역명이 아니라 인용 Evidence에 실제로 등장하는 "
+                    "고유명사 표면 문자열을 그대로 사용하세요. "
                     f"검증 오류: {exc}"
                 )
 
