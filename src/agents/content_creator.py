@@ -17,6 +17,7 @@ from src.qa.deterministic_verifier import (
     QualityGateError,
     repair_source_backed_numeric_localizations,
 )
+from src.qa.editorial_intent import is_roundup_topic
 from src.qa.editorial_quality_gate import validate_claim_editorial_quality
 from src.qa.semantic_critic import run_semantic_critic
 from src.qa.script_assembler import ScriptAssembler
@@ -207,6 +208,7 @@ class ContentCreator:
                     )
                     if evidence_id in evidence_by_id
                 )
+                roundup = is_roundup_topic(source_lineage.topic)
                 targeted_feedback = ""
                 if exc.error_code in {"NUMBERS_MISSING", "NUMBER_UNSUPPORTED"}:
                     targeted_feedback = (
@@ -233,15 +235,37 @@ class ContentCreator:
                         "인용 근거에 직접 쓰인 사실만 충실하게 번역하거나 요약하세요."
                     )
                 elif exc.error_code == "EDITORIAL_TOPIC_MISMATCH":
-                    targeted_feedback = (
-                        " 전체 Claim을 다른 일반론으로 바꾸지 마세요. "
-                        f"카드뉴스 주제 '{source_lineage.topic}'와 고정 원문 제목 "
-                        f"'{source_lineage.source_title}'이 가리키는 한 사건만 설명하세요. "
-                        "최소 2개 Claim의 제목 또는 본문에 원문의 핵심 고유명사를 직접 명시하세요."
-                    )
+                    if roundup:
+                        targeted_feedback = (
+                            " 이 요청은 요약/정리형이므로 하나의 세부 사건으로 범위를 좁히지 마세요. "
+                            f"요청 주제 '{source_lineage.topic}'의 범위를 유지하면서 Evidence 전체에서 "
+                            "직접 뒷받침되는 서로 다른 발표·기능·제한·영향을 선택하세요. "
+                            "각 Claim은 인용한 evidence 범위 안에서만 작성하세요."
+                        )
+                    else:
+                        targeted_feedback = (
+                            " 전체 Claim을 다른 일반론으로 바꾸지 마세요. "
+                            f"카드뉴스 주제 '{source_lineage.topic}'와 고정 원문 제목 "
+                            f"'{source_lineage.source_title}'이 가리키는 한 사건만 설명하세요. "
+                            "최소 2개 Claim의 제목 또는 본문에 원문의 핵심 고유명사를 직접 명시하세요."
+                        )
+                elif exc.error_code == "EDITORIAL_COVERAGE_INSUFFICIENT":
+                    if roundup:
+                        targeted_feedback = (
+                            " 요약형 요청이 한 세부 주제에 편중되었습니다. 같은 세부 기능을 "
+                            "배경·보안·제한·영향으로 표현만 바꿔 반복하지 마세요. Evidence 전체에서 "
+                            "서로 다른 발표·제품/기능·변화·제한·영향을 골라 4개 카드를 구성하세요. "
+                            "서로 다른 출처가 주제의 핵심을 직접 뒷받침한다면 여러 출처를 활용하되, "
+                            "관련 없는 내용을 다양성 확보용으로 억지로 넣지 마세요."
+                        )
+                    else:
+                        targeted_feedback = (
+                            " 서로 다른 핵심 사실이 충분하지 않습니다. 같은 사실을 풀어 쓰지 말고 "
+                            "Evidence 안에서 독립적으로 검증되는 다른 Claim을 선택하세요."
+                        )
                 elif exc.error_code == "EDITORIAL_COPY_LENGTH_INVALID":
                     targeted_feedback = (
-                        " 길이 오류가 난 Claim만 우선 고쳐 주세요. 모든 본문 Claim은 45~90자로 작성하세요. "
+                        " 길이 오류가 난 Claim만 우선 고쳐 주세요. 모든 본문 Claim은 45~80자로 작성하세요. "
                         "한 카드에는 인용 근거가 직접 뒷받침하는 핵심 사실 하나만 남기고, "
                         "길이를 맞추기 위한 새 정보·평가·전망은 추가하지 마세요."
                     )
