@@ -1,4 +1,4 @@
-from src.qa.deterministic_verifier import DeterministicVerifier
+from src.qa.deterministic_verifier import DeterministicVerifier, QualityGateError
 from src.schemas.card_news import Claim, EvidencePassage, SourceLineage
 
 
@@ -49,3 +49,41 @@ def test_real_proper_noun_still_reaches_entity_gate():
     )
 
     assert claim.entities == ["Apple"]
+
+
+def test_apple_watch_series_korean_surface_is_canonicalized_and_verified():
+    claim = Claim(
+        claim_id="c-watch",
+        claim_text="애플워치 시리즈 12에 새 기능이 추가됩니다.",
+        claim_type="factual",
+        entities=["애플워치 시리즈 12"],
+        evidence_ids=["ev_1"],
+    )
+
+    assert claim.entities == ["Apple Watch Series 12"]
+    DeterministicVerifier.verify_claims(
+        [claim],
+        _lineage("Apple Watch Series 12 adds a new feature."),
+    )
+    assert claim.verification_status == "verified"
+
+
+def test_apple_watch_series_canonicalization_still_fails_without_source_support():
+    claim = Claim(
+        claim_id="c-watch",
+        claim_text="애플워치 시리즈 12에 새 기능이 추가됩니다.",
+        claim_type="factual",
+        entities=["애플워치 시리즈 12"],
+        evidence_ids=["ev_1"],
+    )
+
+    assert claim.entities == ["Apple Watch Series 12"]
+    try:
+        DeterministicVerifier.verify_claims(
+            [claim],
+            _lineage("Apple Watch Series 11 remains available."),
+        )
+    except QualityGateError as exc:
+        assert exc.error_code == "ENTITY_UNSUPPORTED"
+    else:
+        raise AssertionError("unsupported canonical entity must fail closed")
