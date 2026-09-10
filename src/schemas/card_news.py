@@ -1,13 +1,52 @@
 """카드뉴스 파이프라인 전체에서 사용하는 Pydantic 스키마"""
 from __future__ import annotations
 
+from decimal import Decimal
 from typing import Literal, Optional, List
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 MIN_CONTENT_BODY_CHARS = 45
 MAX_CONTENT_BODY_CHARS = 130
+
+# ``Claim.entities`` is reserved for named entities (companies, products,
+# people, named features, etc.). LLMs occasionally classify ordinary Korean
+# category nouns as entities; these should never consume factual entity-gate
+# budget. Keep this list intentionally conservative and exact-match only so an
+# unsupported proper noun still reaches DeterministicVerifier and fails closed.
+_GENERIC_ENTITY_TERMS = frozenset({
+    "시장",
+    "업계",
+    "산업",
+    "기술",
+    "서비스",
+    "기능",
+    "제품",
+    "사용자",
+    "소비자",
+    "고객",
+    "기업",
+    "회사",
+    "분야",
+    "발표",
+    "뉴스",
+    "데이터",
+    "플랫폼",
+    "기기",
+    "개발자",
+    "모델",
+    "보안",
+    "프라이버시",
+    "매출",
+    "가격",
+    "성장",
+    "전망",
+    "경쟁",
+    "변화",
+    "영향",
+    "제한",
+})
 
 
 class Slide(BaseModel):
@@ -74,10 +113,6 @@ class TrendResult(BaseModel):
     content: str
     score: float = 0.0
 
-from pydantic import BaseModel, Field, model_validator
-from decimal import Decimal
-
-# ... (keep Slide, CardNewsScript, TrendResult)
 
 class NormalizedNumber(BaseModel):
     raw_text: str
@@ -86,12 +121,14 @@ class NormalizedNumber(BaseModel):
     qualifier: str = ""
     subject: str = ""
 
+
 class NormalizedDate(BaseModel):
     raw_text: str
     normalized_date: str
     precision: str
     is_relative: bool
     reference_date: str = ""
+
 
 class EvidencePassage(BaseModel):
     """원문 근거 구절"""
@@ -126,6 +163,37 @@ class Claim(BaseModel):
     verification_status: Literal["pending", "verified", "disputed", "unverifiable"] = "pending"
     verification_reason: str = ""
 
+    @field_validator("entities", mode="before")
+    @classmethod
+    def discard_generic_entity_terms(cls, value):
+        """Keep entity metadata limited to named entities.
+
+        Exact generic/common nouns are presentation vocabulary, not named
+        entities. Removing them does not relax factual verification of actual
+        proper nouns: anything outside this small denylist remains in the
+        entity list and must still be supported by cited evidence.
+        """
+        if value is None:
+            return []
+        if not isinstance(value, list):
+            return value
+
+        cleaned: list[object] = []
+        seen: set[str] = set()
+        for item in value:
+            if not isinstance(item, str):
+                cleaned.append(item)
+                continue
+            entity = " ".join(item.split())
+            if not entity or entity in _GENERIC_ENTITY_TERMS:
+                continue
+            key = entity.casefold()
+            if key in seen:
+                continue
+            seen.add(key)
+            cleaned.append(entity)
+        return cleaned
+
 
 class SemanticCriticResult(BaseModel):
     """의미론적 검증 결과"""
@@ -140,7 +208,6 @@ class SemanticCriticResult(BaseModel):
         if not (0.0 <= self.confidence <= 1.0):
             raise ValueError("confidence must be between 0.0 and 1.0")
         return self
-
 
 
 class SourceLineage(BaseModel):
@@ -194,6 +261,7 @@ class SourceLineage(BaseModel):
     @property
     def is_verified_ready(self) -> bool:
         return self.schema_version >= "2.0" and bool(self.evidence_passages)
+
 
 class TrendReport(BaseModel):
     """Trend Analyzer가 반환하는 최종 분석 보고서"""
