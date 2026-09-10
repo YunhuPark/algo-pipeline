@@ -22,7 +22,7 @@ class BoundaryRetryGenerator:
             Claim(
                 claim_id="c1",
                 display_title="Apple 기능 변화 공개",
-                claim_text="Apple은 공식 발표에서 새로운 소프트웨어 기능과 제공 범위를 함께 설명했다.",
+                claim_text="Apple은 공식 발표에서 새로운 소프트웨어 기능과 제공 범위를 함께 명확하게 설명했다.",
                 editorial_role="change",
                 claim_type="factual",
                 entities=["Apple"],
