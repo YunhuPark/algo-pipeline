@@ -313,7 +313,7 @@ def test_claim_generator_retries_unsupported_product_generation(lineage):
     })
     responses = iter([
         '{"claims": [{"claim_id": "c1", '
-        '"display_title": "Apple Watch Series 12 업데이트", '
+        '"display_title": "Series 12 업데이트", '
         '"claim_text": "Apple Watch Series 12에 새 기능이 추가된다.", '
         '"claim_type": "factual", "editorial_role": "change", '
         '"entities": ["Apple Watch Series 12"], "evidence_ids": ["ev_1"]}]}',
