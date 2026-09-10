@@ -71,6 +71,28 @@ _NUMBER_MENTION_RE = re.compile(
     rf"(?P<unit>{_UNIT_PATTERN})?",
     re.IGNORECASE,
 )
+_RANGE_VALUE_PATTERN = (
+    rf"(?:[$₩]\s*)?{_NUMBER_PATTERN}\s*"
+    rf"(?:{_KOREAN_SCALE_PATTERN}|{_ENGLISH_SCALE_PATTERN})?\s*"
+    rf"(?:{_UNIT_PATTERN})?"
+)
+_RANGE_ENDPOINT_RE = re.compile(
+    rf"^\s*(?P<currency>[$₩])?\s*(?P<number>{_NUMBER_PATTERN})\s*"
+    rf"(?P<scale>{_KOREAN_SCALE_PATTERN}|{_ENGLISH_SCALE_PATTERN})?\s*"
+    rf"(?P<unit>{_UNIT_PATTERN})?\s*$",
+    re.IGNORECASE,
+)
+_SIMPLE_NUMERIC_RANGE_RE = re.compile(
+    rf"(?P<left>{_RANGE_VALUE_PATTERN})\s*"
+    rf"(?:에서|부터|[~～]|\bto\b)\s*"
+    rf"(?P<right>{_RANGE_VALUE_PATTERN})",
+    re.IGNORECASE,
+)
+_BETWEEN_NUMERIC_RANGE_RE = re.compile(
+    rf"\bbetween\s+(?P<left>{_RANGE_VALUE_PATTERN})\s+and\s+"
+    rf"(?P<right>{_RANGE_VALUE_PATTERN})",
+    re.IGNORECASE,
+)
 _KOREAN_EOK_USD_RE = re.compile(
     rf"(?<![\w.])(?P<number>{_NUMBER_PATTERN})\s*억\s*(?P<unit>달러|usd)",
     re.IGNORECASE,
@@ -231,6 +253,85 @@ def _extract_number_mentions(text: str) -> Iterable[Tuple[Decimal, str]]:
         )
 
 
+def _range_endpoint_parts(raw_text: str) -> tuple[Decimal, str, str] | None:
+    """Parse one range endpoint without guessing a scale or semantic unit."""
+
+    match = _RANGE_ENDPOINT_RE.fullmatch(
+        unicodedata.normalize("NFKC", raw_text or "").strip()
+    )
+    if not match:
+        return None
+    value = _to_decimal(match.group("number"))
+    if value is None:
+        return None
+    scale = (match.group("scale") or "").lower()
+    unit = _canonical_unit(
+        match.group("unit") or "",
+        match.group("currency") or "",
+    )
+    return value, scale, unit
+
+
+def _canonical_numeric_range(
+    left_raw: str,
+    right_raw: str,
+    declared_unit: str = "",
+) -> tuple[tuple[Decimal, str], tuple[Decimal, str]] | None:
+    """Canonicalize a two-endpoint range using only explicit/shared syntax.
+
+    A missing scale or unit may inherit from the opposite endpoint because
+    forms such as ``7.2~7.45 billion`` and ``72억~74.5억 달러`` conventionally
+    share their trailing qualifier. No currency exchange or inferred unit
+    conversion is performed.
+    """
+
+    left = _range_endpoint_parts(left_raw)
+    right = _range_endpoint_parts(right_raw)
+    if left is None or right is None:
+        return None
+
+    left_value, left_scale, left_unit = left
+    right_value, right_scale, right_unit = right
+
+    if not left_scale and right_scale:
+        left_scale = right_scale
+    elif not right_scale and left_scale:
+        right_scale = left_scale
+
+    left_value *= _SCALE_FACTORS.get(left_scale, Decimal("1"))
+    right_value *= _SCALE_FACTORS.get(right_scale, Decimal("1"))
+
+    canonical_declared_unit = _canonical_unit(declared_unit)
+    explicit_units = {unit for unit in (left_unit, right_unit) if unit}
+    if len(explicit_units) > 1:
+        return None
+    shared_unit = next(iter(explicit_units), canonical_declared_unit)
+    if canonical_declared_unit and shared_unit and canonical_declared_unit != shared_unit:
+        return None
+
+    left_unit = left_unit or shared_unit
+    right_unit = right_unit or shared_unit
+    return (left_value, left_unit), (right_value, right_unit)
+
+
+def _extract_numeric_ranges(
+    text: str,
+    declared_unit: str = "",
+) -> Iterable[tuple[tuple[Decimal, str], tuple[Decimal, str]]]:
+    """Yield simple two-endpoint ranges with canonical values and units."""
+
+    normalized = unicodedata.normalize("NFKC", text or "")
+    for pattern in (_BETWEEN_NUMERIC_RANGE_RE, _SIMPLE_NUMERIC_RANGE_RE):
+        for match in pattern.finditer(normalized):
+            canonical = _canonical_numeric_range(
+                match.group("left"),
+                match.group("right"),
+                declared_unit,
+            )
+            if canonical is not None:
+                yield canonical
+
+
 def _extract_approximate_number_mentions(text: str) -> Iterable[Tuple[int, str]]:
     """Yield magnitude bands without inventing precision for vague amounts."""
 
@@ -261,6 +362,19 @@ def _number_supported_by_evidence(num_obj, evidence_text: str) -> bool:
     """Return whether one declared number is supported by its cited evidence."""
 
     declared_unit = _canonical_unit(num_obj.unit)
+
+    # Range claims must match both endpoints of one evidence-backed range.
+    # This prevents the old behavior from validating only the first number in
+    # a multi-number raw_text while still allowing exact scale normalization.
+    claim_ranges = list(_extract_numeric_ranges(num_obj.raw_text, declared_unit))
+    if claim_ranges:
+        evidence_ranges = list(_extract_numeric_ranges(evidence_text))
+        return any(
+            claim_range == evidence_range
+            for claim_range in claim_ranges
+            for evidence_range in evidence_ranges
+        )
+
     approximate_claim = list(
         _extract_approximate_number_mentions(num_obj.raw_text)
     )
@@ -276,6 +390,10 @@ def _number_supported_by_evidence(num_obj, evidence_text: str) -> bool:
         )
 
     parsed_claim = list(_extract_number_mentions(num_obj.raw_text))
+    if len(parsed_claim) > 1:
+        # Multiple exact values without a recognized range connector are
+        # ambiguous in a single NormalizedNumber, so fail closed.
+        return False
     if parsed_claim:
         value, qual = parsed_claim[0]
         if not qual and declared_unit:
