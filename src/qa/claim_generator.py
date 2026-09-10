@@ -10,7 +10,12 @@ from langchain_core.prompts import ChatPromptTemplate
 from langchain_openai import ChatOpenAI
 from pydantic import ValidationError
 
-from src.qa.deterministic_verifier import QualityGateError, parse_number_with_qualifier
+from src.qa.deterministic_verifier import (
+    ALLOWED_ALIASES,
+    QualityGateError,
+    normalize_text,
+    parse_number_with_qualifier,
+)
 from src.qa.editorial_intent import is_roundup_topic
 from src.schemas.card_news import Claim, SourceLineage
 
@@ -79,6 +84,7 @@ _RETRYABLE_RESPONSE_ERRORS = {
     "CLAIM_LIMIT_EXCEEDED",
     "CLAIM_SCHEMA_INVALID",
     "CLAIM_ID_DUPLICATE",
+    "CLAIM_ENTITY_UNSUPPORTED",
 }
 
 _CLAIM_SYSTEM_PROMPT = """
@@ -480,6 +486,47 @@ def _align_claim_entities_to_evidence(claim: Claim, evidence_text: str) -> Claim
     )
 
 
+def _entity_supported_by_evidence(entity: str, evidence_text: str) -> bool:
+    """Mirror the deterministic verifier's named-entity support check.
+
+    Claim generation uses this only as an early fail-closed check so the LLM
+    gets a targeted retry before the wider content pipeline consumes one of its
+    factual retry attempts. It never invents aliases or rewrites unsupported
+    product generations.
+    """
+
+    norm_ent = normalize_text(entity)
+    if not norm_ent:
+        return True
+    norm_evidence_text = normalize_text(evidence_text)
+    allowed_forms = [norm_ent] + ALLOWED_ALIASES.get(norm_ent, [])
+    for form in allowed_forms:
+        pattern = r"(?<![a-z0-9])" + re.escape(form) + r"(?![a-z0-9])"
+        if re.search(r"[a-zA-Z]", form):
+            if re.search(pattern, norm_evidence_text):
+                return True
+        elif form in norm_evidence_text:
+            return True
+    return False
+
+
+def _raise_for_unsupported_claim_entities(claim: Claim, evidence_text: str) -> None:
+    """Reject named entities that are absent from the claim's cited passages."""
+
+    for entity in claim.entities:
+        if _entity_supported_by_evidence(entity, evidence_text):
+            continue
+        raise ClaimGenerationError(
+            "CLAIM_ENTITY_UNSUPPORTED",
+            (
+                f"Claim {claim.claim_id} uses entity '{entity}' that is not present "
+                "in its cited evidence. Replace the entire claim with a different "
+                "evidence-backed fact; do not infer a product generation or model number."
+            ),
+            claim.claim_id,
+        )
+
+
 class ClaimGenerator:
     def __init__(self, llm=None, llm_factory: Callable[[], Any] | None = None):
         self._llm = llm
@@ -614,6 +661,9 @@ class ClaimGenerator:
                     claim,
                     cited_evidence_text,
                 )
+                _raise_for_unsupported_claim_entities(claim, cited_evidence_text)
+            except ClaimGenerationError:
+                raise
             except ValidationError as exc:
                 issues = ", ".join(
                     f"{'.'.join(str(part) for part in error['loc'])}:{error['type']}"
@@ -728,6 +778,27 @@ class ClaimGenerator:
                     or exc.error_code not in _RETRYABLE_RESPONSE_ERRORS
                 ):
                     raise
+
+                if exc.error_code == "CLAIM_ENTITY_UNSUPPORTED":
+                    print(
+                        "[QualityGate] Claim entity가 인용 근거에 없어 "
+                        f"자동 재생성합니다 ({attempt}/{MAX_CLAIM_RESPONSE_ATTEMPTS - 1}, "
+                        f"{exc.error_code})."
+                    )
+                    schema_feedback = (
+                        "[강제 재생성 - ENTITY SUPPORT ERROR]\n"
+                        f"이전 응답 실패: {exc}\n"
+                        "위 오류에 나온 고유명사를 다시 사용하지 마십시오. "
+                        "선택한 evidence_ids 안에 그 문자열이 실제로 존재하지 않습니다. "
+                        "제품 세대명, 시리즈 번호, 모델 번호를 주제·연도·일반지식에서 "
+                        "추론하지 마십시오. 해당 entity만 entities 배열에서 지우는 것도 "
+                        "금지합니다. 그 고유명사에 의존한 Claim 전체를 삭제하고, 제공된 "
+                        "Evidence에서 직접 확인되는 서로 다른 사실로 교체하십시오. "
+                        "새 Claim의 모든 entities는 자신이 인용한 evidence_ids 텍스트에 "
+                        "실제로 등장하는 표면 문자열이어야 합니다."
+                    )
+                    continue
+
                 print(
                     "[QualityGate] Claim JSON 형식이 유효하지 않아 "
                     f"자동 재시도합니다 ({attempt}/{MAX_CLAIM_RESPONSE_ATTEMPTS - 1}, "
