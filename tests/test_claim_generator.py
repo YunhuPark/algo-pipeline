@@ -191,3 +191,65 @@ def test_claim_generator_prompt_includes_locked_source_title(lineage):
     )
 
     assert "Cognition hits $48B valuation" in calls[0]
+
+
+def test_claim_generator_normalizes_unknown_editorial_role(lineage):
+    generator = generator_with_response(
+        '{"claims": [{"claim_id": "c1", "claim_text": "Test passage", '
+        '"claim_type": "factual", "editorial_role": "security", '
+        '"evidence_ids": ["ev_1"]}]}'
+    )
+
+    claims = generator.generate_claims(lineage)
+
+    assert claims[0].editorial_role == "detail"
+
+
+def test_claim_generator_splits_range_array_into_scalar_numbers(lineage):
+    range_lineage = lineage.model_copy(
+        update={
+            "evidence_passages": [
+                EvidencePassage(
+                    evidence_id="ev_1",
+                    article_id="art_1",
+                    source_url="http://test.com",
+                    text="Revenue guidance is $7.2 billion to $7.45 billion.",
+                    content_hash="hash",
+                )
+            ]
+        }
+    )
+    generator = generator_with_response(
+        '{"claims": [{"claim_id": "c1", '
+        '"claim_text": "Revenue guidance is $7.2 billion to $7.45 billion.", '
+        '"claim_type": "numerical", "editorial_role": "evidence", '
+        '"numbers": [{"raw_text": "$7.2 billion to $7.45 billion", '
+        '"normalized_value": [7200000000, 7450000000], "unit": "dollars"}], '
+        '"evidence_ids": ["ev_1"]}]}'
+    )
+
+    claims = generator.generate_claims(range_lineage)
+
+    assert [number.normalized_value for number in claims[0].numbers] == [
+        7200000000,
+        7450000000,
+    ]
+    assert [number.raw_text for number in claims[0].numbers] == [
+        "$7.2 billion",
+        "$7.45 billion",
+    ]
+
+
+def test_claim_generator_leaves_ambiguous_number_array_to_fail_closed(lineage):
+    generator = generator_with_response(
+        '{"claims": [{"claim_id": "c1", "claim_text": "Test passage", '
+        '"claim_type": "numerical", "editorial_role": "evidence", '
+        '"numbers": [{"raw_text": "two values", '
+        '"normalized_value": [1, 2], "unit": "count"}], '
+        '"evidence_ids": ["ev_1"]}]}'
+    )
+
+    with pytest.raises(ClaimGenerationError) as exc:
+        generator.generate_claims(lineage)
+
+    assert exc.value.error_code == "CLAIM_SCHEMA_INVALID"
