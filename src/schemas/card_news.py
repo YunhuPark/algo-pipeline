@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from decimal import Decimal
+import re
 from typing import Literal, Optional, List
 
 from pydantic import BaseModel, Field, field_validator, model_validator
@@ -47,6 +48,24 @@ _GENERIC_ENTITY_TERMS = frozenset({
     "영향",
     "제한",
 })
+
+# Narrow, deterministic surface canonicalization for one product family that
+# commonly arrives from Korean generation in transliterated form. This does
+# not make the entity automatically valid: the deterministic verifier still
+# requires the resulting English surface to occur in cited evidence.
+_APPLE_WATCH_SERIES_KO_RE = re.compile(
+    r"^애플\s*워치\s*시리즈\s*(?P<series>\d+)$"
+)
+_APPLE_WATCH_KO_RE = re.compile(r"^애플\s*워치$")
+
+
+def _canonicalize_known_entity_surface(entity: str) -> str:
+    match = _APPLE_WATCH_SERIES_KO_RE.fullmatch(entity)
+    if match:
+        return f"Apple Watch Series {match.group('series')}"
+    if _APPLE_WATCH_KO_RE.fullmatch(entity):
+        return "Apple Watch"
+    return entity
 
 
 class Slide(BaseModel):
@@ -165,13 +184,14 @@ class Claim(BaseModel):
 
     @field_validator("entities", mode="before")
     @classmethod
-    def discard_generic_entity_terms(cls, value):
-        """Keep entity metadata limited to named entities.
+    def normalize_entity_metadata(cls, value):
+        """Keep entity metadata limited to named, verifier-checkable surfaces.
 
-        Exact generic/common nouns are presentation vocabulary, not named
-        entities. Removing them does not relax factual verification of actual
-        proper nouns: anything outside this small denylist remains in the
-        entity list and must still be supported by cited evidence.
+        Exact generic/common nouns are dropped because they are presentation
+        vocabulary rather than named entities. A very small set of deterministic
+        Korean product transliterations is canonicalized to the vendor's source
+        surface; the verifier still has to find that surface in cited evidence.
+        Unsupported proper nouns are otherwise preserved and fail closed.
         """
         if value is None:
             return []
@@ -187,6 +207,7 @@ class Claim(BaseModel):
             entity = " ".join(item.split())
             if not entity or entity in _GENERIC_ENTITY_TERMS:
                 continue
+            entity = _canonicalize_known_entity_surface(entity)
             key = entity.casefold()
             if key in seen:
                 continue
