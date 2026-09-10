@@ -39,6 +39,30 @@ def test_generic_market_noun_is_not_treated_as_named_entity():
     )
 
 
+def test_generic_market_noun_is_ignored_even_if_schema_validator_was_bypassed():
+    claim = Claim.model_construct(
+        claim_id="c-bypass",
+        claim_text="관련 시장의 변화가 예상됩니다.",
+        display_title="",
+        editorial_role="detail",
+        claim_type="factual",
+        entities=["시장"],
+        numbers=[],
+        dates=[],
+        evidence_ids=["ev_1"],
+        source_url="",
+        verification_status="pending",
+        verification_reason="",
+    )
+
+    assert claim.entities == ["시장"]
+    DeterministicVerifier.verify_claims(
+        [claim],
+        _lineage("Apple announced a new feature for developers."),
+    )
+    assert claim.verification_status == "verified"
+
+
 def test_real_proper_noun_still_reaches_entity_gate():
     claim = Claim(
         claim_id="c1",
