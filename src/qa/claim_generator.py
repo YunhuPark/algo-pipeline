@@ -126,6 +126,9 @@ _CLAIM_SYSTEM_PROMPT = """
 21. normalized_value는 raw_text의 숫자를 단위까지 반영한 실제 값이어야 합니다. 예: "$7.2 billion"의 normalized_value는 7200000000입니다. raw_text를 "720 billion dollars"로 바꾸면 값이 720000000000이 되어 전혀 다른 주장입니다. 소수점을 제거하거나 10배·100배 키우지 마십시오.
 22. 숫자 오류 재시도에서는 새 숫자를 만들지 말고 문제가 된 Claim의 인용 Evidence에서 숫자 표현 하나를 문자 그대로 복사해 raw_text와 claim_text에 사용하십시오.
 23. 제품명·기능명·회사명 같은 고유명사는 번역하거나 한글 음역해서 entities에 넣지 마십시오. Evidence가 "Siri recap" 또는 "Live Rewind"라고 쓰면 entities에는 Evidence의 표면 문자열을 그대로 사용하고 "시리 리캡", "라이브 리와인드"처럼 바꾸지 마십시오. 가능하면 claim_text와 display_title에서도 같은 원문 표기를 유지하십시오.
+24. 출력 직전에 각 entities 항목을 자신이 선택한 evidence_ids의 원문과 대조하십시오. 해당 고유명사의 정확한 표면 문자열이 선택한 Evidence에 없으면 그 evidence_id를 사용하면 안 됩니다. 전체 Claim을 다른 근거 기반 사실로 교체하거나, 실제로 그 고유명사를 포함하면서 Claim 전체를 뒷받침하는 Evidence의 ID를 선택하십시오.
+25. 제품 세대·시리즈 번호·모델 번호를 주제나 연도에서 추론하지 마십시오. 예를 들어 Evidence 어디에도 "Apple Watch Series 12"가 문자 그대로 없으면 WWDC 2026이라는 주제만 보고 "Apple Watch Series 12"를 만들면 안 됩니다. Series 11, Series 12, Ultra 4 같은 버전명은 Evidence에 정확히 존재할 때만 사용할 수 있습니다.
+26. ENTITY_UNSUPPORTED 피드백으로 지적된 고유명사는 다음 응답에서 특별히 금지된 값으로 취급하십시오. 그 문자열이 실제로 선택한 evidence_ids 안에 문자 그대로 존재하고 Claim 전체를 뒷받침하는 경우에만 다시 사용할 수 있습니다. 그렇지 않으면 그 entity만 억지로 지우지 말고, 해당 고유명사에 의존하는 Claim 전체를 삭제하고 다른 Evidence-backed Claim으로 교체하십시오.
 """
 
 
