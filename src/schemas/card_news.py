@@ -6,6 +6,10 @@ from typing import Literal, Optional, List
 from pydantic import BaseModel, Field, model_validator
 
 
+MIN_CONTENT_BODY_CHARS = 45
+MAX_CONTENT_BODY_CHARS = 130
+
+
 class Slide(BaseModel):
     """카드뉴스 슬라이드 1장"""
     slide_number: int = Field(..., description="슬라이드 순번 (1부터 시작)")
@@ -13,7 +17,13 @@ class Slide(BaseModel):
         ..., description="슬라이드 역할: 표지/본문/마무리CTA"
     )
     title: str = Field(..., description="굵은 헤드라인 (최대 22자, 이모지 금지)")
-    body: str = Field(..., description="본문 설명 텍스트 (60자 이상 130자 이하, 줄바꿈 \\n 허용, 사람이 쓴 것처럼 자연스럽게)")
+    body: str = Field(
+        ...,
+        description=(
+            f"본문 설명 텍스트 ({MIN_CONTENT_BODY_CHARS}자 이상 "
+            f"{MAX_CONTENT_BODY_CHARS}자 이하, 줄바꿈 \\n 허용, 사람이 쓴 것처럼 자연스럽게)"
+        ),
+    )
     emoji: str = Field(default="", description="장식 이모지 1개 (없으면 빈 문자열)")
     accent: str = Field(default="", description="강조 수치·인용 (예: '73% 증가', 15자 이내, 없으면 빈 문자열)")
     visual_type: Literal[
