@@ -169,6 +169,36 @@ def _validate_roundup_theme_diversity(topic: str, selected: list[Claim]) -> None
         )
 
 
+def _validate_roundup_evidence_spread(topic: str, selected: list[Claim]) -> None:
+    """Require broad recap cards to originate from more than one evidence item.
+
+    Lexical diversity alone can be gamed accidentally: four cards can discuss
+    privacy, beta status, memory handling and availability while all expanding
+    the same narrow feature article. For an explicit roundup with four or more
+    content cards, at least two different evidence passages must be the primary
+    cited support across the selected cards. This strengthens editorial coverage
+    only; every claim still has to pass the existing factual/semantic gates.
+    """
+
+    if not is_roundup_topic(topic) or len(selected) < 4:
+        return
+
+    primary_evidence_ids = {
+        claim.evidence_ids[0]
+        for claim in selected
+        if claim.evidence_ids
+    }
+    if len(primary_evidence_ids) >= 2:
+        return
+
+    raise QualityGateError(
+        "EDITORIAL_COVERAGE_INSUFFICIENT",
+        "Roundup coverage is concentrated in one evidence passage. "
+        "Use at least two independently cited evidence items for the content cards "
+        "so the recap covers distinct announcements instead of four angles of one feature.",
+    )
+
+
 def validate_claim_editorial_quality(
     claims: list[Claim],
     *,
@@ -245,6 +275,7 @@ def validate_claim_editorial_quality(
         )
 
     _validate_roundup_theme_diversity(topic, selected)
+    _validate_roundup_evidence_spread(topic, selected)
 
     for left, right in _pairs(selected):
         left_title = _normalized_copy(left.display_title)
