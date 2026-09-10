@@ -59,6 +59,12 @@ _RETRYABLE_CLAIM_QUALITY_ERRORS = (
     _FACTUAL_CLAIM_QUALITY_ERRORS | _EDITORIAL_CLAIM_QUALITY_ERRORS
 )
 
+_NUMERIC_SUPPORT_ERRORS = {
+    "NUMBERS_MISSING",
+    "NUMBER_UNSUPPORTED",
+    "CLAIM_NUMBER_UNSUPPORTED",
+}
+
 
 def _failure_class(error_code: str) -> str:
     if error_code in _FACTUAL_CLAIM_QUALITY_ERRORS:
@@ -217,18 +223,22 @@ class ContentCreator:
                 )
                 roundup = is_roundup_topic(source_lineage.topic)
                 targeted_feedback = ""
-                if exc.error_code in {
-                    "NUMBERS_MISSING",
-                    "NUMBER_UNSUPPORTED",
-                    "CLAIM_NUMBER_UNSUPPORTED",
-                }:
-                    targeted_feedback = (
-                        " 숫자 오류를 고칠 때는 인용 근거의 숫자 표기를 그대로 복사하는 것을 우선하세요. "
-                        "한국어 억 단위로 환산한다면 1 billion=10억입니다. "
-                        "예: $48 billion=$48B=480억 달러이며 48억 달러가 아닙니다. "
-                        "같은 잘못된 숫자가 다시 나오면 그 숫자 Claim 전체를 버리고 "
-                        "숫자가 필요 없는 다른 Evidence-backed Claim으로 교체하세요."
-                    )
+                if exc.error_code in _NUMERIC_SUPPORT_ERRORS:
+                    if error_repairs >= MAX_CLAIM_QUALITY_REPAIRS_PER_ERROR:
+                        targeted_feedback = (
+                            " 숫자 검증이 반복 실패했습니다. 이번 재시도에서는 실패한 숫자를 "
+                            "다시 표현하거나 환산하지 마세요. 해당 숫자 Claim 전체를 버리고, "
+                            "숫자가 필요 없는 다른 Evidence-backed Claim으로 교체하세요. "
+                            "교체 Claim의 numbers 배열은 비워 두고 원문에 직접 적힌 비수치 사실만 사용하세요."
+                        )
+                    else:
+                        targeted_feedback = (
+                            " 숫자 오류를 고칠 때는 실패한 생성 숫자 문자열을 참고하거나 재사용하지 마세요. "
+                            "인용 Evidence를 처음부터 다시 읽고 숫자+통화+단위 표면형을 문자 그대로 복사하세요. "
+                            "한국어 억/조 단위로 새로 환산하지 말고 원문 표기를 유지하세요. "
+                            "안전하게 복사할 수 없으면 그 숫자 Claim 전체를 버리고 숫자가 필요 없는 "
+                            "다른 Evidence-backed Claim으로 교체하세요."
+                        )
                 elif exc.error_code == "DATE_UNSUPPORTED":
                     targeted_feedback = (
                         " 날짜 오류를 고칠 때는 인용 근거의 날짜를 그대로 사용하고, "
@@ -292,6 +302,11 @@ class ContentCreator:
                 if cited_evidence:
                     targeted_feedback += f"\n문제가 된 Claim의 인용 근거:\n{cited_evidence[:1600]}"
 
+                # Numeric support failures are prompt-contaminating if the rejected
+                # generated value is echoed back verbatim. Keep the error code but
+                # intentionally omit str(exc) for numeric retries; the cited Evidence
+                # remains available as the only source of allowed numeric wording.
+                error_detail = "" if exc.error_code in _NUMERIC_SUPPORT_ERRORS else f" - {exc}"
                 current_failure_feedback = (
                     "이전 Claim 세트가 사실 또는 편집 품질 검증에 실패했습니다. "
                     "문제가 된 주장을 삭제하거나 인용한 evidence 범위 안에서 정확히 다시 작성하세요. "
@@ -299,7 +314,7 @@ class ContentCreator:
                     "원문에 명시되지 않은 단체, 행사, 평가, 원인 또는 전망을 추가하지 마세요. "
                     "CTA Claim은 만들지 말고 모든 Claim에 정확한 evidence_ids를 넣으세요. "
                     "각 카드는 서로 다른 역할과 정보를 가져야 하며 제목은 말줄임표 없이 완결하세요. "
-                    f"검증 오류: {exc.error_code}{claim_label} - {exc}"
+                    f"검증 오류: {exc.error_code}{claim_label}{error_detail}"
                     f"{targeted_feedback}"
                 )
                 validation_feedback = "\n".join(
