@@ -279,8 +279,9 @@ def test_claim_generator_does_not_guess_unrelated_entity_from_transliteration(li
         '"claim_type": "factual", "editorial_role": "change", '
         '"entities": ["클로드 리캡"], "evidence_ids": ["ev_1"]}]}'
     )
-    claims = generator.generate_claims(entity_lineage)
-    assert claims[0].entities == ["클로드 리캡"]
+    with pytest.raises(ClaimGenerationError) as exc:
+        generator.generate_claims(entity_lineage)
+    assert exc.value.error_code == "CLAIM_ENTITY_UNSUPPORTED"
 
 
 def test_claim_generator_does_not_guess_ambiguous_single_token_entity(lineage):
@@ -295,5 +296,43 @@ def test_claim_generator_does_not_guess_ambiguous_single_token_entity(lineage):
         '"claim_type": "factual", "editorial_role": "change", '
         '"entities": ["라이브"], "evidence_ids": ["ev_1"]}]}'
     )
+    with pytest.raises(ClaimGenerationError) as exc:
+        generator.generate_claims(entity_lineage)
+    assert exc.value.error_code == "CLAIM_ENTITY_UNSUPPORTED"
+
+
+def test_claim_generator_retries_unsupported_product_generation(lineage):
+    entity_lineage = lineage.model_copy(update={
+        "topic": "애플 WWDC 2026 핵심 요약",
+        "source_title": "Apple Watch update",
+        "evidence_passages": [EvidencePassage(
+            evidence_id="ev_1", article_id="art_1", source_url="http://test.com",
+            text="Apple announced new Watch software features, including Live Rewind.",
+            content_hash="hash",
+        )],
+    })
+    responses = iter([
+        '{"claims": [{"claim_id": "c1", '
+        '"display_title": "Apple Watch Series 12 업데이트", '
+        '"claim_text": "Apple Watch Series 12에 새 기능이 추가된다.", '
+        '"claim_type": "factual", "editorial_role": "change", '
+        '"entities": ["Apple Watch Series 12"], "evidence_ids": ["ev_1"]}]}',
+        '{"claims": [{"claim_id": "c1", '
+        '"display_title": "Live Rewind 기능 추가", '
+        '"claim_text": "Apple announced new Watch software features, including Live Rewind.", '
+        '"claim_type": "factual", "editorial_role": "change", '
+        '"entities": ["Apple", "Live Rewind"], "evidence_ids": ["ev_1"]}]}',
+    ])
+    calls = []
+
+    def respond(prompt):
+        calls.append(str(prompt))
+        return AIMessage(content=next(responses))
+
+    generator = ClaimGenerator(llm=RunnableLambda(respond))
     claims = generator.generate_claims(entity_lineage)
-    assert claims[0].entities == ["라이브"]
+
+    assert len(calls) == 2
+    assert "Apple Watch Series 12" in calls[1]
+    assert "강제 재생성 - ENTITY SUPPORT ERROR" in calls[1]
+    assert claims[0].entities == ["Apple", "Live Rewind"]
