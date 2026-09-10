@@ -80,5 +80,6 @@ def test_content_creator_retries_claim_generator_number_support_error():
 
     assert len(generator.feedback) == 2
     assert "CLAIM_NUMBER_UNSUPPORTED" in generator.feedback[1]
-    assert "720 billion dollars" in generator.feedback[1]
+    assert "720 billion dollars" not in generator.feedback[1]
+    assert "숫자+통화+단위 표면형을 문자 그대로 복사" in generator.feedback[1]
     assert script.topic == lineage.topic
