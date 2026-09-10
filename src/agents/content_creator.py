@@ -24,7 +24,7 @@ from src.schemas.fact_check import FactCheckReport
 
 
 MAX_CLAIM_QUALITY_ATTEMPTS = 6
-MAX_CLAIM_QUALITY_REPAIRS_PER_CLASS = 3
+MAX_CLAIM_QUALITY_REPAIRS_PER_ERROR = 2
 
 _FACTUAL_CLAIM_QUALITY_ERRORS = {
     "EVIDENCE_MISSING",
@@ -117,15 +117,16 @@ class ContentCreator:
         if not source_lineage or not source_lineage.is_verified_ready:
             raise QualityGateError("LEGACY_LINEAGE_UNVERIFIED", "Cannot generate new content with unverified legacy source lineage.")
 
-        # 2~4. Claim 생성 + Quality Gate. 사실/편집 오류는 서로 독립된
-        # bounded repair budget을 사용한다. 품질 기준 자체는 낮추지 않는다.
+        # 2~4. Claim 생성 + Quality Gate. 서로 다른 오류가 같은 repair
+        # budget을 소진하지 않도록 error_code별로 bounded retry를 관리한다.
+        # 검증 기준 자체는 낮추지 않는다.
         requested_cards = num_cards or 6
         target_content_slides = max(1, requested_cards - 2)
         validation_feedback = "\n".join(
             item.strip() for item in (feedback, disputed_notes) if item.strip()
         )
         script: CardNewsScript | None = None
-        repair_counts = {"factual": 0, "editorial": 0}
+        repair_counts: dict[str, int] = {}
         for attempt in range(1, MAX_CLAIM_QUALITY_ATTEMPTS + 1):
             if validation_feedback:
                 claims = self.claim_generator.generate_claims(
@@ -174,21 +175,21 @@ class ContentCreator:
                 break
             except QualityGateError as exc:
                 failure_class = _failure_class(exc.error_code)
+                error_repairs = repair_counts.get(exc.error_code, 0)
                 if (
                     attempt >= MAX_CLAIM_QUALITY_ATTEMPTS
                     or exc.error_code not in _RETRYABLE_CLAIM_QUALITY_ERRORS
-                    or repair_counts[failure_class]
-                    >= MAX_CLAIM_QUALITY_REPAIRS_PER_CLASS
+                    or error_repairs >= MAX_CLAIM_QUALITY_REPAIRS_PER_ERROR
                 ):
                     raise
-                repair_counts[failure_class] += 1
+                error_repairs += 1
+                repair_counts[exc.error_code] = error_repairs
 
                 claim_label = f" (claim_id={exc.claim_id})" if exc.claim_id else ""
                 print(
                     "[QualityGate] Claim 또는 편집 품질 검증에 실패하여 "
-                    f"자동 재생성합니다 ({failure_class} "
-                    f"{repair_counts[failure_class]}/"
-                    f"{MAX_CLAIM_QUALITY_REPAIRS_PER_CLASS}, "
+                    f"자동 재생성합니다 ({failure_class} {error_repairs}/"
+                    f"{MAX_CLAIM_QUALITY_REPAIRS_PER_ERROR}, "
                     f"{exc.error_code}{claim_label})."
                 )
                 failed_claim = next(
