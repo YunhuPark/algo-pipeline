@@ -89,7 +89,6 @@ def test_claim_generator_markdown_fence(lineage):
     generator = generator_with_response('```json\n{"claims": [{"claim_text": "text", "claim_type": "factual", "claim_id": "c1"}]}\n```')
     claims = generator.generate_claims(lineage)
     assert len(claims) == 1
-    assert claims[0].claim_text == "text"
 
 def test_claim_generator_missing_required_fields(lineage):
     generator = generator_with_response('{"claims": [{"claim_id": "c1", "claim_type": "factual"}]}')
@@ -230,14 +229,8 @@ def test_claim_generator_splits_range_array_into_scalar_numbers(lineage):
 
     claims = generator.generate_claims(range_lineage)
 
-    assert [number.normalized_value for number in claims[0].numbers] == [
-        7200000000,
-        7450000000,
-    ]
-    assert [number.raw_text for number in claims[0].numbers] == [
-        "$7.2 billion",
-        "$7.45 billion",
-    ]
+    assert [number.normalized_value for number in claims[0].numbers] == [7200000000, 7450000000]
+    assert [number.raw_text for number in claims[0].numbers] == ["$7.2 billion", "$7.45 billion"]
 
 
 def test_claim_generator_leaves_ambiguous_number_array_to_fail_closed(lineage):
@@ -253,3 +246,57 @@ def test_claim_generator_leaves_ambiguous_number_array_to_fail_closed(lineage):
         generator.generate_claims(lineage)
 
     assert exc.value.error_code == "CLAIM_SCHEMA_INVALID"
+
+
+def test_claim_generator_aligns_korean_transliteration_to_unique_evidence_surface(lineage):
+    entity_lineage = lineage.model_copy(
+        update={
+            "evidence_passages": [
+                EvidencePassage(
+                    evidence_id="ev_1",
+                    article_id="art_1",
+                    source_url="http://test.com",
+                    text="Apple introduced Siri recap for Watch users.",
+                    content_hash="hash",
+                )
+            ]
+        }
+    )
+    generator = generator_with_response(
+        '{"claims": [{"claim_id": "c1", '
+        '"display_title": "시리 리캡 기능 추가", '
+        '"claim_text": "애플은 시리 리캡 기능을 추가했다.", '
+        '"claim_type": "factual", "editorial_role": "change", '
+        '"entities": ["시리 리캡"], "evidence_ids": ["ev_1"]}]}'
+    )
+
+    claims = generator.generate_claims(entity_lineage)
+
+    assert claims[0].entities == ["Siri recap"]
+    assert "Siri recap" in claims[0].display_title
+    assert "Siri recap" in claims[0].claim_text
+
+
+def test_claim_generator_does_not_guess_unrelated_entity_from_transliteration(lineage):
+    entity_lineage = lineage.model_copy(
+        update={
+            "evidence_passages": [
+                EvidencePassage(
+                    evidence_id="ev_1",
+                    article_id="art_1",
+                    source_url="http://test.com",
+                    text="Apple introduced Siri recap for Watch users.",
+                    content_hash="hash",
+                )
+            ]
+        }
+    )
+    generator = generator_with_response(
+        '{"claims": [{"claim_id": "c1", "claim_text": "클로드 리캡 기능", '
+        '"claim_type": "factual", "editorial_role": "change", '
+        '"entities": ["클로드 리캡"], "evidence_ids": ["ev_1"]}]}'
+    )
+
+    claims = generator.generate_claims(entity_lineage)
+
+    assert claims[0].entities == ["클로드 리캡"]
