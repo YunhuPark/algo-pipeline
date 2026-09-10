@@ -131,13 +131,13 @@ _CLAIM_SYSTEM_PROMPT = """
 18. numbers의 normalized_value는 반드시 단일 JSON 숫자 또는 숫자로만 된 문자열이어야 합니다. 배열, 객체, "7.2 billion"처럼 단위가 섞인 문자열을 넣지 마십시오.
 19. 범위에 두 끝점이 모두 필요하면 하나의 normalized_value에 배열을 넣지 말고 numbers에 두 객체로 분리하십시오. 예: Evidence가 "$7.2 billion to $7.45 billion"이면 numbers는 [{{"raw_text":"$7.2 billion","normalized_value":7200000000,"unit":"dollars"}}, {{"raw_text":"$7.45 billion","normalized_value":7450000000,"unit":"dollars"}}]처럼 각 끝점을 스칼라 값으로 기록하십시오.
 20. numbers.raw_text에는 실제 claim_text에 사용한 수치 표현과 최대한 동일한 문자열을 넣으십시오. 각 숫자는 반드시 인용한 Evidence에서 직접 확인되어야 합니다.
-21. normalized_value는 raw_text의 숫자를 단위까지 반영한 실제 값이어야 합니다. 예: "$7.2 billion"의 normalized_value는 7200000000입니다. raw_text를 "720 billion dollars"로 바꾸면 값이 720000000000이 되어 전혀 다른 주장입니다. 소수점을 제거하거나 10배·100배 키우지 마십시오.
-22. 숫자 오류 재시도에서는 새 숫자를 만들지 말고 문제가 된 Claim의 인용 Evidence에서 숫자 표현 하나를 문자 그대로 복사해 raw_text와 claim_text에 사용하십시오.
+21. normalized_value는 numbers.raw_text가 Evidence에서 직접 복사한 숫자·통화·단위 표면형을 파싱한 실제 값과 정확히 같아야 합니다. 소수점 위치나 billion/million/억/조 scale을 이동해 새로운 수치를 만들지 마십시오.
+22. 숫자 오류 재시도에서는 실패한 생성 문자열 자체를 참고하지 말고, 문제가 된 Claim의 인용 Evidence에서 숫자 표현 하나를 새로 직접 복사해 numbers.raw_text와 claim_text에 사용하십시오.
 23. 제품명·기능명·회사명 같은 고유명사는 번역하거나 한글 음역해서 entities에 넣지 마십시오. Evidence가 "Siri recap" 또는 "Live Rewind"라고 쓰면 entities에는 Evidence의 표면 문자열을 그대로 사용하고 "시리 리캡", "라이브 리와인드"처럼 바꾸지 마십시오. 가능하면 claim_text와 display_title에서도 같은 원문 표기를 유지하십시오.
 24. 출력 직전에 각 entities 항목을 자신이 선택한 evidence_ids의 원문과 대조하십시오. 해당 고유명사의 정확한 표면 문자열이 선택한 Evidence에 없으면 그 evidence_id를 사용하면 안 됩니다. 전체 Claim을 다른 근거 기반 사실로 교체하거나, 실제로 그 고유명사를 포함하면서 Claim 전체를 뒷받침하는 Evidence의 ID를 선택하십시오.
 25. 제품 세대·시리즈 번호·모델 번호를 주제나 연도에서 추론하지 마십시오. 예를 들어 Evidence 어디에도 "Apple Watch Series 12"가 문자 그대로 없으면 WWDC 2026이라는 주제만 보고 "Apple Watch Series 12"를 만들면 안 됩니다. Series 11, Series 12, Ultra 4 같은 버전명은 Evidence에 정확히 존재할 때만 사용할 수 있습니다.
 26. ENTITY_UNSUPPORTED 피드백으로 지적된 고유명사는 다음 응답에서 특별히 금지된 값으로 취급하십시오. 그 문자열이 실제로 선택한 evidence_ids 안에 문자 그대로 존재하고 Claim 전체를 뒷받침하는 경우에만 다시 사용할 수 있습니다. 그렇지 않으면 그 entity만 억지로 지우지 말고, 해당 고유명사에 의존하는 Claim 전체를 삭제하고 다른 Evidence-backed Claim으로 교체하십시오.
-27. 출력 직전에 각 numbers 항목도 자신이 선택한 evidence_ids의 원문과 대조하십시오. Evidence가 "$7.2 billion"이라고 쓰면 "720 billion dollars"처럼 소수점이나 scale을 바꾸지 마십시오. 숫자·통화·단위 표면형을 가능한 한 원문에서 그대로 복사하고, normalized_value만 그 표면형의 실제 값으로 계산하십시오.
+27. 출력 직전에 각 numbers 항목도 자신이 선택한 evidence_ids의 원문과 대조하십시오. 숫자·통화·단위 표면형을 가능한 한 원문에서 그대로 복사하고, normalized_value만 그 표면형의 실제 값으로 계산하십시오. 원문과 다른 decimal/scale 표기는 만들지 마십시오.
 """
 
 
@@ -835,15 +835,16 @@ class ClaimGenerator:
                     )
                     schema_feedback = (
                         "[강제 재생성 - NUMBER SUPPORT ERROR]\n"
-                        f"이전 응답 실패: {exc}\n"
-                        "위 오류에 나온 숫자 표현을 다시 사용하지 마십시오. "
+                        "이전 생성에는 인용 Evidence가 직접 뒷받침하지 않는 숫자 표현이 있었습니다. "
+                        "실패한 생성 숫자 문자열은 재시도 프롬프트에 다시 제시하지 않습니다. "
+                        "그 문자열을 기억하거나 재사용하지 말고 Evidence를 처음부터 다시 읽으십시오. "
                         "소수점 이동, billion/million scale 변경, 한국어 억/조 단위 환산, "
                         "통화 단위 보충을 새로 하지 마십시오. 해당 Claim에 필요한 숫자는 "
                         "선택한 evidence_ids의 원문에서 숫자+통화+단위 표현을 문자 그대로 "
                         "복사해 claim_text와 numbers.raw_text에 동일하게 사용하십시오. "
                         "normalized_value는 복사한 원문 숫자의 실제 값으로 계산하십시오. "
-                        "안전하게 표현할 수 없으면 그 숫자 Claim 전체를 삭제하고 다른 "
-                        "Evidence-backed Claim으로 교체하십시오."
+                        "안전하게 표현할 수 없으면 그 숫자 Claim 전체를 삭제하고 숫자가 없는 "
+                        "다른 Evidence-backed Claim으로 교체하십시오."
                     )
                     continue
 
