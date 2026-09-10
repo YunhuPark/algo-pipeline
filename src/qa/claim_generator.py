@@ -62,6 +62,9 @@ _CLAIM_SYSTEM_PROMPT = """
 12. 일반적인 단일 사건 주제라면 모든 Claim이 카드뉴스 주제와 고정 원문 제목이 가리키는 동일한 사건을 설명해야 합니다. 요약·총정리·roundup·recap처럼 여러 핵심 포인트를 요청한 주제라면 고정 원문 한 건으로 범위를 좁히지 말고 제공된 Evidence 전체에서 서로 다른 발표·기능·변화·제한·영향을 선택하십시오. 요약형에서는 4개 카드 중 같은 세부 기능이나 같은 좁은 키워드에 3개 이상 몰리지 않게 하십시오.
 13. 원문이 "hundreds of millions"처럼 범위형 수치를 사용하면 임의의 정확한 금액으로 바꾸지 마십시오. claim_text와 numbers.raw_text에는 "수억 달러"처럼 같은 범위의 자연스러운 한국어 표현을 사용하고 근거의 정밀도를 그대로 유지하십시오.
 14. 요약형 주제에서 서로 다른 출처의 Evidence가 2개 이상 제공되고 각 출처가 주제의 서로 다른 핵심 포인트를 직접 뒷받침한다면 최소 2개 출처를 활용하십시오. 단, 출처 다양성을 맞추기 위해 약한 근거나 관련 없는 사실을 억지로 사용하지 마십시오.
+15. 범위·비교 숫자는 특히 보수적으로 다루십시오. Evidence가 "$7.2 billion to $7.45 billion"처럼 범위를 쓰면 claim_text와 numbers.raw_text도 가능한 한 같은 숫자·통화·단위 표기를 유지하십시오. 검증기가 명시적으로 지원하는 것이 확실하지 않다면 "720억에서 745억 달러"처럼 두 끝점을 동시에 환산하지 마십시오.
+16. 범위 숫자를 한국어로 자유 변환하지 마십시오. 안전한 선택은 (a) 원문 범위 표기를 그대로 유지하거나, (b) 해당 카드에 꼭 필요한 단일 숫자 한 개만 원문 표기 그대로 사용하는 것입니다. 범위의 두 끝점을 새 단위로 바꿔 조합하거나 추정 단위를 보충하지 마십시오.
+17. numbers.raw_text에는 실제 claim_text에 사용한 수치 표현과 최대한 동일한 문자열을 넣으십시오. 하나의 raw_text 안에 여러 숫자를 넣을 때는 두 끝점이 모두 같은 Evidence에서 직접 확인되는 단순 범위일 때만 허용합니다.
 """
 
 
@@ -167,9 +170,6 @@ class ClaimGenerator:
                     f"Claim at index {index} must be an object.",
                 )
 
-            # CTA copy is a presentation concern. The assembler supplies a
-            # deterministic source-safe CTA, so an LLM-generated CTA must not
-            # consume factual verification or retry budget.
             if raw_claim.get("claim_type") == "cta":
                 continue
 
