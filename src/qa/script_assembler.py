@@ -15,6 +15,11 @@ _ANGLE_HOOKS = {
     "사회증거": "지금 주목받는 이유를 확인하세요",
 }
 
+_GENERIC_TOPIC_SUFFIX_RE = re.compile(
+    r"(?:\s*[-:|·]\s*)?(?:핵심\s*)?(?:요약|정리|총정리|한눈에\s*보기)\s*$",
+    re.IGNORECASE,
+)
+
 
 def _shorten(text: str, limit: int) -> str:
     clean = re.sub(r"\s+", " ", text).strip().rstrip(".!?")
@@ -41,6 +46,48 @@ def _fit_cover_title(text: str, limit: int = 22) -> str:
             break
         fitted.append(word)
     return " ".join(fitted) if fitted else clean[:limit].rstrip()
+
+
+def _topic_subject(topic: str) -> str:
+    """Remove generic packaging words while keeping the factual topic intact."""
+
+    clean = re.sub(r"\s+", " ", topic or "").strip().rstrip(".!?")
+    subject = _GENERIC_TOPIC_SUFFIX_RE.sub("", clean).strip(" -:|·")
+    return subject or clean
+
+
+def _cover_title(topic: str, limit: int = 22) -> str:
+    """Create a curiosity-led cover without inventing a factual assertion."""
+
+    subject = _topic_subject(topic)
+    candidates = (
+        f"{subject} 뭐가 핵심?",
+        f"{subject} 왜 주목할까?",
+        f"{subject} 핵심만 짚기",
+    )
+    for candidate in candidates:
+        if len(candidate) <= limit:
+            return candidate
+
+    # Preserve a complete subject instead of cutting through a word. Long
+    # topics can still rely on the separate hook line for editorial energy.
+    return _fit_cover_title(subject, limit)
+
+
+def _default_hook(topic: str) -> str:
+    subject = _topic_subject(topic)
+    compact_subject = _shorten(subject, 12)
+    return f"{compact_subject}, 지금 볼 포인트만 골랐어요"
+
+
+def _contextual_cta(topic: str) -> tuple[str, str]:
+    subject = _topic_subject(topic)
+    compact_subject = _shorten(subject, 18)
+    return (
+        "가장 눈에 띈 포인트는?",
+        f"{compact_subject}에서 가장 눈에 들어온 포인트는 뭐였나요? "
+        "저장해두고 필요할 때 핵심만 다시 확인해보세요.",
+    )
 
 
 def _claim_headline(claim: Claim) -> str:
@@ -125,6 +172,7 @@ def _hashtags(topic: str, claims: List[Claim]) -> list[str]:
                 tags.append(tag)
     return tags[:10]
 
+
 class ScriptAssembler:
     """
     Assembles a CardNewsScript strictly from verified claims without invoking the LLM to rewrite them,
@@ -147,15 +195,14 @@ class ScriptAssembler:
 
         slides = []
 
-        # 1. Cover slide
+        # 1. Cover slide: frame the factual topic as a safe question instead of
+        # copying generic input such as "... 핵심 요약" verbatim.
+        cover_hook = _ANGLE_HOOKS.get(editorial_angle, _default_hook(topic))
         slides.append(Slide(
             slide_number=1,
             slide_type="cover",
-            title=_fit_cover_title(topic, 22),
-            body=_ANGLE_HOOKS.get(
-                editorial_angle,
-                "원문 근거로 핵심과 의미를 정리했습니다.",
-            ),
+            title=_cover_title(topic, 22),
+            body=cover_hook,
             emoji="📰"
         ))
 
@@ -187,14 +234,17 @@ class ScriptAssembler:
                 visual_labels=visual_labels,
             ))
 
-        # 3. CTA slide
+        # 3. CTA slide. An evidence-backed CTA is preserved when supplied; the
+        # normal Claim pipeline does not generate CTA claims, so the fallback is
+        # contextual engagement copy that makes no new factual assertion.
         cta_claims = [c for c in verified_claims if c.claim_type == "cta"]
-        cta_body = cta_claims[0].claim_text if cta_claims else "더 자세한 내용은 원문을 참고해 주세요."
+        contextual_title, contextual_body = _contextual_cta(topic)
+        cta_body = cta_claims[0].claim_text if cta_claims else contextual_body
 
         slides.append(Slide(
             slide_number=len(slides) + 1,
             slide_type="cta",
-            title="어떤 변화가 중요할까요?",
+            title=contextual_title,
             body=cta_body,
             emoji="👇"
         ))
@@ -202,10 +252,7 @@ class ScriptAssembler:
         # Ensure exact requirements for CardNewsScript
         return CardNewsScript(
             topic=topic,
-            hook=_ANGLE_HOOKS.get(
-                editorial_angle,
-                f"{_shorten(topic, 18)}, 핵심만 확인하세요",
-            ),
+            hook=cover_hook,
             slides=slides,
             hashtags=_hashtags(topic, verified_claims),
         )
