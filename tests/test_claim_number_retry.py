@@ -52,6 +52,7 @@ def test_claim_generator_retries_unsupported_numeric_scale():
 
     assert len(calls) == 2
     assert "NUMBER SUPPORT ERROR" in calls[1]
-    assert "720 billion dollars" in calls[1]
+    assert "720 billion dollars" not in calls[1]
+    assert "$7.2 billion" in calls[1]
     assert claims[0].numbers[0].raw_text == "$7.2 billion"
     assert int(claims[0].numbers[0].normalized_value) == 7200000000
