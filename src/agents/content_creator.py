@@ -32,8 +32,10 @@ _FACTUAL_CLAIM_QUALITY_ERRORS = {
     "EVIDENCE_ID_UNKNOWN",
     "SOURCE_URL_MISMATCH",
     "ENTITY_UNSUPPORTED",
+    "CLAIM_ENTITY_UNSUPPORTED",
     "NUMBERS_MISSING",
     "NUMBER_UNSUPPORTED",
+    "CLAIM_NUMBER_UNSUPPORTED",
     "DATE_UNSUPPORTED",
     "CTA_COUNT_INVALID",
     "CTA_ORDER_INVALID",
@@ -128,27 +130,32 @@ class ContentCreator:
         )
         script: CardNewsScript | None = None
         repair_counts: dict[str, int] = {}
+        claims = []
         for attempt in range(1, MAX_CLAIM_QUALITY_ATTEMPTS + 1):
-            if validation_feedback:
-                claims = self.claim_generator.generate_claims(
-                    source_lineage,
-                    validation_feedback=validation_feedback,
-                )
-            else:
-                # Keep the first call compatible with injected legacy test doubles.
-                claims = self.claim_generator.generate_claims(source_lineage)
-
-            claims, numeric_repairs = repair_source_backed_numeric_localizations(
-                claims,
-                source_lineage,
-            )
-            for claim_id, old_text, new_text in numeric_repairs:
-                print(
-                    "[QualityGate] 인용 근거에 따라 숫자 단위 환산을 교정했습니다 "
-                    f"(claim_id={claim_id}, '{old_text}' -> '{new_text}')."
-                )
-
+            # Generation-bound support errors are QualityGateError subclasses too.
+            # Keep generation inside the same bounded retry loop so an exhausted
+            # ClaimGenerator-local retry does not bypass ContentCreator repair.
+            claims = []
             try:
+                if validation_feedback:
+                    claims = self.claim_generator.generate_claims(
+                        source_lineage,
+                        validation_feedback=validation_feedback,
+                    )
+                else:
+                    # Keep the first call compatible with injected legacy test doubles.
+                    claims = self.claim_generator.generate_claims(source_lineage)
+
+                claims, numeric_repairs = repair_source_backed_numeric_localizations(
+                    claims,
+                    source_lineage,
+                )
+                for claim_id, old_text, new_text in numeric_repairs:
+                    print(
+                        "[QualityGate] 인용 근거에 따라 숫자 단위 환산을 교정했습니다 "
+                        f"(claim_id={claim_id}, '{old_text}' -> '{new_text}')."
+                    )
+
                 DeterministicVerifier.verify_claims(claims, source_lineage)
                 run_semantic_critic(claims, source_lineage, llm=self.semantic_llm)
                 validate_claim_editorial_quality(
@@ -210,21 +217,28 @@ class ContentCreator:
                 )
                 roundup = is_roundup_topic(source_lineage.topic)
                 targeted_feedback = ""
-                if exc.error_code in {"NUMBERS_MISSING", "NUMBER_UNSUPPORTED"}:
+                if exc.error_code in {
+                    "NUMBERS_MISSING",
+                    "NUMBER_UNSUPPORTED",
+                    "CLAIM_NUMBER_UNSUPPORTED",
+                }:
                     targeted_feedback = (
                         " 숫자 오류를 고칠 때는 인용 근거의 숫자 표기를 그대로 복사하는 것을 우선하세요. "
                         "한국어 억 단위로 환산한다면 1 billion=10억입니다. "
-                        "예: $48 billion=$48B=480억 달러이며 48억 달러가 아닙니다."
+                        "예: $48 billion=$48B=480억 달러이며 48억 달러가 아닙니다. "
+                        "같은 잘못된 숫자가 다시 나오면 그 숫자 Claim 전체를 버리고 "
+                        "숫자가 필요 없는 다른 Evidence-backed Claim으로 교체하세요."
                     )
                 elif exc.error_code == "DATE_UNSUPPORTED":
                     targeted_feedback = (
                         " 날짜 오류를 고칠 때는 인용 근거의 날짜를 그대로 사용하고, "
                         "원문에 없는 연도·월·일을 보충하지 마세요."
                     )
-                elif exc.error_code == "ENTITY_UNSUPPORTED":
+                elif exc.error_code in {"ENTITY_UNSUPPORTED", "CLAIM_ENTITY_UNSUPPORTED"}:
                     targeted_feedback = (
                         " entities 배열은 해당 Claim이 인용한 Evidence에 실제로 등장하는 "
-                        "고유명사의 원문 철자만 사용하세요. 번역명이나 추정한 조직명은 제거하세요."
+                        "고유명사의 원문 철자만 사용하세요. 번역명이나 추정한 조직명은 제거하세요. "
+                        "같은 unsupported entity가 반복되면 해당 Claim 전체를 다른 근거 기반 사실로 교체하세요."
                     )
                 elif exc.error_code in {
                     "CLAIM_CONTRADICTED",
