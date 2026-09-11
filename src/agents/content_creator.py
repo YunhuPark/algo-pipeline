@@ -75,6 +75,49 @@ _PROMPT_CONTAMINATING_SUPPORT_ERRORS = (
 )
 
 
+def _reclassify_provider_failure(exc: QualityGateError) -> bool:
+    """Reclassify upstream LLM transport/quota failures without retrying them.
+
+    ClaimGenerator intentionally sanitizes provider exceptions into
+    CLAIM_GENERATION_FAILED.  At the orchestration boundary we can still use the
+    safe exception type name embedded in that message to keep provider failures
+    separate from factual/editorial Quality Gate failures.  This preserves the
+    existing fail-closed behavior while avoiding misleading QUALITY_GATE labels.
+    """
+
+    if exc.error_code != "CLAIM_GENERATION_FAILED":
+        return False
+
+    detail = str(exc).casefold()
+    if any(marker in detail for marker in ("ratelimit", "rate limit", "status 429", " 429")):
+        exc.error_code = "LLM_RATE_LIMITED"
+        exc.failure_stage = "LLM_PROVIDER"
+        exc.args = (
+            "OpenAI API 요청 한도 또는 크레딧/지출 한도에 도달했습니다. "
+            "즉시 반복 호출하지 말고 한도 재설정 후 다시 시도하거나 API 프로젝트의 "
+            "Usage/Billing/Limits를 확인하세요.",
+        )
+        return True
+
+    if "authentication" in detail or "permission" in detail:
+        exc.error_code = "LLM_AUTH_FAILED"
+        exc.failure_stage = "LLM_PROVIDER"
+        exc.args = (
+            "OpenAI API 인증 또는 프로젝트 권한 오류가 발생했습니다. API 키와 프로젝트 권한을 확인하세요.",
+        )
+        return True
+
+    if any(marker in detail for marker in ("apiconnection", "api connection", "apitimeout", "timeout")):
+        exc.error_code = "LLM_PROVIDER_UNAVAILABLE"
+        exc.failure_stage = "LLM_PROVIDER"
+        exc.args = (
+            "OpenAI API 연결 또는 시간 초과 오류가 발생했습니다. 네트워크와 provider 상태를 확인한 뒤 다시 시도하세요.",
+        )
+        return True
+
+    return False
+
+
 def _failure_class(error_code: str) -> str:
     if error_code in _FACTUAL_CLAIM_QUALITY_ERRORS:
         return "factual"
@@ -197,6 +240,9 @@ class ContentCreator:
                 print(f"[EditorialGate] {editorial_result.summary()}")
                 break
             except QualityGateError as exc:
+                if _reclassify_provider_failure(exc):
+                    raise
+
                 failure_class = _failure_class(exc.error_code)
                 error_repairs = repair_counts.get(exc.error_code, 0)
                 if (
