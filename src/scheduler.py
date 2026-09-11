@@ -7,7 +7,7 @@
   매일 09:00  — 큐에서 꺼내거나 뉴스 수집 → 카드뉴스 → 업로드
   30분마다    — 새 댓글 AI 자동 답글
   1시간마다   — 새 DM AI 자동 답장
-  매주 월요일 — 성과 분석 + 경쟁 계정 분석
+  매주 월요일 — 품질 회고 초안 + 성과 분석
 
 환경 변수 (전부 선택):
   AGENT_POST_HOUR   = 9      # 업로드 시간 (기본 9)
@@ -17,7 +17,9 @@
   AGENT_THREADS     = false  # Threads 동시 발행
   AGENT_BLOG        = false  # 블로그 동시 발행
   AGENT_DRY_RUN     = true   # 기본값은 시뮬레이션 모드
-  AGENT_TEMPLATE    = auto   # 디자인 템플릿
+  AGENT_TEMPLATE    = brand  # 고정 브랜드 템플릿(실험은 승인 후에만)
+  WEEKLY_INSIGHTS_HOUR = 8   # 월요일 Instagram 성과 동기화/분석
+  WEEKLY_REVIEW_HOUR = 9     # 동기화된 성과를 반영한 품질 회고
 """
 from __future__ import annotations
 
@@ -47,7 +49,9 @@ AUTO_UPLOAD     = _AUTOMATION_MODE.live_publish
 AGENT_THREADS   = os.getenv("AGENT_THREADS",     "false").lower() == "true"
 AGENT_BLOG      = os.getenv("AGENT_BLOG",        "false").lower() == "true"
 DRY_RUN         = _AUTOMATION_MODE.dry_run
-AGENT_TEMPLATE  = os.getenv("AGENT_TEMPLATE",    "auto")
+AGENT_TEMPLATE  = os.getenv("AGENT_TEMPLATE",    "brand")
+WEEKLY_INSIGHTS_HOUR = int(os.getenv("WEEKLY_INSIGHTS_HOUR", "8"))
+WEEKLY_REVIEW_HOUR = int(os.getenv("WEEKLY_REVIEW_HOUR", "9"))
 
 
 def _log(msg: str) -> None:
@@ -72,7 +76,10 @@ def job_daily_cardnews() -> None:
         if status["pending"] > 0 and AUTO_UPLOAD:
             # 큐에서 발행
             _log("  큐에서 다음 항목 발행...")
-            res = publish_next(publish_to_ig=True)
+            res = publish_next(
+                publish_to_ig=True,
+                require_human_approval=False,
+            )
             if not res:
                 raise Exception("큐 발행 실패")
         elif status["pending"] == 0:
@@ -81,7 +88,10 @@ def job_daily_cardnews() -> None:
             if not ids:
                 raise Exception("검증된 뉴스가 없어 Queue V2 등록 실패")
             if AUTO_UPLOAD:
-                res = publish_next(publish_to_ig=True)
+                res = publish_next(
+                    publish_to_ig=True,
+                    require_human_approval=False,
+                )
                 if not res:
                     raise Exception("Queue V2 발행 실패")
 
@@ -141,7 +151,8 @@ def job_weekly_analysis() -> None:
         _log("  Instagram Insights 동기화...")
         sync_all_insights()
         report = analyze_performance(load_persona())
-        _log(f"  성과 분석 완료. 베스트 앵글: {report.best_angle}")
+        best_angle = report.best_angles[0] if report.best_angles else "데이터 부족"
+        _log(f"  성과 분석 완료. 베스트 앵글: {best_angle}")
         plot_performance("data/performance_chart.png")
 
         # 경쟁 계정 분석
@@ -153,7 +164,7 @@ def job_weekly_analysis() -> None:
         # 텔레그램으로 주간 리포트 전송
         summary = (
             f"📊 주간 알고 리포트\n"
-            f"베스트 앵글: {report.best_angle}\n"
+            f"베스트 앵글: {best_angle}\n"
             f"경쟁사 트렌드: {', '.join(comp_report.top_topics[:3])}\n"
             f"차별화 기회: {', '.join(comp_report.gap_opportunities[:2])}"
         )
@@ -164,6 +175,28 @@ def job_weekly_analysis() -> None:
             pass
     except Exception:
         _log("[오류] 주간 분석 실패:")
+        traceback.print_exc()
+
+
+def job_weekly_quality_review() -> None:
+    """매주: 운영 데이터로 회고 보고서와 실험 *초안*만 생성."""
+    _log("[알고] 주간 카드뉴스 품질 회고 시작...")
+    try:
+        from src.analytics.weekly_review import run_weekly_quality_review
+
+        report = run_weekly_quality_review()
+        metrics = report["metrics"]
+        _log(
+            "  품질 회고 완료: "
+            f"{report['status']} | 실운영 {metrics['real_run_count']}건 | "
+            f"편집 피드백 {metrics['editorial_feedback_count']}건"
+        )
+        if report["experiment_proposal"]:
+            _log("  개선 실험 1건을 DRAFT로 생성했습니다. 사람 승인 전에는 적용되지 않습니다.")
+        else:
+            _log("  표본 부족: INSUFFICIENT_DATA (실험 제안 없음)")
+    except Exception:
+        _log("[오류] 주간 카드뉴스 품질 회고 실패:")
         traceback.print_exc()
 
 
@@ -191,14 +224,33 @@ def start() -> None:
     )
     scheduler.add_job(
         job_weekly_analysis,
-        CronTrigger(day_of_week="mon", hour=8, minute=0, timezone="Asia/Seoul"),
+        CronTrigger(
+            day_of_week="mon",
+            hour=WEEKLY_INSIGHTS_HOUR,
+            minute=0,
+            timezone="Asia/Seoul",
+        ),
         id="weekly_analysis", max_instances=1,
+    )
+    scheduler.add_job(
+        job_weekly_quality_review,
+        CronTrigger(
+            day_of_week="mon",
+            hour=WEEKLY_REVIEW_HOUR,
+            minute=0,
+            timezone="Asia/Seoul",
+        ),
+        id="weekly_quality_review", max_instances=1,
     )
 
     mode = "[DRY RUN] " if DRY_RUN else ""
     _log(f"{mode}알고 Agent 시작")
     _log(f"  카드뉴스: 매일 {POST_HOUR:02d}:00 | 댓글: {COMMENT_MIN}분 | DM: {DM_MIN}분")
     _log(f"  Threads: {AGENT_THREADS} | 블로그: {AGENT_BLOG} | 업로드: {AUTO_UPLOAD}")
+    _log(
+        f"  주간 성과 동기화: 월요일 {WEEKLY_INSIGHTS_HOUR:02d}:00 | "
+        f"품질 회고: {WEEKLY_REVIEW_HOUR:02d}:00 (초안 전용)"
+    )
     _log("  종료: Ctrl+C")
 
     try:
@@ -210,6 +262,8 @@ def start() -> None:
 if __name__ == "__main__":
     if "--now" in sys.argv:
         job_daily_cardnews()
+    elif "--quality-review" in sys.argv:
+        job_weekly_quality_review()
     elif "--analyze" in sys.argv:
         job_weekly_analysis()
     else:

@@ -11,7 +11,7 @@ import json
 import sqlite3
 import uuid
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 # Tests and embedding applications may inject an explicit path without
@@ -253,17 +253,49 @@ def init_tracking_db(db_path: Path | None = None) -> None:
         );
         """)
 
+        # Existing installations may have the early P1 table.  Keep this
+        # migration additive so weekly review can safely read the same DB.
+        run_columns = {
+            row[1] for row in conn.execute("PRAGMA table_info(content_runs)")
+        }
+        additive_columns = {
+            "origin": "TEXT DEFAULT 'real_pipeline'",
+            "strategy_id": "TEXT DEFAULT ''",
+            "grounded_claim_rate": "REAL DEFAULT 0.0",
+            "step_failure_rate": "REAL DEFAULT 0.0",
+            "retry_count": "INTEGER DEFAULT 0",
+        }
+        for name, definition in additive_columns.items():
+            if name not in run_columns:
+                conn.execute(
+                    f"ALTER TABLE content_runs ADD COLUMN {name} {definition}"
+                )
+
     from src.analytics.db_experiments import init_experiment_db
     init_experiment_db(target_path)
 
 # ── API ───────────────────────────────────────────────────
 
-def start_run(topic: str) -> str:
+def start_run(
+    topic: str,
+    *,
+    origin: str = "real_pipeline",
+    strategy_id: str = "",
+) -> str:
     run_id = str(uuid.uuid4())
     with _conn() as conn:
         conn.execute(
-            "INSERT INTO content_runs (run_id, topic, status) VALUES (?, ?, ?)",
-            (run_id, topic, "in_progress")
+            """INSERT INTO content_runs (
+                   run_id, topic, status, origin, strategy_id, created_at
+               ) VALUES (?, ?, ?, ?, ?, ?)""",
+            (
+                run_id,
+                topic,
+                "in_progress",
+                origin,
+                strategy_id,
+                datetime.now(timezone.utc).isoformat(),
+            )
         )
     return run_id
 
@@ -305,6 +337,23 @@ def log_source(run_id: str, url: str, title: str) -> int:
             (run_id, url, title)
         )
         return cursor.lastrowid
+
+
+def link_run_publication(run_id: str, publication_id: str) -> None:
+    """Associate a remote publication with the run that produced it."""
+    if not run_id.strip() or not publication_id.strip():
+        raise ValueError("run_id and publication_id are required")
+    with _conn() as conn:
+        conn.execute(
+            """INSERT OR IGNORE INTO run_publications (
+                   run_id, publication_id, published_at
+               ) VALUES (?, ?, ?)""",
+            (
+                run_id.strip(),
+                publication_id.strip(),
+                datetime.now(timezone.utc).isoformat(),
+            ),
+        )
 
 def log_claim(claim_id: str, run_id: str, slide_idx: int, statement: str) -> None:
     with _conn() as conn:

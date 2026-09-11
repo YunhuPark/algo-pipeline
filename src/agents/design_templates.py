@@ -1,8 +1,9 @@
 """
 Design Templates — 카드뉴스 디자인 템플릿 정의 모듈
 ────────────────────────────────────────────────────────
-5가지 템플릿:
-  dark      — 다크 배경, 보라/시안 포인트 (기본값)
+6가지 템플릿:
+  brand     — 알고 고정 브랜드, 보라/시안 포인트 (기본값)
+  dark      — 다크 배경, 보라/시안 포인트
   light     — 밝은 배경, 남색/주황 포인트
   bold      — 다크 + 레드/옐로우, 강렬한 포인트
   minimal   — 거의 투명 오버레이, 모노크롬
@@ -16,6 +17,26 @@ from __future__ import annotations
 # ── 템플릿 정의 ──────────────────────────────────────────
 
 TEMPLATES: dict[str, dict] = {
+    "brand": {
+        "name": "알고 브랜드",
+        "description": "알고의 보라/시안 아이덴티티를 고정한 에디토리얼 기본형.",
+        "overlay_alpha": 135,
+        "overlay_color": (4, 4, 12),
+        "accent": (91, 79, 232),          # #5B4FE8 — Algo primary
+        "accent2": (0, 229, 255),         # #00E5FF — Algo accent
+        "text_primary": (255, 255, 255),
+        "text_secondary": (215, 215, 235),
+        "badge_bg": (91, 79, 232),
+        "badge_text": (255, 255, 255),
+        "tag_bg": (24, 23, 50),
+        "tag_text": (0, 229, 255),
+        "divider": (91, 79, 232),
+        "accent_box_bg": (20, 18, 55, 165),
+        "tag_color": (155, 155, 185),
+        "title_font_size": 72,
+        "body_font_size": 36,
+        "accent_font_size": 40,
+    },
     "dark": {
         "name": "다크",
         "description": "다크 배경에 보라/시안 포인트. 기술·IT 콘텐츠에 최적.",
@@ -138,7 +159,7 @@ def get_template(name: str) -> dict:
     존재하지 않는 이름이면 "dark" 반환.
 
     Args:
-        name: 템플릿 이름 ("dark", "light", "bold", "minimal", "gradient")
+        name: 템플릿 이름 ("brand", "dark", "light", "bold", "minimal", "gradient")
 
     Returns:
         템플릿 딕셔너리
@@ -151,7 +172,7 @@ def list_templates() -> list[str]:
     사용 가능한 템플릿 이름 목록 반환.
 
     Returns:
-        ["dark", "light", "bold", "minimal", "gradient"]
+        ["brand", "dark", "light", "bold", "minimal", "gradient"]
     """
     return list(TEMPLATES.keys())
 
