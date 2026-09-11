@@ -1,20 +1,16 @@
-"""Shared text-LLM provider construction with safe automatic fallback.
+"""Transparent provider-aware fallback for every ``ChatOpenAI`` call under ``src``.
 
-The primary provider remains OpenAI.  When a configured primary provider call
-fails for transport/auth/rate-limit/server reasons, LangChain retries the same
-request once through an OpenAI-compatible fallback endpoint.  Fallback is
-opt-in-by-key: it is active only when ``GEMINI_API_KEY`` (or the generic
-``LLM_FALLBACK_API_KEY``) is present and ``LLM_FALLBACK_ENABLED`` is not false.
-
-Application/schema/quality errors are deliberately *not* fallback triggers.
-Those must keep failing closed in the existing Quality Gate.
+OpenAI remains the primary provider. If a provider-level failure occurs and a
+fallback key is configured, the exact same request is retried once against an
+OpenAI-compatible fallback endpoint (Gemini by default). Application/schema/
+Quality-Gate errors are never swallowed by this layer.
 """
 from __future__ import annotations
 
 import os
-from typing import Any
 
-from langchain_openai import ChatOpenAI
+import langchain_openai
+from langchain_openai import ChatOpenAI as _OriginalChatOpenAI
 from openai import (
     APIConnectionError,
     APITimeoutError,
@@ -38,6 +34,7 @@ PROVIDER_FALLBACK_EXCEPTIONS = (
 )
 
 _FALSE_VALUES = {"0", "false", "no", "off", "disabled"}
+_PATCH_INSTALLED = False
 
 
 def _fallback_enabled() -> bool:
@@ -58,123 +55,86 @@ def fallback_is_configured() -> bool:
     return _fallback_enabled() and bool(_fallback_api_key())
 
 
-def _model_kwargs(json_mode: bool) -> dict[str, Any]:
-    if not json_mode:
-        return {}
-    return {"response_format": {"type": "json_object"}}
+class ProviderAwareChatOpenAI(_OriginalChatOpenAI):
+    """Drop-in ChatOpenAI that retries provider failures on Gemini.
 
-
-def _build_primary(
-    *,
-    model: str,
-    temperature: float,
-    request_timeout: float,
-    json_mode: bool,
-    api_key: str | None,
-):
-    return ChatOpenAI(
-        model=model,
-        temperature=temperature,
-        max_retries=1,
-        request_timeout=request_timeout,
-        api_key=api_key or os.getenv("OPENAI_API_KEY"),
-        model_kwargs=_model_kwargs(json_mode),
-    )
-
-
-def _build_fallback(
-    *,
-    temperature: float,
-    request_timeout: float,
-    json_mode: bool,
-):
-    if not fallback_is_configured():
-        return None
-
-    return ChatOpenAI(
-        model=os.getenv("LLM_FALLBACK_MODEL", DEFAULT_FALLBACK_MODEL).strip()
-        or DEFAULT_FALLBACK_MODEL,
-        temperature=temperature,
-        max_retries=0,
-        request_timeout=request_timeout,
-        api_key=_fallback_api_key(),
-        base_url=(
-            os.getenv("LLM_FALLBACK_BASE_URL", GEMINI_OPENAI_BASE_URL).strip()
-            or GEMINI_OPENAI_BASE_URL
-        ),
-        model_kwargs=_model_kwargs(json_mode),
-    )
-
-
-def build_chat_model(
-    *,
-    model: str | None = None,
-    temperature: float = 0.0,
-    request_timeout: float = 20.0,
-    json_mode: bool = False,
-    api_key: str | None = None,
-):
-    """Build the primary text model with provider-only fallback semantics.
-
-    The fallback handles only provider-level failures listed in
-    ``PROVIDER_FALLBACK_EXCEPTIONS``.  Bad prompts, parsing failures and Quality
-    Gate exceptions are never hidden by switching providers.
+    Subclassing the original LangChain model preserves existing
+    ``with_structured_output()``, prompt piping, ``bind()`` and direct
+    ``invoke()`` behavior without changing every existing call site.
     """
 
-    primary = _build_primary(
-        model=model or os.getenv("LLM_MODEL", "gpt-4o"),
-        temperature=temperature,
-        request_timeout=request_timeout,
-        json_mode=json_mode,
-        api_key=api_key,
-    )
-    fallback = _build_fallback(
-        temperature=temperature,
-        request_timeout=request_timeout,
-        json_mode=json_mode,
-    )
-    if fallback is None:
-        return primary
+    def _fallback_model(self):
+        if not fallback_is_configured():
+            return None
 
-    return primary.with_fallbacks(
-        [fallback],
-        exceptions_to_handle=PROVIDER_FALLBACK_EXCEPTIONS,
-    )
+        return _OriginalChatOpenAI(
+            model=(
+                os.getenv("LLM_FALLBACK_MODEL", DEFAULT_FALLBACK_MODEL).strip()
+                or DEFAULT_FALLBACK_MODEL
+            ),
+            temperature=self.temperature if self.temperature is not None else 0.0,
+            max_retries=0,
+            request_timeout=20.0,
+            api_key=_fallback_api_key(),
+            base_url=(
+                os.getenv("LLM_FALLBACK_BASE_URL", GEMINI_OPENAI_BASE_URL).strip()
+                or GEMINI_OPENAI_BASE_URL
+            ),
+            model_kwargs=dict(getattr(self, "model_kwargs", {}) or {}),
+        )
+
+    def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+        try:
+            return super()._generate(
+                messages,
+                stop=stop,
+                run_manager=run_manager,
+                **kwargs,
+            )
+        except PROVIDER_FALLBACK_EXCEPTIONS as primary_error:
+            fallback = self._fallback_model()
+            if fallback is None:
+                raise
+            print(
+                "[LLMProvider] OpenAI provider 실패 → "
+                f"{fallback.model_name} fallback 실행 ({type(primary_error).__name__})"
+            )
+            return fallback._generate(
+                messages,
+                stop=stop,
+                run_manager=run_manager,
+                **kwargs,
+            )
+
+    async def _agenerate(self, messages, stop=None, run_manager=None, **kwargs):
+        try:
+            return await super()._agenerate(
+                messages,
+                stop=stop,
+                run_manager=run_manager,
+                **kwargs,
+            )
+        except PROVIDER_FALLBACK_EXCEPTIONS as primary_error:
+            fallback = self._fallback_model()
+            if fallback is None:
+                raise
+            print(
+                "[LLMProvider] OpenAI provider 실패 → "
+                f"{fallback.model_name} fallback 실행 ({type(primary_error).__name__})"
+            )
+            return await fallback._agenerate(
+                messages,
+                stop=stop,
+                run_manager=run_manager,
+                **kwargs,
+            )
 
 
-def build_structured_chat_model(
-    schema,
-    *,
-    model: str | None = None,
-    temperature: float = 0.0,
-    request_timeout: float = 20.0,
-    api_key: str | None = None,
-):
-    """Build a Pydantic-structured model with the same provider fallback.
+def install_global_chatopenai_fallback() -> None:
+    """Patch ``langchain_openai.ChatOpenAI`` once before src submodules load."""
 
-    Structured-output wrapping happens independently per provider before the
-    fallback wrapper is attached.  This prevents fallback from weakening the
-    caller's response schema.
-    """
-
-    primary = _build_primary(
-        model=model or os.getenv("LLM_MODEL", "gpt-4o"),
-        temperature=temperature,
-        request_timeout=request_timeout,
-        json_mode=False,
-        api_key=api_key,
-    ).with_structured_output(schema)
-
-    fallback_model = _build_fallback(
-        temperature=temperature,
-        request_timeout=request_timeout,
-        json_mode=False,
-    )
-    if fallback_model is None:
-        return primary
-
-    fallback = fallback_model.with_structured_output(schema)
-    return primary.with_fallbacks(
-        [fallback],
-        exceptions_to_handle=PROVIDER_FALLBACK_EXCEPTIONS,
-    )
+    global _PATCH_INSTALLED
+    if _PATCH_INSTALLED:
+        return
+    langchain_openai.ChatOpenAI = ProviderAwareChatOpenAI
+    _PATCH_INSTALLED = True
