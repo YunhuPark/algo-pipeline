@@ -11,7 +11,7 @@ import os
 from pathlib import Path
 
 import langchain_openai
-from dotenv import load_dotenv
+from dotenv import dotenv_values, load_dotenv
 from langchain_openai import ChatOpenAI as _OriginalChatOpenAI
 from openai import (
     APIConnectionError,
@@ -23,11 +23,13 @@ from openai import (
 )
 
 
-# Load the project-local .env here, before any provider fallback decision is
-# made. src.__init__ installs this module before src.config is guaranteed to be
-# imported, so relying on config.py to load GEMINI_API_KEY was timing-sensitive.
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
-load_dotenv(_PROJECT_ROOT / ".env", override=False)
+_PROJECT_ENV_PATH = _PROJECT_ROOT / ".env"
+
+# Load once for normal application behavior.  _fallback_api_key() also reads
+# the file directly at call time so a blank/inherited environment variable or
+# import-order difference cannot hide a valid project-local Gemini key.
+load_dotenv(_PROJECT_ENV_PATH, override=False)
 
 GEMINI_OPENAI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/openai/"
 DEFAULT_FALLBACK_MODEL = "gemini-3.8-flash"
@@ -45,16 +47,36 @@ _FALSE_VALUES = {"0", "false", "no", "off", "disabled"}
 _PATCH_INSTALLED = False
 
 
+def _project_env_values() -> dict[str, str | None]:
+    """Read the repository .env without mutating process environment."""
+
+    if not _PROJECT_ENV_PATH.is_file():
+        return {}
+    try:
+        return dict(dotenv_values(_PROJECT_ENV_PATH))
+    except (OSError, UnicodeError):
+        return {}
+
+
+def _setting(name: str, default: str = "") -> str:
+    """Prefer a non-empty process value, then the project-local .env value."""
+
+    process_value = os.getenv(name)
+    if process_value is not None and process_value.strip():
+        return process_value.strip()
+    file_value = _project_env_values().get(name)
+    if file_value is not None and str(file_value).strip():
+        return str(file_value).strip()
+    return default
+
+
 def _fallback_enabled() -> bool:
-    configured = os.getenv("LLM_FALLBACK_ENABLED", "true").strip().casefold()
+    configured = _setting("LLM_FALLBACK_ENABLED", "true").casefold()
     return configured not in _FALSE_VALUES
 
 
 def _fallback_api_key() -> str:
-    return (
-        os.getenv("LLM_FALLBACK_API_KEY", "").strip()
-        or os.getenv("GEMINI_API_KEY", "").strip()
-    )
+    return _setting("LLM_FALLBACK_API_KEY") or _setting("GEMINI_API_KEY")
 
 
 def fallback_is_configured() -> bool:
@@ -63,14 +85,26 @@ def fallback_is_configured() -> bool:
     return _fallback_enabled() and bool(_fallback_api_key())
 
 
-def _is_provider_failure(exc: Exception) -> bool:
-    """Recognize provider failures even when an integration wraps SDK errors.
+def fallback_diagnostics() -> str:
+    """Return secret-safe diagnostics for local startup/error logs."""
 
-    Some langchain/openai version combinations expose wrapper class names such
-    as ``OpenAIRateLimitError`` rather than ``openai.RateLimitError`` itself.
-    Accept only transport/auth/quota/server-like failures; parsing, validation
-    and application exceptions remain outside the fallback path.
-    """
+    values = _project_env_values()
+    process_key = bool((os.getenv("LLM_FALLBACK_API_KEY") or "").strip()) or bool(
+        (os.getenv("GEMINI_API_KEY") or "").strip()
+    )
+    file_key = bool(str(values.get("LLM_FALLBACK_API_KEY") or "").strip()) or bool(
+        str(values.get("GEMINI_API_KEY") or "").strip()
+    )
+    return (
+        f"env_file={_PROJECT_ENV_PATH} exists={_PROJECT_ENV_PATH.is_file()} "
+        f"process_key={'set' if process_key else 'missing'} "
+        f"file_key={'set' if file_key else 'missing'} "
+        f"enabled={_fallback_enabled()}"
+    )
+
+
+def _is_provider_failure(exc: Exception) -> bool:
+    """Recognize provider failures even when an integration wraps SDK errors."""
 
     if isinstance(exc, PROVIDER_FALLBACK_EXCEPTIONS):
         return True
@@ -108,30 +142,19 @@ def _is_provider_failure(exc: Exception) -> bool:
 
 
 class ProviderAwareChatOpenAI(_OriginalChatOpenAI):
-    """Drop-in ChatOpenAI that retries provider failures on Gemini.
-
-    Subclassing the original LangChain model preserves existing
-    ``with_structured_output()``, prompt piping, ``bind()`` and direct
-    ``invoke()`` behavior without changing every existing call site.
-    """
+    """Drop-in ChatOpenAI that retries provider failures on Gemini."""
 
     def _fallback_model(self):
         if not fallback_is_configured():
             return None
 
         return _OriginalChatOpenAI(
-            model=(
-                os.getenv("LLM_FALLBACK_MODEL", DEFAULT_FALLBACK_MODEL).strip()
-                or DEFAULT_FALLBACK_MODEL
-            ),
+            model=_setting("LLM_FALLBACK_MODEL", DEFAULT_FALLBACK_MODEL),
             temperature=self.temperature if self.temperature is not None else 0.0,
             max_retries=0,
             request_timeout=20.0,
             api_key=_fallback_api_key(),
-            base_url=(
-                os.getenv("LLM_FALLBACK_BASE_URL", GEMINI_OPENAI_BASE_URL).strip()
-                or GEMINI_OPENAI_BASE_URL
-            ),
+            base_url=_setting("LLM_FALLBACK_BASE_URL", GEMINI_OPENAI_BASE_URL),
             model_kwargs=dict(getattr(self, "model_kwargs", {}) or {}),
         )
 
@@ -149,7 +172,8 @@ class ProviderAwareChatOpenAI(_OriginalChatOpenAI):
             fallback = self._fallback_model()
             if fallback is None:
                 print(
-                    "[LLMProvider] provider 오류 감지, 그러나 Gemini fallback 키가 로드되지 않았습니다."
+                    "[LLMProvider] provider 오류 감지, 그러나 Gemini fallback 키를 사용할 수 없습니다. "
+                    + fallback_diagnostics()
                 )
                 raise
             print(
@@ -177,7 +201,8 @@ class ProviderAwareChatOpenAI(_OriginalChatOpenAI):
             fallback = self._fallback_model()
             if fallback is None:
                 print(
-                    "[LLMProvider] provider 오류 감지, 그러나 Gemini fallback 키가 로드되지 않았습니다."
+                    "[LLMProvider] provider 오류 감지, 그러나 Gemini fallback 키를 사용할 수 없습니다. "
+                    + fallback_diagnostics()
                 )
                 raise
             print(
