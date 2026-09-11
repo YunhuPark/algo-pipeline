@@ -8,8 +8,10 @@ Quality-Gate errors are never swallowed by this layer.
 from __future__ import annotations
 
 import os
+from pathlib import Path
 
 import langchain_openai
+from dotenv import load_dotenv
 from langchain_openai import ChatOpenAI as _OriginalChatOpenAI
 from openai import (
     APIConnectionError,
@@ -20,6 +22,12 @@ from openai import (
     RateLimitError,
 )
 
+
+# Load the project-local .env here, before any provider fallback decision is
+# made. src.__init__ installs this module before src.config is guaranteed to be
+# imported, so relying on config.py to load GEMINI_API_KEY was timing-sensitive.
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+load_dotenv(_PROJECT_ROOT / ".env", override=False)
 
 GEMINI_OPENAI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/openai/"
 DEFAULT_FALLBACK_MODEL = "gemini-3.8-flash"
@@ -53,6 +61,50 @@ def fallback_is_configured() -> bool:
     """Return whether automatic provider fallback can actually run."""
 
     return _fallback_enabled() and bool(_fallback_api_key())
+
+
+def _is_provider_failure(exc: Exception) -> bool:
+    """Recognize provider failures even when an integration wraps SDK errors.
+
+    Some langchain/openai version combinations expose wrapper class names such
+    as ``OpenAIRateLimitError`` rather than ``openai.RateLimitError`` itself.
+    Accept only transport/auth/quota/server-like failures; parsing, validation
+    and application exceptions remain outside the fallback path.
+    """
+
+    if isinstance(exc, PROVIDER_FALLBACK_EXCEPTIONS):
+        return True
+
+    status_code = getattr(exc, "status_code", None)
+    response = getattr(exc, "response", None)
+    if status_code is None and response is not None:
+        status_code = getattr(response, "status_code", None)
+    if status_code in {401, 403, 408, 429, 500, 502, 503, 504}:
+        return True
+
+    name = type(exc).__name__.casefold()
+    text = str(exc).casefold()
+    markers = (
+        "ratelimit",
+        "rate limit",
+        "too many requests",
+        "apiconnection",
+        "api connection",
+        "apitimeout",
+        "api timeout",
+        "authentication",
+        "permissiondenied",
+        "permission denied",
+        "internalserver",
+        "internal server",
+        "serviceunavailable",
+        "service unavailable",
+        "badgateway",
+        "bad gateway",
+        "gatewaytimeout",
+        "gateway timeout",
+    )
+    return any(marker in name or marker in text for marker in markers)
 
 
 class ProviderAwareChatOpenAI(_OriginalChatOpenAI):
@@ -91,9 +143,14 @@ class ProviderAwareChatOpenAI(_OriginalChatOpenAI):
                 run_manager=run_manager,
                 **kwargs,
             )
-        except PROVIDER_FALLBACK_EXCEPTIONS as primary_error:
+        except Exception as primary_error:
+            if not _is_provider_failure(primary_error):
+                raise
             fallback = self._fallback_model()
             if fallback is None:
+                print(
+                    "[LLMProvider] provider 오류 감지, 그러나 Gemini fallback 키가 로드되지 않았습니다."
+                )
                 raise
             print(
                 "[LLMProvider] OpenAI provider 실패 → "
@@ -114,9 +171,14 @@ class ProviderAwareChatOpenAI(_OriginalChatOpenAI):
                 run_manager=run_manager,
                 **kwargs,
             )
-        except PROVIDER_FALLBACK_EXCEPTIONS as primary_error:
+        except Exception as primary_error:
+            if not _is_provider_failure(primary_error):
+                raise
             fallback = self._fallback_model()
             if fallback is None:
+                print(
+                    "[LLMProvider] provider 오류 감지, 그러나 Gemini fallback 키가 로드되지 않았습니다."
+                )
                 raise
             print(
                 "[LLMProvider] OpenAI provider 실패 → "
