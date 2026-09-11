@@ -65,6 +65,15 @@ _NUMERIC_SUPPORT_ERRORS = {
     "CLAIM_NUMBER_UNSUPPORTED",
 }
 
+_ENTITY_SUPPORT_ERRORS = {
+    "ENTITY_UNSUPPORTED",
+    "CLAIM_ENTITY_UNSUPPORTED",
+}
+
+_PROMPT_CONTAMINATING_SUPPORT_ERRORS = (
+    _NUMERIC_SUPPORT_ERRORS | _ENTITY_SUPPORT_ERRORS
+)
+
 
 def _failure_class(error_code: str) -> str:
     if error_code in _FACTUAL_CLAIM_QUALITY_ERRORS:
@@ -244,12 +253,22 @@ class ContentCreator:
                         " 날짜 오류를 고칠 때는 인용 근거의 날짜를 그대로 사용하고, "
                         "원문에 없는 연도·월·일을 보충하지 마세요."
                     )
-                elif exc.error_code in {"ENTITY_UNSUPPORTED", "CLAIM_ENTITY_UNSUPPORTED"}:
-                    targeted_feedback = (
-                        " entities 배열은 해당 Claim이 인용한 Evidence에 실제로 등장하는 "
-                        "고유명사의 원문 철자만 사용하세요. 번역명이나 추정한 조직명은 제거하세요. "
-                        "같은 unsupported entity가 반복되면 해당 Claim 전체를 다른 근거 기반 사실로 교체하세요."
-                    )
+                elif exc.error_code in _ENTITY_SUPPORT_ERRORS:
+                    if error_repairs >= MAX_CLAIM_QUALITY_REPAIRS_PER_ERROR:
+                        targeted_feedback = (
+                            " 고유명사 검증이 반복 실패했습니다. 이번 재시도에서는 실패한 고유명사를 "
+                            "다시 번역·음역·추정하지 마세요. 해당 Claim 전체를 버리고, 선택한 Evidence에 "
+                            "문자 그대로 존재하는 고유명사만 사용하는 다른 사실로 교체하세요. "
+                            "정확한 표면 문자열을 확신할 수 없다면 고유명사에 의존하지 않는 Claim을 선택하세요."
+                        )
+                    else:
+                        targeted_feedback = (
+                            " 고유명사 오류를 고칠 때는 실패한 생성 고유명사 문자열을 참고하거나 재사용하지 마세요. "
+                            "선택한 Evidence를 처음부터 다시 읽고 제품명·기능명·회사명은 원문 표면 문자열을 "
+                            "문자 그대로 복사하세요. 번역명, 한글 음역, 세대명, 모델명, 시리즈 번호를 "
+                            "추론하지 마세요. 정확히 복사할 수 없으면 해당 Claim 전체를 버리고 다른 "
+                            "Evidence-backed Claim으로 교체하세요."
+                        )
                 elif exc.error_code in {
                     "CLAIM_CONTRADICTED",
                     "CLAIM_INSUFFICIENT_EVIDENCE",
@@ -302,11 +321,15 @@ class ContentCreator:
                 if cited_evidence:
                     targeted_feedback += f"\n문제가 된 Claim의 인용 근거:\n{cited_evidence[:1600]}"
 
-                # Numeric support failures are prompt-contaminating if the rejected
-                # generated value is echoed back verbatim. Keep the error code but
-                # intentionally omit str(exc) for numeric retries; the cited Evidence
-                # remains available as the only source of allowed numeric wording.
-                error_detail = "" if exc.error_code in _NUMERIC_SUPPORT_ERRORS else f" - {exc}"
+                # Unsupported numbers/entities are prompt-contaminating if the
+                # rejected generated surface is echoed back verbatim. Keep the
+                # error code while omitting str(exc); cited Evidence remains the
+                # only source of allowed numeric/entity wording for the retry.
+                error_detail = (
+                    ""
+                    if exc.error_code in _PROMPT_CONTAMINATING_SUPPORT_ERRORS
+                    else f" - {exc}"
+                )
                 current_failure_feedback = (
                     "이전 Claim 세트가 사실 또는 편집 품질 검증에 실패했습니다. "
                     "문제가 된 주장을 삭제하거나 인용한 evidence 범위 안에서 정확히 다시 작성하세요. "
