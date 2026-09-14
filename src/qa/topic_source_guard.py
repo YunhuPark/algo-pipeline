@@ -110,6 +110,19 @@ def _topic_anchor_groups(topic: str) -> list[tuple[str, ...]]:
     return groups
 
 
+def _is_strong_anchor_group(variants: tuple[str, ...]) -> bool:
+    """Return whether an anchor is reliable enough for fail-closed matching.
+
+    ASCII identifiers and explicitly mapped bilingual entities/events are
+    stable across Korean/English source text. Free-form Korean descriptor words
+    are intentionally not used to block generation because exact lexical
+    matching creates false positives for otherwise valid translated sources.
+    """
+
+    token = variants[0]
+    return token.isascii() or token in _TOPIC_ALIASES
+
+
 def _contains_variant(haystack: str, variant: str) -> bool:
     if variant.isascii():
         pattern = _ASCII_WORD_RE_TEMPLATE.format(token=re.escape(variant))
@@ -120,22 +133,25 @@ def _contains_variant(haystack: str, variant: str) -> bool:
 def topic_matches_source(topic: str, source_title: str, evidence_text: str) -> bool:
     """Return whether source text contains enough meaningful topic anchors.
 
-    One-anchor topics need that anchor.  Topics with two or more anchors need
-    at least two, which prevents a generic Apple article from satisfying an
-    ``Apple WWDC`` request merely because it mentions Apple.
+    The fail-closed gate only relies on strong anchors that survive common
+    Korean/English translation differences. One strong anchor must match; two
+    or more strong anchors require at least two. This keeps ``Apple WWDC`` from
+    accepting a generic Apple article while avoiding false rejection from weak
+    descriptor words such as a translated category or editorial phrase.
     """
 
     anchors = _topic_anchor_groups(topic)
-    if not anchors:
+    strong_anchors = [group for group in anchors if _is_strong_anchor_group(group)]
+    if not strong_anchors:
         return True
 
     haystack = _normalize(f"{source_title}\n{evidence_text}")
     matched = sum(
         1
-        for variants in anchors
+        for variants in strong_anchors
         if any(_contains_variant(haystack, variant) for variant in variants)
     )
-    required = 1 if len(anchors) == 1 else 2
+    required = 1 if len(strong_anchors) == 1 else 2
     return matched >= required
 
 
