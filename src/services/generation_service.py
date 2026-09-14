@@ -73,6 +73,27 @@ def build_queue_metadata(
     )
 
 
+def _topic_matching_report(topic: str, report: TrendReport) -> TrendReport | None:
+    """Keep only evidence that deterministically matches the requested topic."""
+
+    from src.qa.topic_source_guard import topic_matches_source
+
+    matches = [
+        item
+        for item in report.results
+        if topic_matches_source(topic, item.title, item.content)
+    ]
+    if not matches:
+        return None
+
+    return TrendReport(
+        query=report.query,
+        results=matches,
+        summary=report.summary,
+        youtube_keyword=report.youtube_keyword,
+    )
+
+
 def collect_verified_lineage(
     topic: str,
     *,
@@ -81,9 +102,15 @@ def collect_verified_lineage(
     selected_url: str = "",
     selected_content: str = "",
 ) -> SourceLineage:
-    """Collect full article text before any content generation starts."""
+    """Collect topic-matching full article text before generation starts.
+
+    Recent-news selection is tried first. If it yields only unrelated evidence,
+    explicit historical/event topics can fall back to a small first-party
+    archive collector. Unrelated highest-score articles are never silently used.
+    """
 
     from src.agents import trend_analyzer
+    from src.qa.topic_source_guard import assert_source_lineage_matches_topic
 
     if selected_title or selected_url:
         report = trend_analyzer.build_locked_source_report(
@@ -92,9 +119,45 @@ def collect_verified_lineage(
             url=selected_url,
             content=selected_content,
         )
-    else:
-        report = trend_analyzer.run(topic, max_results=max_results)
-    return build_verified_lineage(topic, report)
+        lineage = build_verified_lineage(topic, report)
+        assert_source_lineage_matches_topic(lineage)
+        return lineage
+
+    report = trend_analyzer.run(topic, max_results=max_results)
+    matching = _topic_matching_report(topic, report)
+
+    if matching is None:
+        from src.agents.topic_archive_search import collect_archive_matches
+
+        print(
+            "  [SourceSelection] 최신 후보가 주제 앵커와 일치하지 않아 "
+            "공식 아카이브를 확인합니다."
+        )
+        archive_items = collect_archive_matches(topic, max_results=max_results * 2)
+        enriched = []
+        for item in archive_items:
+            candidate = trend_analyzer._enrich_article(item, min_length=1000)
+            if _topic_matching_report(
+                topic,
+                TrendReport(query=topic, results=[candidate]),
+            ):
+                enriched.append(candidate)
+            if len(enriched) >= max_results:
+                break
+
+        if enriched:
+            matching = TrendReport(
+                query=topic,
+                results=enriched,
+                summary="주제 일치 최신 후보가 없어 공식 1차 출처 아카이브에서 근거를 수집했습니다.",
+            )
+
+    if matching is None or not matching.results:
+        raise ValueError("VERIFIED_TOPIC_SOURCE_MISSING")
+
+    lineage = build_verified_lineage(topic, matching)
+    assert_source_lineage_matches_topic(lineage)
+    return lineage
 
 
 def _record_result_metadata(
