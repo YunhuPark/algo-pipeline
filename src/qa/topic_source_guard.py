@@ -73,6 +73,16 @@ _TOPIC_ALIASES: dict[str, tuple[str, ...]] = {
     "클로드": ("claude",),
     "에이전트": ("agent", "agents"),
     "칩": ("chip", "chips"),
+    # Apple uses both the WWDC abbreviation and the spelled-out event name
+    # across Newsroom/Developer pages. Treat them as the same deterministic
+    # anchor so an official source is not rejected merely for using the long form.
+    "wwdc": (
+        "worldwide developers conference",
+        "wwdc26",
+        "wwdc 26",
+        "wwdc2026",
+        "wwdc 2026",
+    ),
 }
 
 _TOKEN_RE = re.compile(r"[A-Za-z][A-Za-z0-9+._-]{1,}|[가-힣]{2,}|20\d{2}")
