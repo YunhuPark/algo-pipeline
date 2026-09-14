@@ -21,6 +21,7 @@ from src.qa.editorial_intent import is_roundup_topic
 from src.qa.editorial_quality_gate import validate_claim_editorial_quality
 from src.qa.semantic_critic import run_semantic_critic
 from src.qa.script_assembler import ScriptAssembler
+from src.qa.topic_source_guard import assert_source_lineage_matches_topic
 from src.schemas.fact_check import FactCheckReport
 
 
@@ -76,14 +77,7 @@ _PROMPT_CONTAMINATING_SUPPORT_ERRORS = (
 
 
 def _reclassify_provider_failure(exc: QualityGateError) -> bool:
-    """Reclassify upstream LLM transport/quota failures without retrying them.
-
-    ClaimGenerator intentionally sanitizes provider exceptions into
-    CLAIM_GENERATION_FAILED.  At the orchestration boundary we can still use the
-    safe exception type name embedded in that message to keep provider failures
-    separate from factual/editorial Quality Gate failures.  This preserves the
-    existing fail-closed behavior while avoiding misleading QUALITY_GATE labels.
-    """
+    """Reclassify upstream LLM transport/quota failures without retrying them."""
 
     if exc.error_code != "CLAIM_GENERATION_FAILED":
         return False
@@ -167,20 +161,21 @@ class ContentCreator:
         source_lineage: Optional[SourceLineage] = None,
         editorial_angle: str = "",
     ) -> CardNewsScript:
-        """
-        새로운 증거 기반 Claim 생성 및 검증을 수행한 뒤 ScriptAssembler로 넘깁니다.
-        """
-        # A reused creator must never expose a report from an earlier successful run
-        # after the current run fails before a new report is produced.
+        """Generate evidence-bound claims, verify them, and assemble the script."""
         self.last_fact_check_report = None
 
-        # 1. Lineage 확인 (신규 생성 시 V2 필수)
         if not source_lineage or not source_lineage.is_verified_ready:
-            raise QualityGateError("LEGACY_LINEAGE_UNVERIFIED", "Cannot generate new content with unverified legacy source lineage.")
+            raise QualityGateError(
+                "LEGACY_LINEAGE_UNVERIFIED",
+                "Cannot generate new content with unverified legacy source lineage.",
+            )
 
-        # 2~4. Claim 생성 + Quality Gate. 서로 다른 오류가 같은 repair
-        # budget을 소진하지 않도록 error_code별로 bounded retry를 관리한다.
-        # 검증 기준 자체는 낮추지 않는다.
+        # The selector is LLM-assisted and may fail over to a highest-score
+        # candidate.  Reject obviously unrelated evidence before spending the
+        # claim/editorial retry budget.  This is a stricter gate, not a relaxed
+        # quality threshold.
+        assert_source_lineage_matches_topic(source_lineage)
+
         requested_cards = num_cards or 6
         target_content_slides = max(1, requested_cards - 2)
         validation_feedback = "\n".join(
@@ -190,9 +185,6 @@ class ContentCreator:
         repair_counts: dict[str, int] = {}
         claims = []
         for attempt in range(1, MAX_CLAIM_QUALITY_ATTEMPTS + 1):
-            # Generation-bound support errors are QualityGateError subclasses too.
-            # Keep generation inside the same bounded retry loop so an exhausted
-            # ClaimGenerator-local retry does not bypass ContentCreator repair.
             claims = []
             try:
                 if validation_feedback:
@@ -201,7 +193,6 @@ class ContentCreator:
                         validation_feedback=validation_feedback,
                     )
                 else:
-                    # Keep the first call compatible with injected legacy test doubles.
                     claims = self.claim_generator.generate_claims(source_lineage)
 
                 claims, numeric_repairs = repair_source_backed_numeric_localizations(
@@ -367,10 +358,6 @@ class ContentCreator:
                 if cited_evidence:
                     targeted_feedback += f"\n문제가 된 Claim의 인용 근거:\n{cited_evidence[:1600]}"
 
-                # Unsupported numbers/entities are prompt-contaminating if the
-                # rejected generated surface is echoed back verbatim. Keep the
-                # error code while omitting str(exc); cited Evidence remains the
-                # only source of allowed numeric/entity wording for the retry.
                 error_detail = (
                     ""
                     if exc.error_code in _PROMPT_CONTAMINATING_SUPPORT_ERRORS
