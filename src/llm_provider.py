@@ -33,6 +33,9 @@ load_dotenv(_PROJECT_ENV_PATH, override=False)
 
 GEMINI_OPENAI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/openai/"
 DEFAULT_FALLBACK_MODEL = "gemini-3.8-flash"
+DEFAULT_FALLBACK_TIMEOUT_SECONDS = 90.0
+MIN_FALLBACK_TIMEOUT_SECONDS = 20.0
+MAX_FALLBACK_TIMEOUT_SECONDS = 180.0
 
 PROVIDER_FALLBACK_EXCEPTIONS = (
     RateLimitError,
@@ -79,6 +82,26 @@ def _fallback_api_key() -> str:
     return _setting("LLM_FALLBACK_API_KEY") or _setting("GEMINI_API_KEY")
 
 
+def _fallback_timeout_seconds() -> float:
+    """Return a bounded timeout appropriate for full production prompts.
+
+    The primary OpenAI path historically used a 20 second timeout.  Gemini
+    fallback requests often carry the already-expanded evidence prompt and can
+    legitimately take longer.  Keep the value configurable but bounded so a
+    provider failure cannot hang the pipeline indefinitely.
+    """
+
+    raw = _setting(
+        "LLM_FALLBACK_TIMEOUT_SECONDS",
+        str(DEFAULT_FALLBACK_TIMEOUT_SECONDS),
+    )
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        value = DEFAULT_FALLBACK_TIMEOUT_SECONDS
+    return max(MIN_FALLBACK_TIMEOUT_SECONDS, min(value, MAX_FALLBACK_TIMEOUT_SECONDS))
+
+
 def fallback_is_configured() -> bool:
     """Return whether automatic provider fallback can actually run."""
 
@@ -99,7 +122,7 @@ def fallback_diagnostics() -> str:
         f"env_file={_PROJECT_ENV_PATH} exists={_PROJECT_ENV_PATH.is_file()} "
         f"process_key={'set' if process_key else 'missing'} "
         f"file_key={'set' if file_key else 'missing'} "
-        f"enabled={_fallback_enabled()}"
+        f"enabled={_fallback_enabled()} timeout={_fallback_timeout_seconds():g}s"
     )
 
 
@@ -141,6 +164,14 @@ def _is_provider_failure(exc: Exception) -> bool:
     return any(marker in name or marker in text for marker in markers)
 
 
+def _safe_status_code(exc: Exception) -> int | None:
+    status_code = getattr(exc, "status_code", None)
+    response = getattr(exc, "response", None)
+    if status_code is None and response is not None:
+        status_code = getattr(response, "status_code", None)
+    return status_code if isinstance(status_code, int) else None
+
+
 class ProviderAwareChatOpenAI(_OriginalChatOpenAI):
     """Drop-in ChatOpenAI that retries provider failures on Gemini."""
 
@@ -151,12 +182,25 @@ class ProviderAwareChatOpenAI(_OriginalChatOpenAI):
         return _OriginalChatOpenAI(
             model=_setting("LLM_FALLBACK_MODEL", DEFAULT_FALLBACK_MODEL),
             temperature=self.temperature if self.temperature is not None else 0.0,
-            max_retries=0,
-            request_timeout=20.0,
+            # One SDK-level retry is allowed for transient connection/timeout
+            # failures.  Quality/schema errors are not retried here.
+            max_retries=1,
+            request_timeout=_fallback_timeout_seconds(),
             api_key=_fallback_api_key(),
             base_url=_setting("LLM_FALLBACK_BASE_URL", GEMINI_OPENAI_BASE_URL),
             model_kwargs=dict(getattr(self, "model_kwargs", {}) or {}),
         )
+
+    @staticmethod
+    def _raise_fallback_error(fallback, fallback_error: Exception):
+        status = _safe_status_code(fallback_error)
+        status_text = f", status={status}" if status is not None else ""
+        print(
+            "[LLMProvider] Gemini fallback 실패 "
+            f"(model={fallback.model_name}, error={type(fallback_error).__name__}"
+            f"{status_text}, timeout={_fallback_timeout_seconds():g}s)"
+        )
+        raise fallback_error
 
     def _generate(self, messages, stop=None, run_manager=None, **kwargs):
         try:
@@ -178,14 +222,18 @@ class ProviderAwareChatOpenAI(_OriginalChatOpenAI):
                 raise
             print(
                 "[LLMProvider] OpenAI provider 실패 → "
-                f"{fallback.model_name} fallback 실행 ({type(primary_error).__name__})"
+                f"{fallback.model_name} fallback 실행 ({type(primary_error).__name__}, "
+                f"timeout={_fallback_timeout_seconds():g}s)"
             )
-            return fallback._generate(
-                messages,
-                stop=stop,
-                run_manager=run_manager,
-                **kwargs,
-            )
+            try:
+                return fallback._generate(
+                    messages,
+                    stop=stop,
+                    run_manager=run_manager,
+                    **kwargs,
+                )
+            except Exception as fallback_error:
+                self._raise_fallback_error(fallback, fallback_error)
 
     async def _agenerate(self, messages, stop=None, run_manager=None, **kwargs):
         try:
@@ -207,14 +255,18 @@ class ProviderAwareChatOpenAI(_OriginalChatOpenAI):
                 raise
             print(
                 "[LLMProvider] OpenAI provider 실패 → "
-                f"{fallback.model_name} fallback 실행 ({type(primary_error).__name__})"
+                f"{fallback.model_name} fallback 실행 ({type(primary_error).__name__}, "
+                f"timeout={_fallback_timeout_seconds():g}s)"
             )
-            return await fallback._agenerate(
-                messages,
-                stop=stop,
-                run_manager=run_manager,
-                **kwargs,
-            )
+            try:
+                return await fallback._agenerate(
+                    messages,
+                    stop=stop,
+                    run_manager=run_manager,
+                    **kwargs,
+                )
+            except Exception as fallback_error:
+                self._raise_fallback_error(fallback, fallback_error)
 
 
 def install_global_chatopenai_fallback() -> None:
