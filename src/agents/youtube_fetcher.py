@@ -863,7 +863,18 @@ def find_verified_video_for_slide(
         if vi.video_id in _used:
             return False, 0   # 이미 다른 슬라이드에 배정된 영상 제외
 
-        transcript = _get_video_transcript(vi.video_id)
+        try:
+            transcript = _get_video_transcript(vi.video_id)
+        except Exception as exc:
+            # 자막 요청이 막히면(주로 429) 이 후보는 검증할 수 없다. 검증 못 한
+            # 영상은 쓰지 않되, 남은 후보까지 버리지는 않는다. 예외를 그대로
+            # 올려보내면 슬라이드 검색 전체가 중단돼 뒤에 있는 더 적합한
+            # 후보를 시도조차 못 한다.
+            print(
+                f"  [YouTubeFetcher] ✗ 자막 확보 실패로 검증 불가"
+                f"({type(exc).__name__}): '{vi.title[:40]}'"
+            )
+            return False, 0
 
         if not transcript:
             # 자막 없음 → 엔티티 게이트 먼저
