@@ -100,7 +100,13 @@ def _rule_check(script: CardNewsScript, expected_count: int) -> list[str]:
         errors.append(f"해시태그 {len(script.hashtags)}개 (최소 5개)")
 
     # 막연한 표현 금지 (content 슬라이드)
-    vague_patterns = ["될 전망", "예상된다", "주목된다", "기대된다", "전망이다", "될 것으로"]
+    # 원문이 보도한 사실 대신 추측을 실으면 카드의 정보량이 0에 수렴한다.
+    # "대격변이 예고됩니다" 같은 문장이 그대로 나간 적이 있어 어미까지 포함한다.
+    vague_patterns = [
+        "될 전망", "예상된다", "주목된다", "기대된다", "전망이다", "될 것으로",
+        "예고", "전망입니다", "예상됩니다", "보입니다", "관측",
+        "의견이 많", "목소리가 커지", "일부 전문가",
+    ]
     for slide in script.slides:
         if slide.slide_type == "content":
             for pat in vague_patterns:
