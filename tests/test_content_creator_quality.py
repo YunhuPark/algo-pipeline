@@ -272,6 +272,7 @@ def test_content_creator_still_blocks_after_bounded_grounding_retry(lineage):
             [unsupported_claim("claim-bad-1")],
             [unsupported_claim("claim-bad-2")],
             [unsupported_claim("claim-bad-3")],
+            [unsupported_claim("claim-bad-4")],
         ]
     )
     creator = ContentCreator(
@@ -288,9 +289,10 @@ def test_content_creator_still_blocks_after_bounded_grounding_retry(lineage):
         )
 
     assert exc.value.error_code == "NUMBER_UNSUPPORTED"
-    assert len(generator.feedback) == 3
+    assert len(generator.feedback) == 4
     assert "NUMBER_UNSUPPORTED" in generator.feedback[1]
     assert "NUMBER_UNSUPPORTED" in generator.feedback[2]
+    assert "NUMBER_UNSUPPORTED" in generator.feedback[3]
     assert creator.last_fact_check_report is None
 
 
@@ -463,7 +465,7 @@ def test_content_creator_retries_topic_drift_with_locked_source_context(lineage)
         evidence_ids=["evidence-1"],
         source_url=lineage.source_url,
     )
-    generator = SequenceClaimGenerator([[claim], [claim], [claim]])
+    generator = SequenceClaimGenerator([[claim], [claim], [claim], [claim]])
     creator = ContentCreator(
         brand_persona=MagicMock(),
         claim_generator=generator,
