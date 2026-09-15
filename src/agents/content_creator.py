@@ -25,7 +25,11 @@ from src.qa.topic_source_guard import assert_source_lineage_matches_topic
 from src.schemas.fact_check import FactCheckReport
 
 
-MAX_CLAIM_QUALITY_ATTEMPTS = 6
+# 오류 코드별 상한(아래)과 따로, 한 번의 생성이 쓸 수 있는 전체 시도 횟수다.
+# 서로 다른 오류가 번갈아 나면 코드별 예산이 남아 있어도 전체 상한에서 먼저
+# 끝나 버린다. 실제로 길이·편집 오류가 섞여 6회를 소진하고, 남은 시도가 없어
+# 마지막에 뜬 오류 그대로 생성이 실패했다.
+MAX_CLAIM_QUALITY_ATTEMPTS = 9
 MAX_CLAIM_QUALITY_REPAIRS_PER_ERROR = 3
 
 _FACTUAL_CLAIM_QUALITY_ERRORS = {
@@ -251,7 +255,8 @@ class ContentCreator:
                     "[QualityGate] Claim 또는 편집 품질 검증에 실패하여 "
                     f"자동 재생성합니다 ({failure_class} {error_repairs}/"
                     f"{MAX_CLAIM_QUALITY_REPAIRS_PER_ERROR}, "
-                    f"{exc.error_code}{claim_label})."
+                    f"attempt {attempt}/{MAX_CLAIM_QUALITY_ATTEMPTS}, "
+                    f"{exc.error_code}{claim_label}) — {str(exc)[:110]}"
                 )
                 failed_claim = next(
                     (claim for claim in claims if claim.claim_id == exc.claim_id),
