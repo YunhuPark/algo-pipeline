@@ -96,7 +96,7 @@ def _get_video_metadata(video_id: str) -> dict:
 
     result: dict = {
         'available': False, 'view_count': 0, 'duration': 0,
-        'channel': '', 'chapters': [], 'description': '',
+        'channel': '', 'chapters': [], 'description': '', 'language': '',
     }
     try:
         import yt_dlp
@@ -117,6 +117,8 @@ def _get_video_metadata(video_id: str) -> dict:
             'duration': info.get('duration') or 0,
             'channel': info.get('channel') or info.get('uploader', ''),
             'channel_follower_count': info.get('channel_follower_count') or 0,
+            # 자막을 받을 때 이 언어 하나만 요청하면 자동 번역 트랙을 건드리지 않는다.
+            'language': (info.get('language') or '').split('-')[0],
             'chapters': [
                 {
                     'title': c.get('title', ''),
@@ -252,10 +254,20 @@ def get_video_chapters(video_id: str) -> list[dict]:
     return meta.get('chapters', [])
 
 
+def _transcript_lang(video_id: str) -> str:
+    """자막을 요청할 언어 하나를 고른다 (영상의 원래 언어, 모르면 영어)."""
+    language = (_get_video_metadata(video_id) or {}).get('language') or ''
+    return language if language else 'en'
+
+
 def _get_video_transcript(video_id: str, max_chars: int = 4000) -> str:
     """
     yt-dlp로 자동 생성 자막(auto-subtitle) 가져오기.
-    영어 자막 우선, 없으면 한국어 시도.
+
+    영상의 원래 언어 한 가지만 요청한다. 여러 언어를 함께 요청하면 유튜브가
+    없는 언어를 자동 번역해 주는 경로를 타는데, 그 엔드포인트는 훨씬 빨리
+    429를 돌려주고 한 언어만 실패해도 이미 받은 자막까지 같이 버려진다.
+    슬라이드 대조는 GPT가 하므로 자막이 영어여도 한국어 슬라이드와 맞출 수 있다.
     반환: "HH:MM:SS text\\n..." 형태의 문자열 (타임코드 포함)
 
     캐시 순서:
@@ -296,7 +308,7 @@ def _get_video_transcript(video_id: str, max_chars: int = 4000) -> str:
                 'no_warnings': True,
                 'skip_download': True,
                 'writeautomaticsub': True,
-                'subtitleslangs': ['en', 'ko'],
+                'subtitleslangs': [_transcript_lang(video_id)],
                 'subtitlesformat': 'vtt',
                 'outtmpl': os.path.join(tmp, '%(id)s.%(ext)s'),
                 'restrictfilenames': True,   # Windows 특수문자 파일명 오류([Errno 22]) 방지
