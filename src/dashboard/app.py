@@ -2474,4 +2474,7 @@ if __name__ == "__main__":
     prepare_queue_runtime()
     port = int(os.environ.get("PORT", 5001))
     print(f"알고 대시보드: http://localhost:{port}")
-    app.run(host="0.0.0.0", port=port, debug=False, threaded=True)
+    # use_reloader=True: 소스 변경 시 자동 재시작 (수동 kill/재시작 불필요).
+    # debug=False 유지: 0.0.0.0 + ngrok 터널로 외부 노출되므로 인터랙티브
+    # 디버거 콘솔(RCE 위험)은 절대 켜지 않는다. 리로더는 debug와 독립적으로 동작한다.
+    app.run(host="0.0.0.0", port=port, debug=False, use_reloader=True, threaded=True)
