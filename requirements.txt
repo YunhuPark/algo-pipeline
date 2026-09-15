@@ -1,8 +1,14 @@
 # ── LLM & 오케스트레이션 ──────────────────────────────────
+# langchain-core/langsmith는 의도적으로 낮은 버전에 고정되어 있다: 1.2+/0.5+는
+# uuid-utils(Rust 네이티브 확장)를 끌어오는데, 일부 환경의 애플리케이션 제어
+# 정책(App Control/AppLocker 등)이 서명되지 않은 이 DLL을 차단해 대시보드
+# 시작 자체가 실패한다. langchain-openai 1.1.0은 이 버전들과 호환되고,
+# 이 프로젝트는 langchain_core/langchain_openai만 직접 사용하므로(langchain
+# 본체·langchain-community·langgraph는 미사용) 여기서 제거했다.
 openai>=1.30.0
-langchain>=0.2.0
-langchain-openai>=0.1.8
-langchain-community>=0.2.0
+langchain-core==1.1.0
+langsmith==0.4.0
+langchain-openai==1.1.0
 
 # ── 트렌드 검색 ───────────────────────────────────────────
 tavily-python>=0.3.3          # Tavily Search API
