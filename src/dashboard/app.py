@@ -1599,7 +1599,12 @@ function listenSSE(jobId) {{
     document.getElementById('progressBadge').className = 'badge badge-skipped';
     const line = document.createElement('div');
     line.className = 'log-err';
-    line.textContent = '✕ 오류: ' + e.data;
+    // 서버가 보낸 error 이벤트에만 data가 있다. 브라우저가 연결 실패(서버 재시작,
+    // 네트워크 끊김)로 발생시키는 네이티브 error 이벤트에는 data가 없으므로,
+    // 그대로 출력하면 "undefined"가 찍힌다.
+    line.textContent = e.data
+      ? '✕ 오류: ' + e.data
+      : '✕ 서버 연결이 끊겨 진행 상황을 더 받지 못했습니다 (서버 재시작 등). 생성이 중단됐을 수 있습니다.';
     logBox.appendChild(line);
   }});
 }}
