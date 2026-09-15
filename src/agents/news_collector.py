@@ -184,16 +184,52 @@ def _fetch_tavily_trends(query: str = "오늘 주요 뉴스 AI IT 트렌드") ->
 
 # ── GPT-4o 주제 선택 ─────────────────────────────────────
 
+# 카드가 실을 수 있는 건 근거로 확인되는 사실뿐이다. 본문에 단위가 붙은 숫자가
+# 하나도 없는 기사(주로 논평·사설)를 고르면 "~라는 의견이 있습니다" 수준의
+# 카드밖에 나오지 않으므로, 선택 단계에서 본문의 구체성을 신호로 쓴다.
+_FACT_TOKEN_RE = re.compile(
+    r"\d[\d,]*(?:\.\d+)?\s*"
+    r"(?:%|퍼센트|퍼센트포인트|조|억|만|천|명|개|건|배|년|개월|주|일|시간|"
+    r"달러|원|엔|유로|"
+    r"billion|million|trillion|percent|dollars?|users?|people)",
+    re.IGNORECASE,
+)
+
+_MIN_FACTS = 2            # 이 정도는 있어야 카드 4장에 쓸 수치가 나온다
+_MIN_GROUNDED_POOL = 5    # 후보를 좁혀도 선택지가 남을 만큼은 있어야 한다
+
+
+def _fact_count(text: str) -> int:
+    """본문에 등장하는 '수치+단위' 표현의 가짓수."""
+    return len({
+        m.group(0).strip().casefold()
+        for m in _FACT_TOKEN_RE.finditer(text or "")
+    })
+
+
+def _excerpt(text: str, limit: int = 120) -> str:
+    clean = re.sub(r"\s+", " ", text or "").strip()
+    if not clean:
+        return "(본문 없음)"
+    return clean if len(clean) <= limit else clean[:limit] + "…"
+
 _SYSTEM = """
 당신은 인스타그램 카드뉴스 계정 '알고'의 편집장입니다.
-매일 수집된 뉴스 헤드라인 중에서 카드뉴스로 만들기 가장 좋은 주제 하나를 선택합니다.
+매일 수집된 뉴스 중에서 카드뉴스로 만들기 가장 좋은 주제 하나를 선택합니다.
 
-선택 기준:
-- MZ세대가 "와 이거 알아야 해!" 라고 느낄 주제
-- 설명할 내용이 충분히 있어서 6장 카드뉴스를 채울 수 있는 주제
+카드는 "근거로 확인된 내용"을 싣습니다. 따라서 제목이 아무리 흥미로워도
+본문에 확인 가능한 사실이 없으면 "~라는 의견이 있습니다" 수준의 카드밖에
+나오지 않습니다. 본문에 무엇이 들어있는지를 최우선으로 보고 고르십시오.
+
+선택 기준 (위에서부터 우선):
+- 본문에 구체적 수치(금액·비율·건수·날짜)와 그 수치의 주체가 실제로 적혀 있는 기사
+- 누가 무엇을 했는지가 명확한 기사. "일부 전문가들", "논란이 제기된다" 수준의
+  익명·수동 서술만 있는 논평·사설·오피니언은 피하십시오
+  (제목이 "~인가?", "Is ...?"처럼 질문형이고 본문에 수치가 없으면 대개 논평입니다)
+- 서로 다른 핵심 사실을 4개 이상 뽑을 수 있을 만큼 본문이 충분한 기사
+- 위 조건을 만족하는 것 중에서 MZ세대가 "와 이거 알아야 해!" 라고 느낄 주제
 - AI, IT, 비즈니스, 사회 이슈 중 파급력이 큰 것
 - 지나치게 특정 정치적 편향이 없는 것
-- 원문 출처와 사건이 명확하고, 서로 다른 핵심 사실을 4개 이상 뽑을 수 있는 기사
 - 선택한 한 기사의 고유명사·제품명·핵심 수치를 topic에 그대로 유지할 것
 - "AI 필수 용어", "알아야 할 것", "최신 트렌드" 같은 포괄적 주제로 바꾸지 말 것
 
@@ -204,19 +240,42 @@ context: 카드뉴스 작성에 필요한 핵심 배경 정보 3~5문장
 """
 
 _HUMAN = """
-오늘 수집된 뉴스 헤드라인 목록입니다 (현재 날짜: {today}):
+오늘 수집된 뉴스 목록입니다 (현재 날짜: {today}).
+각 항목의 '수치'는 본문에서 단위가 붙은 숫자 표현이 몇 가지 발견됐는지이며,
+그 아래는 본문 앞부분입니다.
 
 {headlines}
 
-위 헤드라인 중에서 오늘 카드뉴스로 만들 주제 하나를 선택해주세요.
+위 목록에서 오늘 카드뉴스로 만들 주제 하나를 선택해주세요.
+본문이 비어 있거나 수치가 0개인 항목은 마지막 수단으로만 고르십시오.
 반드시 {today} 기준의 최신 내용만 다루세요. 과거 연도(2025년 등)를 제목에 쓰지 마세요.
 """
 
 
 def _select_topic_with_gpt(items: list[NewsItem]) -> _SelectedTopic:
+    """주제를 고르고, selected_index를 items 기준 1-based로 맞춰 돌려준다."""
+    candidates = list(enumerate(items[:40]))   # (원본 인덱스, 기사)
+    fact_counts = {idx: _fact_count(it.summary) for idx, it in candidates}
+
+    # 수치가 있는 기사가 충분히 모이면 그쪽만 후보로 좁힌다. 부족하면 전체를
+    # 그대로 두어, 조건을 못 맞춘다고 생성 자체가 막히는 일은 없게 한다.
+    grounded = [(idx, it) for idx, it in candidates if fact_counts[idx] >= _MIN_FACTS]
+    pool = grounded if len(grounded) >= _MIN_GROUNDED_POOL else candidates
+    if pool is grounded:
+        print(
+            f"  [NewsCollector] 본문 수치 {_MIN_FACTS}개 이상 기사 "
+            f"{len(grounded)}건으로 후보 압축"
+        )
+    else:
+        print(
+            f"  [NewsCollector] 수치 있는 기사 {len(grounded)}건뿐 → 전체 "
+            f"{len(candidates)}건에서 선택"
+        )
+
     headlines = "\n".join(
-        f"[{i+1}] ({it.source}) {it.title}"
-        for i, it in enumerate(items[:40])  # 최대 40개 헤드라인
+        f"[{n+1}] ({it.source}) {it.title} — 수치 {fact_counts[idx]}개\n"
+        f"    본문: {_excerpt(it.summary)}"
+        for n, (idx, it) in enumerate(pool)
     )
 
     llm = ChatOpenAI(model="gpt-4o-mini", temperature=0.3, api_key=OPENAI_API_KEY)
@@ -227,7 +286,14 @@ def _select_topic_with_gpt(items: list[NewsItem]) -> _SelectedTopic:
     ])
     chain = prompt | structured_llm
     today = datetime.now().strftime("%Y년 %m월 %d일")
-    return chain.invoke({"headlines": headlines, "today": today})
+    selected = chain.invoke({"headlines": headlines, "today": today})
+
+    # LLM이 준 번호는 pool 기준이다. 호출부는 items 기준으로 쓰므로 여기서 되돌린다.
+    pool_pos = max(1, min(selected.selected_index, len(pool))) - 1
+    original_idx, chosen = pool[pool_pos]
+    selected.selected_index = original_idx + 1
+    print(f"  [NewsCollector] 선택 기사 본문 수치: {fact_counts[original_idx]}개")
+    return selected
 
 
 # ── 공개 API ──────────────────────────────────────────────
