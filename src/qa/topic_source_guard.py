@@ -155,6 +155,31 @@ def topic_matches_source(topic: str, source_title: str, evidence_text: str) -> b
     return matched >= required
 
 
+def topic_anchors_present(topic: str, text: str) -> bool:
+    """Return whether text mentions at least one strong topic anchor.
+
+    Unlike ``topic_matches_source``, only a single anchor match is required.
+    ``topic_matches_source`` is a fail-closed gate for the evidence actually
+    used to write claims, where two-of-two anchors avoids false positives.
+    Supplementary content such as a YouTube candidate pool needs a much looser
+    floor: it only has to rule out results that share no real connection to
+    the topic at all (for example an unrelated same-name product), not
+    demand full topical coverage.
+    """
+
+    anchors = _topic_anchor_groups(topic)
+    strong_anchors = [group for group in anchors if _is_strong_anchor_group(group)]
+    if not strong_anchors:
+        return True
+
+    haystack = _normalize(text)
+    return any(
+        _contains_variant(haystack, variant)
+        for variants in strong_anchors
+        for variant in variants
+    )
+
+
 def assert_source_lineage_matches_topic(lineage: SourceLineage) -> None:
     """Fail closed before claim generation when selected evidence is unrelated."""
 
