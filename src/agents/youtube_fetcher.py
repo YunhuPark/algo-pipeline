@@ -682,15 +682,32 @@ def fetch_video_candidates(
                 seen_ids.add(v.video_id)
                 all_candidates.append(v)
 
-    print(f"  [YouTubeFetcher] 총 {len(all_candidates)}개 수집 → 유효성 검증 중 (조회수 ≥{min_views:,})...")
+    # 검색 키워드 중 흔한 단어(예: "Rosetta")가 무관한 동명의 제품/브랜드와
+    # 충돌할 수 있다 (Apple Rosetta vs. Rosetta Stone 어학 앱). yt-dlp 검증에
+    # 시간을 쓰기 전에, 제목/스니펫에 주제 앵커가 전혀 없는 후보를 먼저 제거한다.
+    # article_title은 그 자체가 모호한 엔티티(예: "Rosetta")의 출처이므로 앵커
+    # 소스에서 제외하고, 상위 topic(예: "애플 WWDC")만 판별 기준으로 쓴다.
+    from src.qa.topic_source_guard import topic_anchors_present
+
+    relevant_candidates = []
+    for v in all_candidates:
+        if topic_anchors_present(topic, f"{v.title} {v.snippet or ''}"):
+            relevant_candidates.append(v)
+        else:
+            print(f"  [YouTubeFetcher] ✗ 주제 무관(앵커 없음): '{v.title[:35]}'")
+
+    print(
+        f"  [YouTubeFetcher] 총 {len(all_candidates)}개 수집 → "
+        f"주제 관련 {len(relevant_candidates)}개 → 유효성 검증 중 (조회수 ≥{min_views:,})..."
+    )
     valid = _validate_candidates(
-        all_candidates,
+        relevant_candidates,
         min_views=min_views,
         max_duration=max_duration,
         max_workers=4,
-        limit=len(all_candidates),   # 전체 검증
+        limit=len(relevant_candidates),   # 전체 검증
     )
-    print(f"  [YouTubeFetcher] 유효 {len(valid)}개 / 제외 {len(all_candidates)-len(valid)}개 (조회수 내림차순 정렬)")
+    print(f"  [YouTubeFetcher] 유효 {len(valid)}개 / 제외 {len(relevant_candidates)-len(valid)}개 (조회수 내림차순 정렬)")
     return valid
 
 
