@@ -162,6 +162,15 @@ def _generate_cover_copy(
         return None
 
 
+def _entities_in_copy(claim: Claim) -> list[str]:
+    """카드 문구가 실제로 언급한 엔티티만 원래 순서대로 반환."""
+    haystack = f"{claim.display_title} {claim.claim_text}".casefold()
+    return [
+        entity for entity in claim.entities
+        if entity.strip() and entity.strip().casefold() in haystack
+    ]
+
+
 def _claim_headline(claim: Claim) -> str:
     """Derive a specific headline without generating any new factual text."""
 
@@ -309,18 +318,24 @@ class ScriptAssembler:
 
         # 2. Content slides
         for c in content_claims[:max_content_slides]:
+            # 카드에 크게 띄우는 엔티티는 본문이 실제로 언급한 것만 쓴다.
+            # entities에는 근거에서 추출된 이름이 모두 들어있어서, 본문이
+            # "일부 전문가들"이라고 뭉갠 카드에 'Apollo Research'를 띄우는 일이
+            # 생긴다. 카드가 "근거로 확인된 내용"이라고 말하는 만큼, 본문이
+            # 지목하지 않은 주체를 시각적으로 지목해서는 안 된다.
+            mentioned = _entities_in_copy(c)
             primary_number = _primary_number(c)
             accent = _display_number(primary_number) if primary_number else ""
-            if not accent and c.entities:
-                accent = c.entities[0]
+            if not accent and mentioned:
+                accent = mentioned[0]
             visual_numbers = sorted(
                 c.numbers,
                 key=lambda item: item is not primary_number,
             )[:3]
             visual_values = [_display_number(item) for item in visual_numbers]
             visual_labels = [item.subject.strip() for item in visual_numbers]
-            if not visual_values and c.entities:
-                visual_values = [c.entities[0]]
+            if not visual_values and mentioned:
+                visual_values = [mentioned[0]]
 
             slides.append(Slide(
                 slide_number=len(slides) + 1,
