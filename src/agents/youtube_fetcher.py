@@ -999,7 +999,11 @@ def find_verified_video_for_slide(
                 new_cands.append(v)
 
     if new_cands:
-        new_cands = _validate_candidates(new_cands, min_views=2000, max_workers=3, limit=8)
+        # 슬라이드 전용 검색은 이미 그 슬라이드 내용으로 좁혀 찾은 결과이고, 통과한
+        # 후보는 전부 자막 내용 검증을 거친다. 조회수는 여기서 품질 지표로서의
+        # 역할이 작은 반면, 특정 사건을 실제로 다루는 니치 채널을 통째로 걸러낸다
+        # (예: 'Anthropic urges slowdown in AI' 462회가 주제 일치인데도 탈락).
+        new_cands = _validate_candidates(new_cands, min_views=300, max_workers=3, limit=8)
 
     for vi in new_cands[:max_verify]:
         matched, start = _verify_via_transcript(vi)
