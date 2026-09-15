@@ -8,7 +8,10 @@ from typing import Literal, Optional, List
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 
-MIN_CONTENT_BODY_CHARS = 45
+# 하한선은 편집 평가의 자연스러움 기준과 맞춰져 있다: 그 채점표는 "짧고 끊어지는
+# 문장"에 가점을 주고 실제 개선 제안도 30자 초반대로 내려온다. 하한선이 그보다
+# 높으면 평가자의 제안을 따를수록 길이 검증에서 떨어지는 교착이 생긴다.
+MIN_CONTENT_BODY_CHARS = 35
 MAX_CONTENT_BODY_CHARS = 130
 
 # ``Claim.entities`` is reserved for named entities (companies, products,
