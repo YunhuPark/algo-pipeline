@@ -821,7 +821,13 @@ def find_verified_video_for_slide(
     # 영상 제목/자막에 이 엔티티 중 1개 이상이 반드시 있어야 통과.
     import re as _re_ent
     _src_for_entity = article_title or topic   # 기사 제목+본문 앞부분 or topic
-    _kr_stopwords = {"이런", "그냥", "그리고", "그러나", "때문에", "통해서", "위해서", "대해서", "가장", "매우"}
+    _kr_stopwords = {
+        "이런", "그냥", "그리고", "그러나", "때문에", "통해서", "위해서", "대해서", "가장", "매우",
+        # 매체명·섹션명에서 흘러드는 일반어. 기사 제목 대신 언론사 사이트 제목이
+        # 잡히면 이런 단어들이 '필수 엔티티'가 되어 정상 영상을 전부 탈락시킨다.
+        "뉴스", "속보", "단독", "기사", "신문", "최신", "트렌드", "트렌드와",
+        "인공지능", "기술", "산업", "시장", "오늘", "이슈", "종합", "전문",
+    }
     # 영어 일반 단어 — 브랜드/제품명이 아닌 것들 (대문자여도 엔티티 X)
     _en_stopwords = {
         "this", "that", "with", "from", "your", "their",
@@ -910,7 +916,15 @@ def find_verified_video_for_slide(
         if not _entity_gate(vi.title, transcript[:3000], "자막있음"):
             return False, 0
 
-        _entity_str = ', '.join(_required_entities[:5]) if _required_entities else topic
+        # 게이트를 끈 엔티티를 프롬프트에는 "필수"로 넘기면 앞의 판단과 모순된다.
+        # 실제로 원문 제목이 언론사 사이트 제목이라 엔티티가 '한국인공지능신문',
+        # '뉴스'로 잡힌 적이 있는데, 그걸 필수로 요구하는 바람에 조회수 230만짜리
+        # 정확한 주제 영상이 "인공지능 언급이 없다"는 이유로 탈락했다.
+        _entity_str = (
+            ', '.join(_required_entities[:5])
+            if (_entity_gate_active and _required_entities)
+            else topic
+        )
         prompt = (
             f"유튜브 영상 자막을 읽고 아래 슬라이드 내용을 실제로 다루는지 판단하세요.\n\n"
             f"필수 엔티티: {_entity_str}\n"
