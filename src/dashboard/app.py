@@ -1815,7 +1815,14 @@ def preview_page(dir_name: str):
     if not d.exists():
         return "폴더 없음", 404
 
-    media_files = sorted(list(d.glob("card_*.png")) + list(d.glob("card_*.mp4")))
+    # 영상이 합성된 슬라이드는 정지 이미지와 mp4가 같은 이름으로 함께 남는다.
+    # 둘 다 실으면 같은 카드가 두 번 보이고, 슬라이드 번호를 목록 위치로 세는
+    # 아래 로직까지 밀려 영상 시작 시각이 엉뚱한 카드에 붙는다. 영상만 남긴다.
+    by_slide: dict[str, Path] = {}
+    for path in sorted(d.glob("card_*.png")) + sorted(d.glob("card_*.mp4")):
+        if path.suffix.lower() == ".mp4" or path.stem not in by_slide:
+            by_slide[path.stem] = path
+    media_files = [by_slide[stem] for stem in sorted(by_slide)]
     topic = dir_name[16:].replace("_", " ").strip()
 
     # 슬라이드별 수정 UI (script.json 있을 때만)
