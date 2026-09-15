@@ -82,6 +82,13 @@ def _resolve_output_file(dir_name: str, filename: str) -> Path:
 _JOBS: dict[str, dict] = {}   # {job_id: {status, logs, paths, script, error}}
 _JOB_QUEUES: dict[str, queue.Queue] = {}   # SSE 이벤트 큐
 
+# 생성은 한 번에 하나만 돌린다. 진행 로그를 SSE로 보내려고 sys.stdout을
+# 바꿔치기하는데 stdout은 프로세스 전역이라, 작업이 겹치면 서로의 로그를
+# 가져가고 먼저 끝난 쪽이 stdout을 되돌리면서 남은 작업의 출력이 콘솔로
+# 새어나간다. 실제로 그 경로에서 cp949 인코딩 오류로 생성이 통째로 죽었다.
+# (한 번 실행에 수 분과 API 비용이 드는 작업이라 중복 실행 자체도 낭비다.)
+_GENERATION_LOCK = threading.Lock()
+
 # ── 공통 CSS / 레이아웃 ──────────────────────────────────
 _CSS = """
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
@@ -1391,6 +1398,8 @@ def _run_pipeline_job(job_id: str, topic: str, auto: bool, make_reels: bool) -> 
     finally:
         sys.stdout = old_stdout
         q.put(None)  # SSE 스트림 종료 신호
+        # 락은 /generate/start(요청 스레드)에서 잡고 여기서 푼다.
+        _GENERATION_LOCK.release()
 
 
 @app.route("/generate", methods=["GET"])
@@ -1542,6 +1551,15 @@ function startJob(topic, auto, reels) {{
   }})
   .then(r => r.json())
   .then(data => {{
+    if (!data.job_id) {{
+      document.getElementById('progressBadge').textContent = '대기';
+      document.getElementById('progressBadge').className = 'badge badge-skipped';
+      const line = document.createElement('div');
+      line.className = 'log-err';
+      line.textContent = '✕ ' + (data.error || '생성을 시작하지 못했습니다.');
+      document.getElementById('logBox').appendChild(line);
+      return;
+    }}
     currentJobId = data.job_id;
     listenSSE(currentJobId);
   }});
@@ -1688,6 +1706,17 @@ def generate_start():
     auto = data.get("auto", False)
     make_reels = data.get("reels", False)
 
+    if not _GENERATION_LOCK.acquire(blocking=False):
+        running = next(
+            (j.get("topic") or "제목 없음"
+             for j in _JOBS.values() if j.get("status") == "running"),
+            "",
+        )
+        return {
+            "error": f"이미 생성이 진행 중입니다{f' ({running})' if running else ''}. "
+                     "완료된 뒤에 다시 시도해 주세요."
+        }, 409
+
     job_id = str(uuid.uuid4())[:8]
     q = queue.Queue()
     _JOB_QUEUES[job_id] = q
@@ -1706,7 +1735,12 @@ def generate_start():
         args=(job_id, topic, auto, make_reels),
         daemon=True,
     )
-    t.start()
+    try:
+        t.start()
+    except BaseException:
+        # 작업 스레드가 뜨지 못하면 락을 풀어 줄 주체가 없어진다.
+        _GENERATION_LOCK.release()
+        raise
     return {"job_id": job_id}
 
 
@@ -2475,6 +2509,15 @@ def publish_now():
 # ── 실행 ─────────────────────────────────────────────────
 
 if __name__ == "__main__":
+    # 진행 로그에는 ✗·⚠ 같은 기호와 이모지가 섞여 있는데 Windows 콘솔 기본
+    # 인코딩(cp949)으로는 표현할 수 없어 print가 UnicodeEncodeError를 낸다.
+    # 로그 한 줄 때문에 생성이 죽지 않도록 표현 못 하는 문자는 대체한다.
+    for _stream in (sys.stdout, sys.stderr):
+        try:
+            _stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, ValueError):
+            pass
+
     from src.queue_runtime import prepare_queue_runtime
     prepare_queue_runtime()
     port = int(os.environ.get("PORT", 5001))
