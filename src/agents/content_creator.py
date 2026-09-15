@@ -26,7 +26,7 @@ from src.schemas.fact_check import FactCheckReport
 
 
 MAX_CLAIM_QUALITY_ATTEMPTS = 6
-MAX_CLAIM_QUALITY_REPAIRS_PER_ERROR = 2
+MAX_CLAIM_QUALITY_REPAIRS_PER_ERROR = 3
 
 _FACTUAL_CLAIM_QUALITY_ERRORS = {
     "EVIDENCE_MISSING",
@@ -218,6 +218,7 @@ class ContentCreator:
                     claims=claims,
                     num_cards=requested_cards,
                     editorial_angle=editorial_angle,
+                    validation_feedback=validation_feedback,
                 )
                 editorial_result = self._evaluate_editorial_quality(
                     script,
@@ -345,7 +346,10 @@ class ContentCreator:
                         )
                 elif exc.error_code == "EDITORIAL_COPY_LENGTH_INVALID":
                     targeted_feedback = (
-                        " 길이 오류가 난 Claim만 우선 고쳐 주세요. 모든 본문 Claim은 45~80자로 작성하세요. "
+                        " 길이 오류가 난 Claim만 우선 고쳐 주세요. 지난 시도가 45자 미만으로 너무 짧았습니다. "
+                        "모든 본문 Claim은 55~85자로 작성하고, 출력 전 글자 수를 반드시 스스로 세어 "
+                        "55자 미만이면 문장을 보강해 다시 세십시오 (새 사실 추가 금지, 인용 근거 안에서 "
+                        "이유·비교 기준·구체적 수식어를 보태 자연스럽게 늘리세요). "
                         "한 카드에는 인용 근거가 직접 뒷받침하는 핵심 사실 하나만 남기고, "
                         "길이를 맞추기 위한 새 정보·평가·전망은 추가하지 마세요."
                     )
