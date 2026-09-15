@@ -400,16 +400,25 @@ def _run_once(
                 # 리스트형: 슬라이드별 개별 검색 + 자막 검증 (12초 간격으로 429 방지)
                 import re as _re_kw
                 _raw_title = _re_kw.sub(r'\[\d+/\d+\]\s*', '', slide.title).strip()
-                vi, start_t = find_verified_video_for_slide(
-                    slide_title=slide.title,
-                    slide_body=slide.body,
-                    topic=f"{topic} {_raw_title}",
-                    candidates=[],
-                    used_video_ids=used_video_ids,
-                    article_title="",   # 기사 없음 → topic 기반 엔티티
-                    max_verify=2,
-                    search_days=365,
-                )
+                try:
+                    vi, start_t = find_verified_video_for_slide(
+                        slide_title=slide.title,
+                        slide_body=slide.body,
+                        topic=f"{topic} {_raw_title}",
+                        candidates=[],
+                        used_video_ids=used_video_ids,
+                        article_title="",   # 기사 없음 → topic 기반 엔티티
+                        max_verify=2,
+                        search_days=365,
+                    )
+                except Exception as _video_err:
+                    # 영상 후보 자체는 근거와 무관한 부가 요소 — 자막 다운로드
+                    # rate limit 등 일시적 오류로 기사 전체를 버리지 않는다.
+                    print(
+                        f"  ⚠️  슬라이드{i+1} 영상 검증 오류({type(_video_err).__name__}) "
+                        "→ 이미지 슬라이드로 처리"
+                    )
+                    vi, start_t = None, 0
                 if vi is not None:
                     vi.start_seconds = start_t
                     used_video_ids.add(vi.video_id)
@@ -422,14 +431,23 @@ def _run_once(
                     video_infos.append(None)
             else:
                 _entity_src = _article_title_for_match
-                vi, start_t = find_verified_video_for_slide(
-                    slide_title=slide.title,
-                    slide_body=slide.body,
-                    topic=topic,
-                    candidates=available_pool,
-                    used_video_ids=used_video_ids,
-                    article_title=_entity_src,
-                )
+                try:
+                    vi, start_t = find_verified_video_for_slide(
+                        slide_title=slide.title,
+                        slide_body=slide.body,
+                        topic=topic,
+                        candidates=available_pool,
+                        used_video_ids=used_video_ids,
+                        article_title=_entity_src,
+                    )
+                except Exception as _video_err:
+                    # 영상 후보 자체는 근거와 무관한 부가 요소 — 자막 다운로드
+                    # rate limit 등 일시적 오류로 기사 전체를 버리지 않는다.
+                    print(
+                        f"  ⚠️  슬라이드{i+1} 영상 검증 오류({type(_video_err).__name__}) "
+                        "→ 이미지 슬라이드로 처리"
+                    )
+                    vi, start_t = None, 0
                 if vi is not None:
                     vi.start_seconds = start_t
                     used_video_ids.add(vi.video_id)
