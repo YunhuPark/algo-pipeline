@@ -6,7 +6,9 @@ YouTube 썸네일 + 영상 메타데이터 자동 수집
 from __future__ import annotations
 
 import json
+import os
 import re
+import shutil
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
@@ -22,6 +24,38 @@ _CACHE_DIR = DATA_DIR / "yt_cache"
 _CACHE_DIR.mkdir(parents=True, exist_ok=True)
 _TRANSCRIPT_CACHE_DIR = _CACHE_DIR / "transcripts"
 _TRANSCRIPT_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+_FFMPEG_BIN_DIR = _CACHE_DIR / "ffmpeg_bin"
+
+
+def _ensure_ffmpeg_on_path() -> str | None:
+    """ffmpeg을 PATH에서 찾을 수 있게 만들고 실행 파일 경로를 돌려준다.
+
+    yt-dlp는 구간 다운로드가 가능한지를 ``FFmpegFD.available()``로 판단하는데,
+    이 검사는 인자를 받지 않아 ``ffmpeg_location`` 설정을 보지 못하고 PATH만
+    뒤진다. imageio-ffmpeg가 제공하는 바이너리는 site-packages 안에 있고
+    이름도 ``ffmpeg-win-x86_64-v7.1.exe``라 그대로는 발견되지 않아, 옵션을
+    올바로 넘겨도 "ffmpeg is not installed"로 중단된다. 표준 이름으로 한 번
+    복사해 두고 그 디렉터리를 PATH 앞에 붙인다.
+    """
+    found = shutil.which("ffmpeg")
+    if found:
+        return found
+
+    try:
+        import imageio_ffmpeg
+        source = Path(imageio_ffmpeg.get_ffmpeg_exe())
+    except Exception as exc:
+        print(f"  [YouTubeFetcher] ffmpeg 준비 실패: {type(exc).__name__}")
+        return None
+
+    target = _FFMPEG_BIN_DIR / ("ffmpeg.exe" if os.name == "nt" else "ffmpeg")
+    if not target.exists():
+        _FFMPEG_BIN_DIR.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, target)
+        print(f"  [YouTubeFetcher] ffmpeg 준비 완료: {target.name}")
+
+    os.environ["PATH"] = f"{_FFMPEG_BIN_DIR}{os.pathsep}{os.environ.get('PATH', '')}"
+    return str(target)
 
 # 영상 메타데이터 캐시 (video_id → dict) — yt-dlp 중복 호출 방지
 _video_meta_cache: dict[str, dict] = {}
@@ -550,9 +584,11 @@ def download_video_snippet(
 
     try:
         import yt_dlp
-        import imageio_ffmpeg
 
-        ffmpeg_bin = imageio_ffmpeg.get_ffmpeg_exe()
+        ffmpeg_bin = _ensure_ffmpeg_on_path()
+        if not ffmpeg_bin:
+            print("  [YouTubeFetcher] ffmpeg을 찾을 수 없어 영상 구간을 자를 수 없습니다")
+            return None
         end_time = start_time + duration
 
         def download_range_func(info_dict, ydl):
