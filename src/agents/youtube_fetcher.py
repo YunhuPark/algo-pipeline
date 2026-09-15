@@ -55,7 +55,26 @@ def _ensure_ffmpeg_on_path() -> str | None:
         print(f"  [YouTubeFetcher] ffmpeg 준비 완료: {target.name}")
 
     os.environ["PATH"] = f"{_FFMPEG_BIN_DIR}{os.pathsep}{os.environ.get('PATH', '')}"
+    _register_ffmpeg_location(target)
     return str(target)
+
+
+def _register_ffmpeg_location(ffmpeg_path: Path) -> None:
+    """yt-dlp가 참조하는 ffmpeg 위치 설정에 경로를 등록한다.
+
+    PATH만 고쳐서는 오래 살아 있는 프로세스에서 효과가 없다. yt-dlp의
+    ``FFmpegPostProcessor``는 탐색 결과를 클래스 변수 ``_version_cache``에
+    프로세스 단위로 캐싱하는데, ffmpeg이 없던 시절 한 번이라도 조회하면
+    ``'ffmpeg' -> None``이 그대로 남아 이후 PATH를 고쳐도 같은 키를 다시
+    읽는다(대시보드가 재시작 없이 계속 "ffmpeg is not installed"를 낸 이유).
+    위치를 등록하면 조회 키가 전체 경로로 바뀌어 오염된 항목을 피한다.
+    """
+    try:
+        from yt_dlp.postprocessor.ffmpeg import FFmpegPostProcessor
+
+        FFmpegPostProcessor._ffmpeg_location.set(str(ffmpeg_path))
+    except Exception as exc:
+        print(f"  [YouTubeFetcher] ffmpeg 위치 등록 실패: {type(exc).__name__}")
 
 # 영상 메타데이터 캐시 (video_id → dict) — yt-dlp 중복 호출 방지
 _video_meta_cache: dict[str, dict] = {}
