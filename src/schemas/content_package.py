@@ -21,6 +21,10 @@ class PipelineResult:
     error_code: str | None
     publish_attempt_state: PublishAttemptState = PublishAttemptState.NOT_ATTEMPTED
     publish_attempt_id: str | None = None
+    run_id: str | None = None
+    retry_count: int = 0
+    approval_decision: str = "NOT_REQUIRED"
+    review_duration_sec: float = 0.0
 
 PipelineStatus = Literal[
     "CANDIDATE",

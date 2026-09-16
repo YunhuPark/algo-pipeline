@@ -16,6 +16,7 @@ Phase 1: Trend Analyzer — 멀티소스 실시간 AI 뉴스 수집
 """
 from __future__ import annotations
 
+import json
 import re
 from datetime import datetime, timedelta
 
@@ -25,8 +26,9 @@ from langchain_openai import ChatOpenAI
 from langchain_core.prompts import ChatPromptTemplate
 from pydantic import BaseModel
 
-from src.config import TAVILY_API_KEY, OPENAI_API_KEY
+from src.config import TAVILY_API_KEY, OPENAI_API_KEY, OUTPUT_DIR
 from src.schemas.card_news import TrendReport, TrendResult
+from src.utils.rss_content import extract_feed_entry_content
 
 # ── Tier 1: 공식 AI 랩 / 연구기관 블로그 ─────────────────
 RSS_TIER1: list[tuple[str, str]] = [
@@ -234,7 +236,7 @@ def _parse_rss_feeds(
                     continue
 
                 title = getattr(entry, "title", "").strip()
-                summary = getattr(entry, "summary", "").strip()[:500]
+                summary = extract_feed_entry_content(entry)
                 if not title:
                     continue
 
@@ -409,6 +411,7 @@ def _crawl_article(url: str, timeout: int = 10) -> str:
     try:
         from bs4 import BeautifulSoup
     except ImportError:
+        print("  [TrendAnalyzer] 직접 크롤링 스킵: beautifulsoup4 미설치")
         return ""
 
     SKIP_DOMAINS = {"reddit.com", "twitter.com", "x.com", "youtube.com"}
@@ -429,6 +432,30 @@ def _crawl_article(url: str, timeout: int = 10) -> str:
             return ""
 
         soup = BeautifulSoup(resp.text, "html.parser")
+
+        # 일부 매체는 본문을 화면의 p 태그 대신 JSON-LD articleBody에 둔다.
+        structured_bodies: list[str] = []
+
+        def _collect_article_bodies(value) -> None:
+            if isinstance(value, dict):
+                article_body = value.get("articleBody")
+                if isinstance(article_body, str) and article_body.strip():
+                    structured_bodies.append(article_body.strip())
+                for child in value.values():
+                    if isinstance(child, (dict, list)):
+                        _collect_article_bodies(child)
+            elif isinstance(value, list):
+                for child in value:
+                    _collect_article_bodies(child)
+
+        for script in soup.find_all("script", attrs={"type": "application/ld+json"}):
+            raw = script.string or script.get_text(strip=True)
+            if not raw:
+                continue
+            try:
+                _collect_article_bodies(json.loads(raw))
+            except (TypeError, json.JSONDecodeError):
+                continue
 
         # 불필요한 요소 제거
         for tag in soup(["script", "style", "nav", "header", "footer",
@@ -454,7 +481,8 @@ def _crawl_article(url: str, timeout: int = 10) -> str:
             for p in body.find_all("p")
             if len(p.get_text(strip=True)) >= 30
         ]
-        text = "\n\n".join(paragraphs)
+        paragraph_text = "\n\n".join(paragraphs)
+        text = max([paragraph_text, *structured_bodies], key=len, default="")
 
         # 최대 4000자
         return text[:4000]
@@ -462,6 +490,65 @@ def _crawl_article(url: str, timeout: int = 10) -> str:
     except Exception as e:
         print(f"  [TrendAnalyzer] 크롤링 실패 ({url[:50]}): {type(e).__name__}")
         return ""
+
+
+def _merge_source_content(existing: str, crawled: str) -> str:
+    """Combine distinct text from the same URL without padding with duplicates."""
+
+    existing = existing.strip()
+    crawled = crawled.strip()
+    if not existing:
+        return crawled
+    if not crawled:
+        return existing
+
+    def _normalized(text: str) -> str:
+        return re.sub(r"\W+", "", text).lower()
+
+    existing_norm = _normalized(existing)
+    crawled_norm = _normalized(crawled)
+    if existing_norm[:160] and existing_norm[:160] in crawled_norm:
+        return crawled
+    if crawled_norm[:160] and crawled_norm[:160] in existing_norm:
+        return existing
+    return f"{existing}\n\n{crawled}"
+
+
+def _load_cached_source(url: str) -> str:
+    """Reuse previously verified content for the exact same source URL."""
+
+    best = ""
+    try:
+        lineage_paths = sorted(
+            OUTPUT_DIR.glob("*/source_lineage.json"),
+            key=lambda path: path.stat().st_mtime,
+            reverse=True,
+        )
+    except OSError:
+        return ""
+
+    for path in lineage_paths:
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError, TypeError):
+            continue
+
+        candidates: list[str] = []
+        if payload.get("source_url") == url and isinstance(payload.get("context"), str):
+            candidates.append(payload["context"])
+        for passage in payload.get("evidence_passages", []) or []:
+            if (
+                isinstance(passage, dict)
+                and passage.get("source_url") == url
+                and isinstance(passage.get("text"), str)
+            ):
+                candidates.append(passage["text"])
+
+        for candidate in candidates:
+            if len(candidate.strip()) > len(best):
+                best = candidate.strip()
+
+    return best[:5000]
 
 
 def _enrich_article(article: TrendResult, min_length: int = 2000) -> TrendResult:
@@ -474,42 +561,52 @@ def _enrich_article(article: TrendResult, min_length: int = 2000) -> TrendResult
 
     print(f"  [TrendAnalyzer] 본문 보강 시도 (현재 {len(article.content)}자, 목표 {min_length}자+)...")
 
-    # 1차: 직접 크롤링
-    crawled = _crawl_article(article.url)
-    if len(crawled) >= 500:
-        print(f"  [TrendAnalyzer] 크롤링 완료: {len(crawled)}자")
+    # 같은 URL로 이미 성공한 생성물이 있으면 검증된 원문을 재사용한다.
+    cached = _load_cached_source(article.url)
+    combined = _merge_source_content(article.content, cached)
+    if len(combined) >= min_length:
+        print(f"  [TrendAnalyzer] 기존 검증 근거 재사용: {len(combined)}자")
         return TrendResult(
             title=article.title,
             url=article.url,
-            content=crawled[:5000],
+            content=combined[:5000],
+            score=article.score,
+        )
+
+    # 1차: 직접 크롤링
+    crawled = _crawl_article(article.url)
+    combined = _merge_source_content(combined, crawled)
+    if len(combined) >= min_length:
+        print(f"  [TrendAnalyzer] 직접 근거 확보: {len(combined)}자")
+        return TrendResult(
+            title=article.title,
+            url=article.url,
+            content=combined[:5000],
             score=article.score,
         )
 
     # 2차: Tavily extract fallback
-    if not TAVILY_API_KEY:
-        return article
-    try:
-        from tavily import TavilyClient
-        client = TavilyClient(api_key=TAVILY_API_KEY)
-        resp = client.extract(urls=[article.url])
-        results = resp.get("results", [])
-        if results and results[0].get("raw_content"):
-            raw = results[0]["raw_content"]
-            # 크롤링 결과보다 길면 Tavily 결과 사용
-            content = raw[:5000] if len(raw) > len(crawled) else crawled[:5000]
-            print(f"  [TrendAnalyzer] Tavily extract 완료: {len(content)}자")
-            return TrendResult(
-                title=article.title,
-                url=article.url,
-                content=content,
-                score=article.score,
-            )
-    except Exception as e:
-        print(f"  [TrendAnalyzer] Tavily extract 실패: {e}")
+    if TAVILY_API_KEY:
+        try:
+            from tavily import TavilyClient
+            client = TavilyClient(api_key=TAVILY_API_KEY)
+            resp = client.extract(urls=[article.url])
+            results = resp.get("results", [])
+            if results and results[0].get("raw_content"):
+                raw = results[0]["raw_content"]
+                content = _merge_source_content(combined, raw)[:5000]
+                print(f"  [TrendAnalyzer] Tavily extract 완료: {len(content)}자")
+                return TrendResult(
+                    title=article.title,
+                    url=article.url,
+                    content=content,
+                    score=article.score,
+                )
+        except Exception as e:
+            print(f"  [TrendAnalyzer] Tavily extract 실패: {e}")
 
     # 기존 content + 크롤링 결과 합산 (둘 다 짧으면)
-    if crawled:
-        combined = article.content + "\n\n" + crawled
+    if combined != article.content.strip():
         return TrendResult(
             title=article.title, url=article.url,
             content=combined[:5000], score=article.score,
@@ -619,6 +716,46 @@ def _pick_best_article(articles: list[TrendResult], topic: str) -> TrendResult:
         url=main.url,
         content=combined[:8000],   # 5000 → 8000: 보강된 전문 전달
         score=main.score,
+    )
+
+
+def build_locked_source_report(
+    topic: str,
+    *,
+    title: str,
+    url: str,
+    content: str = "",
+    min_content_length: int = 1000,
+) -> TrendReport:
+    """Enrich the exact article selected by the automatic news editor.
+
+    The selected URL remains the primary evidence.  Automatic generation must
+    not turn a headline into a new query and silently switch to another event.
+    """
+
+    if not title.strip() or not url.startswith(("http://", "https://")):
+        raise ValueError("LOCKED_SOURCE_INVALID")
+
+    locked = _enrich_article(
+        TrendResult(
+            title=title.strip(),
+            url=url,
+            content=content.strip(),
+            score=2.0,
+        ),
+        min_length=min_content_length,
+    )
+    if len(locked.content.strip()) < min_content_length:
+        raise ValueError("LOCKED_SOURCE_CONTENT_INSUFFICIENT")
+
+    return TrendReport(
+        query=topic,
+        results=[locked],
+        summary=(
+            "선택한 원문을 고정하여 생성합니다.\n"
+            f"기사 제목: {locked.title}\n"
+            f"출처: {locked.url}\n\n{locked.content}"
+        ),
     )
 
 

@@ -1,8 +1,14 @@
 # ── LLM & 오케스트레이션 ──────────────────────────────────
+# langchain-core/langsmith는 의도적으로 낮은 버전에 고정되어 있다: 1.2+/0.5+는
+# uuid-utils(Rust 네이티브 확장)를 끌어오는데, 일부 환경의 애플리케이션 제어
+# 정책(App Control/AppLocker 등)이 서명되지 않은 이 DLL을 차단해 대시보드
+# 시작 자체가 실패한다. langchain-openai 1.1.0은 이 버전들과 호환되고,
+# 이 프로젝트는 langchain_core/langchain_openai만 직접 사용하므로(langchain
+# 본체·langchain-community·langgraph는 미사용) 여기서 제거했다.
 openai>=1.30.0
-langchain>=0.2.0
-langchain-openai>=0.1.8
-langchain-community>=0.2.0
+langchain-core==1.1.0
+langsmith==0.4.0
+langchain-openai==1.1.0
 
 # ── 트렌드 검색 ───────────────────────────────────────────
 tavily-python>=0.3.3          # Tavily Search API
@@ -10,9 +16,16 @@ tavily-python>=0.3.3          # Tavily Search API
 # ── 이미지 처리 ───────────────────────────────────────────
 pillow>=10.0.0
 matplotlib>=3.8.0             # 성과 분석 차트
+yt-dlp                         # 근거 기사와 일치하는 영상 후보/썸네일 수집
+
+# ── 영상 슬라이드 합성 ────────────────────────────────────
+# 없으면 자막 검증까지 통과한 영상이 정지 이미지로만 남는다.
+moviepy>=2.0                  # 배경 카드 + 유튜브 클립 합성 (2.x import API 사용)
+imageio-ffmpeg                # 클립 다운로드·인코딩용 ffmpeg 바이너리
 
 # ── 뉴스 수집 ─────────────────────────────────────────────
 feedparser>=6.0.0             # RSS 피드 파싱
+beautifulsoup4>=4.13.0        # 기사 본문 및 RSS content:encoded 추출
 
 # ── 스케줄러 ──────────────────────────────────────────────
 apscheduler>=3.10.0           # 매일 자동 실행

@@ -3,8 +3,8 @@ Phase 3: Design Renderer — 중앙 정렬 / 이모지 수정 / 섹션 레이블
 ────────────────────────────────────────────────────────────────────
 레이아웃:
   커버   : 배경 + 강한 하단 그라디언트 / 중앙 하단에 큰 타이틀 + 서브텍스트
-  컨텐츠 : 배지 / 중앙 타이틀 / 구분선 / 본문
-  Split  : 상단 45% 썸네일 / 하단 텍스트 중앙 정렬
+  컨텐츠 : 검증된 수치·비교·과정·주체·한계·영향을 시각 구조로 표현
+  Split  : 상단 56% 썸네일 / 하단 텍스트 중앙 정렬
   CTA    : 이모지 + 타이틀 + 본문 + 핸들 + 해시태그 (전체 중앙)
 """
 from __future__ import annotations
@@ -22,6 +22,14 @@ from src.persona import Persona, load_persona
 
 W, H = 1080, 1350
 PAD = 96
+
+# 영상 슬라이드에서 카드 상단이 썸네일/클립에 내주는 높이 비율.
+# 카드 PNG(_render_split)와 mp4 합성(video_renderer)이 같은 값을 써야 하며,
+# 어긋나면 클립이 구분선과 본문 영역을 덮는다.
+# 0.45일 때는 텍스트 블록(약 230px)이 700px 영역 한가운데 놓여 위아래로
+# 240px씩 비었다. 영상 쪽에 그 여백을 주면 빈 공간이 줄고 클립이 카드를
+# 주도한다. 본문 상한(130자)이 3~4줄로 들어가고도 여유가 남는 값이다.
+SPLIT_THUMB_RATIO = 0.56
 
 
 # ── 색상/스타일 ────────────────────────────────────────────
@@ -151,8 +159,10 @@ def _apply_background(base: Image.Image, for_cover: bool = False) -> Image.Image
         img = img.filter(ImageFilter.GaussianBlur(radius=1))
         img = ImageEnhance.Contrast(img).enhance(0.90)
         img = ImageEnhance.Color(img).enhance(0.85)
-        # 오버레이를 일반보다 20 연하게 → 배경 사진이 더 살아남
-        alpha = max(60, STYLE["overlay_alpha"] - 30)
+        # 커버는 배경이 유일한 그래픽이다. 하단 그라디언트가 또 덮기 때문에
+        # 기본 오버레이까지 진하면 배경 이미지가 사실상 사라져 카드가 검은
+        # 여백으로만 읽힌다. 본문 카드보다 확실히 연하게 둔다.
+        alpha = max(60, STYLE["overlay_alpha"] - 70)
     else:
         img = img.filter(ImageFilter.GaussianBlur(radius=2))
         img = ImageEnhance.Contrast(img).enhance(0.80)
@@ -258,14 +268,22 @@ def _draw_badge(img: Image.Image, slide_num: int, total: int, handle: str) -> Im
     ld.rounded_rectangle([PAD, y, PAD + bw, y + bh], radius=8,
                           fill=(*STYLE["accent"], 210))
 
+    # 핸들도 배경판 위에 올린다. 영상 썸네일이 깔리는 카드에서는 상단이 밝아
+    # 배경판 없이 뮤티드 색으로만 그리면 글자가 사실상 보이지 않는다.
+    hf = _font(24, bold=False)
+    hw = int(ld.textlength(handle, font=hf)) if handle else 0
+    if handle:
+        ld.rounded_rectangle(
+            [W - PAD - hw - 14, y, W - PAD + 10, y + bh],
+            radius=8,
+            fill=(12, 12, 24, 170),
+        )
+
     result = Image.alpha_composite(img.convert("RGBA"), layer).convert("RGB")
     draw = ImageDraw.Draw(result)
     draw.text((PAD + 12, y + 7), badge, font=f, fill=(255, 255, 255))
 
-    # 핸들
     if handle:
-        hf = _font(24, bold=False)
-        hw = int(draw.textlength(handle, font=hf))
         draw.text((W - PAD - hw, y + 8), handle, font=hf, fill=STYLE["text_muted"])
 
     return result
@@ -297,6 +315,346 @@ def _draw_accent_box(img: Image.Image, text: str, cx_center: int, y: int) -> tup
     return img, box[3] + 16
 
 
+def _draw_glass_panel(
+    img: Image.Image,
+    box: tuple[int, int, int, int],
+    *,
+    radius: int = 28,
+    fill_alpha: int = 155,
+    outline_alpha: int = 100,
+) -> Image.Image:
+    """Draw a translucent panel that stays readable over any background."""
+
+    layer = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(layer)
+    draw.rounded_rectangle(
+        box,
+        radius=radius,
+        fill=(*STYLE["overlay_color"], fill_alpha),
+        outline=(*STYLE["accent"], outline_alpha),
+        width=2,
+    )
+    return Image.alpha_composite(img.convert("RGBA"), layer).convert("RGB")
+
+
+def _draw_body_panel(
+    img: Image.Image,
+    body: str,
+    *,
+    top: int = 850,
+) -> Image.Image:
+    """Render the verified claim as a readable editorial note."""
+
+    box = (PAD, top, W - PAD, H - 92)
+    img = _draw_glass_panel(img, box, fill_alpha=185, outline_alpha=65)
+    draw = ImageDraw.Draw(img)
+
+    label_font = _font(21, bold=True)
+    draw.text((PAD + 34, top + 30), "근거로 확인된 내용", font=label_font, fill=STYLE["accent2"])
+
+    cleaned = _clean(body)
+    body_font = _auto_font(
+        cleaned,
+        34,
+        bold=False,
+        steps=((55, 1.0), (85, 0.91), (115, 0.82)),
+    )
+    lines = wrap_text(cleaned, body_font, draw, W - PAD * 2 - 68)
+    _, _, _, line_h = draw.textbbox((0, 0), "가나다", font=body_font)
+    y = top + 74
+    for line in lines[:5]:
+        draw.text((PAD + 34, y), line, font=body_font, fill=STYLE["text_secondary"])
+        y += int(line_h * 1.38)
+    return img
+
+
+def _draw_statement_body(img: Image.Image, body: str, *, top: int) -> Image.Image:
+    """수치가 없는 주장을 도형 대신 큰 문장으로 싣는다.
+
+    warning/entity/impact 비주얼은 삼각형·동심원 안에 단어 하나를 넣는 장식이라
+    본문에 이미 있는 정보를 되풀이할 뿐이었다. 그 자리를 비워 문장을 키우면
+    같은 공간이 실제로 읽히는 내용이 된다.
+    """
+    measure = ImageDraw.Draw(img)
+    label_font = _font(21, bold=True)
+    label = "근거로 확인된 내용"
+
+    cleaned = _clean(body)
+    body_font = _auto_font(
+        cleaned,
+        50,
+        bold=False,
+        steps=((45, 1.0), (70, 0.88), (100, 0.76), (130, 0.66)),
+    )
+    lines = wrap_text(cleaned, body_font, measure, W - PAD * 2 - 68)[:7]
+    _, _, _, line_h = measure.textbbox((0, 0), "가나다", font=body_font)
+    _, _, _, label_h = measure.textbbox((0, 0), label, font=label_font)
+
+    # 패널을 내용 높이에 맞춘다. 항상 카드 바닥까지 늘이면 문장이 짧을 때
+    # 속이 텅 빈 상자가 된다.
+    pad_top, gap, pad_bottom = 34, 26, 42
+    block_h = len(lines) * int(line_h * 1.34)
+    panel_h = pad_top + label_h + gap + block_h + pad_bottom
+    region_top, region_bot = top, H - 92
+    panel_top = region_top + max(0, (region_bot - region_top - panel_h) // 2)
+    panel_bot = min(region_bot, panel_top + panel_h)
+
+    img = _draw_glass_panel(
+        img, (PAD, panel_top, W - PAD, panel_bot), fill_alpha=170, outline_alpha=60
+    )
+    draw = ImageDraw.Draw(img)
+    draw.text((PAD + 34, panel_top + pad_top), label, font=label_font, fill=STYLE["accent2"])
+
+    y = panel_top + pad_top + label_h + gap
+    for line in lines:
+        draw.text((PAD + 34, y), line, font=body_font, fill=STYLE["text_primary"])
+        y += int(line_h * 1.34)
+    return img
+
+
+def _draw_infographic_title(img: Image.Image, title: str) -> tuple[Image.Image, int]:
+    """Top-align the claim headline so the visual can occupy the center."""
+
+    draw = ImageDraw.Draw(img)
+    clean_title = _clean(title)
+    title_font = _auto_font(
+        clean_title,
+        58,
+        bold=True,
+        steps=((14, 1.0), (20, 0.9), (28, 0.79), (36, 0.7)),
+    )
+    lines = wrap_text(clean_title, title_font, draw, W - PAD * 2 - 24)
+    _, _, _, line_h = draw.textbbox((0, 0), "가나다", font=title_font)
+    y = 138
+
+    draw.rounded_rectangle(
+        (PAD, y + 5, PAD + 7, y + max(74, len(lines[:2]) * int(line_h * 1.18))),
+        radius=3,
+        fill=STYLE["accent2"],
+    )
+    for line in lines[:2]:
+        draw.text((PAD + 26, y), line, font=title_font, fill=STYLE["text_primary"])
+        y += int(line_h * 1.18)
+    return img, y
+
+
+def _split_verified_clauses(body: str) -> list[str]:
+    """Split the existing claim into visual steps without adding new copy."""
+
+    clean = re.sub(r"\s+", " ", _clean(body)).strip()
+    clauses = [
+        part.strip(" ,.;:·")
+        for part in re.split(
+            r"(?<=[.!?])\s+|[,;]\s*|\s+(?=(?:그리고|이어|이후|다음으로|마지막으로)\s)",
+            clean,
+        )
+        if part.strip(" ,.;:·")
+    ]
+    if len(clauses) == 1 and len(clean) > 44:
+        midpoint = len(clean) // 2
+        split_at = clean.rfind(" ", 0, midpoint)
+        if split_at < 18:
+            split_at = clean.find(" ", midpoint)
+        if split_at > 0:
+            clauses = [clean[:split_at].strip(), clean[split_at:].strip()]
+    return clauses[:3] or [clean]
+
+
+def _render_infographic_content(
+    img: Image.Image,
+    slide: Slide,
+    total: int,
+    handle: str,
+) -> Image.Image:
+    """Evidence-driven layouts that remain visual without stock media."""
+
+    img = _draw_gradient_top(img.copy(), strength=55)
+    overlay = Image.new(
+        "RGBA",
+        (W, H),
+        (*STYLE["overlay_color"], max(35, STYLE["overlay_alpha"] - 55)),
+    )
+    img = Image.alpha_composite(img.convert("RGBA"), overlay).convert("RGB")
+    img = _draw_badge(img, slide.slide_number, total, handle)
+    img, title_bottom = _draw_infographic_title(img, slide.title)
+
+    visual_type = slide.visual_type
+    values = [_clean(value) for value in slide.visual_values if _clean(value)]
+    labels = [_clean(label) for label in slide.visual_labels]
+    if not values and slide.accent:
+        values = [_clean(slide.accent)]
+
+    visual_top = max(330, title_bottom + 30)
+    visual_bottom = 800
+    visual_box = (PAD, visual_top, W - PAD, visual_bottom)
+
+    # 인포그래픽은 보여줄 데이터가 있을 때만 그린다. warning/entity/impact는
+    # 삼각형·동심원 안에 단어 하나를 넣을 뿐이라 470px을 장식에 쓰고 정작
+    # 주장은 아래로 밀려났다. 그런 카드는 문장을 키워 그 공간을 쓴다.
+    if visual_type not in {"hero_stat", "comparison", "process"}:
+        img = _draw_statement_body(img, slide.body, top=visual_top)
+        _bottom_accent_line(ImageDraw.Draw(img))
+        return img
+
+    if visual_type == "process":
+        clauses = _split_verified_clauses(slide.body)
+        card_gap = 18
+        card_h = min(235, (H - 120 - visual_top - card_gap * (len(clauses) - 1)) // len(clauses))
+        y = visual_top
+        for index, clause in enumerate(clauses, start=1):
+            box = (PAD, y, W - PAD, y + card_h)
+            img = _draw_glass_panel(img, box, fill_alpha=178, outline_alpha=80)
+            draw = ImageDraw.Draw(img)
+            circle = (PAD + 26, y + 28, PAD + 90, y + 92)
+            draw.ellipse(circle, fill=STYLE["accent"])
+            number_font = _font(28, bold=True)
+            number = str(index)
+            number_w = int(draw.textlength(number, font=number_font))
+            draw.text((PAD + 58 - number_w // 2, y + 43), number, font=number_font, fill=(255, 255, 255))
+            clause_font = _auto_font(clause, 31, bold=index == 1, steps=((35, 1.0), (60, 0.88)))
+            clause_lines = wrap_text(clause, clause_font, draw, W - PAD * 2 - 145)
+            _, _, _, clause_h = draw.textbbox((0, 0), "가나다", font=clause_font)
+            clause_y = y + 31
+            for line in clause_lines[:3]:
+                draw.text((PAD + 120, clause_y), line, font=clause_font, fill=STYLE["text_primary"])
+                clause_y += int(clause_h * 1.3)
+            if index < len(clauses):
+                draw.line(
+                    [(PAD + 58, y + card_h), (PAD + 58, y + card_h + card_gap)],
+                    fill=STYLE["accent2"],
+                    width=4,
+                )
+            y += card_h + card_gap
+    else:
+        img = _draw_glass_panel(img, visual_box, fill_alpha=145, outline_alpha=95)
+        draw = ImageDraw.Draw(img)
+        center_x = W // 2
+        center_y = (visual_top + visual_bottom) // 2
+
+        if visual_type == "comparison" and len(values) >= 2:
+            draw.line(
+                [(center_x, visual_top + 62), (center_x, visual_bottom - 62)],
+                fill=STYLE["text_muted"],
+                width=2,
+            )
+            for index, value in enumerate(values[:2]):
+                cell_center = PAD + (W - PAD * 2) * (index * 2 + 1) // 4
+                label = labels[index] if index < len(labels) and labels[index] else f"근거 수치 {index + 1}"
+                label = _shorten_visual_label(label, 18)
+                label_font = _auto_font(label, 24, bold=False, steps=((14, 1.0), (20, 0.85)))
+                label_lines = wrap_text(label, label_font, draw, (W - PAD * 2) // 2 - 44)
+                ly = visual_top + 70
+                for line in label_lines[:2]:
+                    lw = int(draw.textlength(line, font=label_font))
+                    draw.text((cell_center - lw // 2, ly), line, font=label_font, fill=STYLE["text_muted"])
+                    ly += 34
+                value_font = _auto_font(value, 66, bold=True, steps=((8, 1.0), (13, 0.84), (18, 0.7)))
+                value_lines = wrap_text(value, value_font, draw, (W - PAD * 2) // 2 - 52)
+                _, _, _, value_h = draw.textbbox((0, 0), "123", font=value_font)
+                vy = center_y - max(50, len(value_lines) * int(value_h * 1.08) // 2) + 30
+                for line in value_lines[:2]:
+                    vw = int(draw.textlength(line, font=value_font))
+                    draw.text((cell_center - vw // 2, vy), line, font=value_font, fill=STYLE["text_primary"])
+                    vy += int(value_h * 1.08)
+                draw.rounded_rectangle(
+                    (cell_center - 54, visual_bottom - 78, cell_center + 54, visual_bottom - 72),
+                    radius=3,
+                    fill=STYLE["accent"] if index == 0 else STYLE["accent2"],
+                )
+        elif visual_type == "warning":
+            triangle_center_y = center_y - 34
+            draw.polygon(
+                [
+                    (center_x, triangle_center_y - 112),
+                    (center_x - 118, triangle_center_y + 92),
+                    (center_x + 118, triangle_center_y + 92),
+                ],
+                outline=STYLE["accent2"],
+                width=9,
+            )
+            mark_font = _font(104, bold=True)
+            mark = "!"
+            mark_w = int(draw.textlength(mark, font=mark_font))
+            draw.text((center_x - mark_w // 2, triangle_center_y - 47), mark, font=mark_font, fill=STYLE["text_primary"])
+            label_font = _font(27, bold=True)
+            label = "주의해서 볼 점"
+            label_w = int(draw.textlength(label, font=label_font))
+            draw.text((center_x - label_w // 2, visual_bottom - 74), label, font=label_font, fill=STYLE["accent2"])
+        elif visual_type == "impact":
+            for radius, alpha in ((178, 50), (132, 80), (84, 145)):
+                draw.ellipse(
+                    (center_x - radius, center_y - radius, center_x + radius, center_y + radius),
+                    outline=(*STYLE["accent"], alpha),
+                    width=6,
+                )
+            value = values[0] if values else "영향"
+            value_font = _auto_font(value, 58, bold=True, steps=((10, 1.0), (16, 0.82), (23, 0.67)))
+            value_lines = wrap_text(value, value_font, draw, 340)
+            _, _, _, value_h = draw.textbbox((0, 0), "가나다", font=value_font)
+            vy = center_y - len(value_lines) * value_h // 2
+            for line in value_lines[:2]:
+                line_w = int(draw.textlength(line, font=value_font))
+                draw.text((center_x - line_w // 2, vy), line, font=value_font, fill=STYLE["text_primary"])
+                vy += int(value_h * 1.08)
+            for dx, dy in ((-275, -80), (265, -112), (-240, 135), (275, 110)):
+                draw.ellipse(
+                    (center_x + dx - 13, center_y + dy - 13, center_x + dx + 13, center_y + dy + 13),
+                    fill=STYLE["accent2"],
+                )
+        elif visual_type == "entity":
+            value = values[0] if values else _clean(slide.accent or slide.title)
+            draw.ellipse(
+                (center_x - 205, center_y - 205, center_x + 205, center_y + 205),
+                outline=STYLE["accent"],
+                width=4,
+            )
+            draw.ellipse(
+                (center_x - 180, center_y - 180, center_x + 180, center_y + 180),
+                outline=STYLE["accent2"],
+                width=2,
+            )
+            entity_font = _auto_font(value, 62, bold=True, steps=((10, 1.0), (16, 0.83), (24, 0.68)))
+            entity_lines = wrap_text(value, entity_font, draw, 340)
+            _, _, _, entity_h = draw.textbbox((0, 0), "가나다", font=entity_font)
+            ey = center_y - len(entity_lines) * entity_h // 2
+            for line in entity_lines[:3]:
+                line_w = int(draw.textlength(line, font=entity_font))
+                draw.text((center_x - line_w // 2, ey), line, font=entity_font, fill=STYLE["text_primary"])
+                ey += int(entity_h * 1.08)
+        else:
+            value = values[0] if values else _clean(slide.accent or slide.title)
+            label = labels[0] if labels and labels[0] else "핵심 수치"
+            label = _shorten_visual_label(label, 25)
+            label_font = _font(24, bold=True)
+            label_w = int(draw.textlength(label, font=label_font))
+            pill_w = min(W - PAD * 2 - 80, label_w + 44)
+            pill_left = center_x - pill_w // 2
+            draw.rounded_rectangle(
+                (pill_left, visual_top + 60, pill_left + pill_w, visual_top + 106),
+                radius=23,
+                fill=STYLE["accent"],
+            )
+            draw.text((center_x - label_w // 2, visual_top + 71), label, font=label_font, fill=(255, 255, 255))
+            value_font = _auto_font(value, 112, bold=True, steps=((7, 1.0), (11, 0.84), (16, 0.68)))
+            value_lines = wrap_text(value, value_font, draw, W - PAD * 2 - 90)
+            _, _, _, value_h = draw.textbbox((0, 0), "123", font=value_font)
+            vy = center_y - len(value_lines) * value_h // 2 + 42
+            for line in value_lines[:2]:
+                value_w = int(draw.textlength(line, font=value_font))
+                draw.text((center_x - value_w // 2, vy), line, font=value_font, fill=STYLE["text_primary"])
+                vy += int(value_h * 1.04)
+
+        img = _draw_body_panel(img, slide.body, top=850)
+
+    _bottom_accent_line(ImageDraw.Draw(img))
+    return img
+
+
+def _shorten_visual_label(text: str, limit: int) -> str:
+    clean = re.sub(r"\s+", " ", text).strip(" ,.;:")
+    return clean if len(clean) <= limit else clean[:limit].rstrip()
+
+
 def _bottom_accent_line(draw: ImageDraw.ImageDraw) -> None:
     draw.line([(0, H - 6), (W, H - 6)], fill=STYLE["accent2"], width=6)
 
@@ -312,7 +670,9 @@ def _render_cover(img: Image.Image, slide: Slide, total: int,
       → accent 수치 박스 (있을 때)
       → 하단: 날짜(좌) + 핸들(우) + 스와이프 힌트 + accent line
     """
-    img = _draw_gradient_bottom(img.copy(), strength=245)
+    # 타이틀이 카드 중앙에 놓이므로 하단을 245까지 덮을 이유가 없다.
+    # 강하게 덮으면 배경 하단이 통째로 검정이 된다.
+    img = _draw_gradient_bottom(img.copy(), strength=190)
     img = _draw_gradient_top(img, strength=130)
 
     # ── 상단: 슬라이드 번호 배지 + 핸들 ──────────────────
@@ -326,14 +686,33 @@ def _render_cover(img: Image.Image, slide: Slide, total: int,
     draw = ImageDraw.Draw(img)
     text_w = W - PAD * 2
 
-    # ── 이모지 — 중앙 크게 (세로 35%~45% 위치) ──────────
-    y = int(H * 0.35)
-    if slide.emoji:
-        img, eh = _paste_emoji(img, slide.emoji, W // 2, y, size=100)
-        draw = ImageDraw.Draw(img)
-        y += eh + 20
-    else:
-        y = int(H * 0.42)
+    # ── 본문 블록 높이를 먼저 재고 수직 중앙에 배치 ──────
+    # 예전에는 시작 y를 H*0.35로 고정했다. 내용 높이와 무관한 값이라 브랜드
+    # pill 아래로 약 360px, 스와이프 힌트 위로 약 400px이 비어 보였다.
+    # 컨텐츠·split 카드가 이미 쓰는 "높이를 재고 중앙에 두기"와 같게 맞춘다.
+    clean_title = _clean(slide.title)
+    tf = _auto_font(clean_title, 84, bold=True,
+                    steps=((12, 1.0), (18, 0.88), (26, 0.76), (36, 0.65)))
+    t_lines = wrap_text(clean_title, tf, draw, text_w)
+    _, _, _, lh = draw.textbbox((0, 0), "가나다", font=tf)
+
+    sub = _clean(hook or slide.body or "")
+    bf = None
+    b_lines: list[str] = []
+    lh2 = 0
+    if sub:
+        bf = _auto_font(sub, 38, bold=False,
+                        steps=((20, 1.0), (35, 0.87), (50, 0.76)))
+        b_lines = wrap_text(sub, bf, draw, text_w)
+        _, _, _, lh2 = draw.textbbox((0, 0), "가나다", font=bf)
+
+    content_h = 5 + 24 + len(t_lines) * int(lh * 1.18) + 18
+    if b_lines:
+        content_h += len(b_lines) * int(lh2 * 1.4) + 16
+
+    zone_top = 110 + 38 + 40    # 브랜드 pill 아래
+    zone_bot = H - 52 - 24      # 스와이프 힌트 위
+    y = zone_top + max(0, (zone_bot - zone_top - content_h) // 2)
 
     # ── accent bar (구분선 대신) ──────────────────────────
     img = _draw_accent_bar(img, y, width=56, height=5)
@@ -341,23 +720,13 @@ def _render_cover(img: Image.Image, slide: Slide, total: int,
     y += 24
 
     # ── 타이틀 — 가장 크고 임팩트 있게 ──────────────────
-    clean_title = _clean(slide.title)
-    tf = _auto_font(clean_title, 84, bold=True,
-                    steps=((12, 1.0), (18, 0.88), (26, 0.76), (36, 0.65)))
-    t_lines = wrap_text(clean_title, tf, draw, text_w)
-    _, _, _, lh = draw.textbbox((0, 0), "가나다", font=tf)
     for line in t_lines:
         draw.text((_cx(draw, line, tf), y), line, font=tf, fill=STYLE["text_primary"])
         y += int(lh * 1.18)
     y += 18
 
     # ── hook 문장 ─────────────────────────────────────────
-    sub = _clean(hook or slide.body or "")
-    if sub:
-        bf = _auto_font(sub, 38, bold=False,
-                        steps=((20, 1.0), (35, 0.87), (50, 0.76)))
-        b_lines = wrap_text(sub, bf, draw, text_w)
-        _, _, _, lh2 = draw.textbbox((0, 0), "가나다", font=bf)
+    if b_lines and bf is not None:
         for line in b_lines:
             draw.text((_cx(draw, line, bf), y), line, font=bf,
                       fill=STYLE["text_secondary"])
@@ -383,6 +752,9 @@ def _render_content(img: Image.Image, slide: Slide, total: int, handle: str) -> 
             → 좌측 accent 세로선 + 본문(첫줄 강조) → accent box
     콘텐츠 블록을 배지 하단~하단 accent line 사이 수직 중앙에 배치.
     """
+    if slide.visual_type != "auto":
+        return _render_infographic_content(img, slide, total, handle)
+
     img = _draw_gradient_top(img.copy(), strength=40)
     # 컨텐츠 카드 오버레이를 커버보다 조금 연하게 → 배경이 더 살아남
     img_arr = img.convert("RGBA")
@@ -477,7 +849,7 @@ def _render_split(
     하단 55% = 텍스트 중앙 정렬
     """
     img = img.copy().convert("RGB")
-    thumb_h = int(H * 0.45)
+    thumb_h = int(H * SPLIT_THUMB_RATIO)
 
     # 썸네일 붙이기
     thumb = thumbnail.copy().convert("RGB").resize((W, thumb_h), Image.LANCZOS)
@@ -848,6 +1220,11 @@ def render_card_set(
                 "slide_type": s.slide_type,
                 "title": s.title,
                 "body": s.body,
+                "emoji": s.emoji,
+                "accent": s.accent,
+                "visual_type": s.visual_type,
+                "visual_values": s.visual_values,
+                "visual_labels": s.visual_labels,
             }
             for s in script.slides
         ],

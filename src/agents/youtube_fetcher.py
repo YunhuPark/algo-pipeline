@@ -6,7 +6,9 @@ YouTube 썸네일 + 영상 메타데이터 자동 수집
 from __future__ import annotations
 
 import json
+import os
 import re
+import shutil
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
@@ -22,6 +24,57 @@ _CACHE_DIR = DATA_DIR / "yt_cache"
 _CACHE_DIR.mkdir(parents=True, exist_ok=True)
 _TRANSCRIPT_CACHE_DIR = _CACHE_DIR / "transcripts"
 _TRANSCRIPT_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+_FFMPEG_BIN_DIR = _CACHE_DIR / "ffmpeg_bin"
+
+
+def _ensure_ffmpeg_on_path() -> str | None:
+    """ffmpeg을 PATH에서 찾을 수 있게 만들고 실행 파일 경로를 돌려준다.
+
+    yt-dlp는 구간 다운로드가 가능한지를 ``FFmpegFD.available()``로 판단하는데,
+    이 검사는 인자를 받지 않아 ``ffmpeg_location`` 설정을 보지 못하고 PATH만
+    뒤진다. imageio-ffmpeg가 제공하는 바이너리는 site-packages 안에 있고
+    이름도 ``ffmpeg-win-x86_64-v7.1.exe``라 그대로는 발견되지 않아, 옵션을
+    올바로 넘겨도 "ffmpeg is not installed"로 중단된다. 표준 이름으로 한 번
+    복사해 두고 그 디렉터리를 PATH 앞에 붙인다.
+    """
+    found = shutil.which("ffmpeg")
+    if found:
+        return found
+
+    try:
+        import imageio_ffmpeg
+        source = Path(imageio_ffmpeg.get_ffmpeg_exe())
+    except Exception as exc:
+        print(f"  [YouTubeFetcher] ffmpeg 준비 실패: {type(exc).__name__}")
+        return None
+
+    target = _FFMPEG_BIN_DIR / ("ffmpeg.exe" if os.name == "nt" else "ffmpeg")
+    if not target.exists():
+        _FFMPEG_BIN_DIR.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, target)
+        print(f"  [YouTubeFetcher] ffmpeg 준비 완료: {target.name}")
+
+    os.environ["PATH"] = f"{_FFMPEG_BIN_DIR}{os.pathsep}{os.environ.get('PATH', '')}"
+    _register_ffmpeg_location(target)
+    return str(target)
+
+
+def _register_ffmpeg_location(ffmpeg_path: Path) -> None:
+    """yt-dlp가 참조하는 ffmpeg 위치 설정에 경로를 등록한다.
+
+    PATH만 고쳐서는 오래 살아 있는 프로세스에서 효과가 없다. yt-dlp의
+    ``FFmpegPostProcessor``는 탐색 결과를 클래스 변수 ``_version_cache``에
+    프로세스 단위로 캐싱하는데, ffmpeg이 없던 시절 한 번이라도 조회하면
+    ``'ffmpeg' -> None``이 그대로 남아 이후 PATH를 고쳐도 같은 키를 다시
+    읽는다(대시보드가 재시작 없이 계속 "ffmpeg is not installed"를 낸 이유).
+    위치를 등록하면 조회 키가 전체 경로로 바뀌어 오염된 항목을 피한다.
+    """
+    try:
+        from yt_dlp.postprocessor.ffmpeg import FFmpegPostProcessor
+
+        FFmpegPostProcessor._ffmpeg_location.set(str(ffmpeg_path))
+    except Exception as exc:
+        print(f"  [YouTubeFetcher] ffmpeg 위치 등록 실패: {type(exc).__name__}")
 
 # 영상 메타데이터 캐시 (video_id → dict) — yt-dlp 중복 호출 방지
 _video_meta_cache: dict[str, dict] = {}
@@ -96,7 +149,7 @@ def _get_video_metadata(video_id: str) -> dict:
 
     result: dict = {
         'available': False, 'view_count': 0, 'duration': 0,
-        'channel': '', 'chapters': [], 'description': '',
+        'channel': '', 'chapters': [], 'description': '', 'language': '',
     }
     try:
         import yt_dlp
@@ -117,6 +170,8 @@ def _get_video_metadata(video_id: str) -> dict:
             'duration': info.get('duration') or 0,
             'channel': info.get('channel') or info.get('uploader', ''),
             'channel_follower_count': info.get('channel_follower_count') or 0,
+            # 자막을 받을 때 이 언어 하나만 요청하면 자동 번역 트랙을 건드리지 않는다.
+            'language': (info.get('language') or '').split('-')[0],
             'chapters': [
                 {
                     'title': c.get('title', ''),
@@ -252,10 +307,20 @@ def get_video_chapters(video_id: str) -> list[dict]:
     return meta.get('chapters', [])
 
 
+def _transcript_lang(video_id: str) -> str:
+    """자막을 요청할 언어 하나를 고른다 (영상의 원래 언어, 모르면 영어)."""
+    language = (_get_video_metadata(video_id) or {}).get('language') or ''
+    return language if language else 'en'
+
+
 def _get_video_transcript(video_id: str, max_chars: int = 4000) -> str:
     """
     yt-dlp로 자동 생성 자막(auto-subtitle) 가져오기.
-    영어 자막 우선, 없으면 한국어 시도.
+
+    영상의 원래 언어 한 가지만 요청한다. 여러 언어를 함께 요청하면 유튜브가
+    없는 언어를 자동 번역해 주는 경로를 타는데, 그 엔드포인트는 훨씬 빨리
+    429를 돌려주고 한 언어만 실패해도 이미 받은 자막까지 같이 버려진다.
+    슬라이드 대조는 GPT가 하므로 자막이 영어여도 한국어 슬라이드와 맞출 수 있다.
     반환: "HH:MM:SS text\\n..." 형태의 문자열 (타임코드 포함)
 
     캐시 순서:
@@ -296,7 +361,7 @@ def _get_video_transcript(video_id: str, max_chars: int = 4000) -> str:
                 'no_warnings': True,
                 'skip_download': True,
                 'writeautomaticsub': True,
-                'subtitleslangs': ['en', 'ko'],
+                'subtitleslangs': [_transcript_lang(video_id)],
                 'subtitlesformat': 'vtt',
                 'outtmpl': os.path.join(tmp, '%(id)s.%(ext)s'),
                 'restrictfilenames': True,   # Windows 특수문자 파일명 오류([Errno 22]) 방지
@@ -538,9 +603,11 @@ def download_video_snippet(
 
     try:
         import yt_dlp
-        import imageio_ffmpeg
 
-        ffmpeg_bin = imageio_ffmpeg.get_ffmpeg_exe()
+        ffmpeg_bin = _ensure_ffmpeg_on_path()
+        if not ffmpeg_bin:
+            print("  [YouTubeFetcher] ffmpeg을 찾을 수 없어 영상 구간을 자를 수 없습니다")
+            return None
         end_time = start_time + duration
 
         def download_range_func(info_dict, ydl):
@@ -682,15 +749,32 @@ def fetch_video_candidates(
                 seen_ids.add(v.video_id)
                 all_candidates.append(v)
 
-    print(f"  [YouTubeFetcher] 총 {len(all_candidates)}개 수집 → 유효성 검증 중 (조회수 ≥{min_views:,})...")
+    # 검색 키워드 중 흔한 단어(예: "Rosetta")가 무관한 동명의 제품/브랜드와
+    # 충돌할 수 있다 (Apple Rosetta vs. Rosetta Stone 어학 앱). yt-dlp 검증에
+    # 시간을 쓰기 전에, 제목/스니펫에 주제 앵커가 전혀 없는 후보를 먼저 제거한다.
+    # article_title은 그 자체가 모호한 엔티티(예: "Rosetta")의 출처이므로 앵커
+    # 소스에서 제외하고, 상위 topic(예: "애플 WWDC")만 판별 기준으로 쓴다.
+    from src.qa.topic_source_guard import topic_anchors_present
+
+    relevant_candidates = []
+    for v in all_candidates:
+        if topic_anchors_present(topic, f"{v.title} {v.snippet or ''}"):
+            relevant_candidates.append(v)
+        else:
+            print(f"  [YouTubeFetcher] ✗ 주제 무관(앵커 없음): '{v.title[:35]}'")
+
+    print(
+        f"  [YouTubeFetcher] 총 {len(all_candidates)}개 수집 → "
+        f"주제 관련 {len(relevant_candidates)}개 → 유효성 검증 중 (조회수 ≥{min_views:,})..."
+    )
     valid = _validate_candidates(
-        all_candidates,
+        relevant_candidates,
         min_views=min_views,
         max_duration=max_duration,
         max_workers=4,
-        limit=len(all_candidates),   # 전체 검증
+        limit=len(relevant_candidates),   # 전체 검증
     )
-    print(f"  [YouTubeFetcher] 유효 {len(valid)}개 / 제외 {len(all_candidates)-len(valid)}개 (조회수 내림차순 정렬)")
+    print(f"  [YouTubeFetcher] 유효 {len(valid)}개 / 제외 {len(relevant_candidates)-len(valid)}개 (조회수 내림차순 정렬)")
     return valid
 
 
@@ -792,7 +876,13 @@ def find_verified_video_for_slide(
     # 영상 제목/자막에 이 엔티티 중 1개 이상이 반드시 있어야 통과.
     import re as _re_ent
     _src_for_entity = article_title or topic   # 기사 제목+본문 앞부분 or topic
-    _kr_stopwords = {"이런", "그냥", "그리고", "그러나", "때문에", "통해서", "위해서", "대해서", "가장", "매우"}
+    _kr_stopwords = {
+        "이런", "그냥", "그리고", "그러나", "때문에", "통해서", "위해서", "대해서", "가장", "매우",
+        # 매체명·섹션명에서 흘러드는 일반어. 기사 제목 대신 언론사 사이트 제목이
+        # 잡히면 이런 단어들이 '필수 엔티티'가 되어 정상 영상을 전부 탈락시킨다.
+        "뉴스", "속보", "단독", "기사", "신문", "최신", "트렌드", "트렌드와",
+        "인공지능", "기술", "산업", "시장", "오늘", "이슈", "종합", "전문",
+    }
     # 영어 일반 단어 — 브랜드/제품명이 아닌 것들 (대문자여도 엔티티 X)
     _en_stopwords = {
         "this", "that", "with", "from", "your", "their",
@@ -846,7 +936,18 @@ def find_verified_video_for_slide(
         if vi.video_id in _used:
             return False, 0   # 이미 다른 슬라이드에 배정된 영상 제외
 
-        transcript = _get_video_transcript(vi.video_id)
+        try:
+            transcript = _get_video_transcript(vi.video_id)
+        except Exception as exc:
+            # 자막 요청이 막히면(주로 429) 이 후보는 검증할 수 없다. 검증 못 한
+            # 영상은 쓰지 않되, 남은 후보까지 버리지는 않는다. 예외를 그대로
+            # 올려보내면 슬라이드 검색 전체가 중단돼 뒤에 있는 더 적합한
+            # 후보를 시도조차 못 한다.
+            print(
+                f"  [YouTubeFetcher] ✗ 자막 확보 실패로 검증 불가"
+                f"({type(exc).__name__}): '{vi.title[:40]}'"
+            )
+            return False, 0
 
         if not transcript:
             # 자막 없음 → 엔티티 게이트 먼저
@@ -870,7 +971,15 @@ def find_verified_video_for_slide(
         if not _entity_gate(vi.title, transcript[:3000], "자막있음"):
             return False, 0
 
-        _entity_str = ', '.join(_required_entities[:5]) if _required_entities else topic
+        # 게이트를 끈 엔티티를 프롬프트에는 "필수"로 넘기면 앞의 판단과 모순된다.
+        # 실제로 원문 제목이 언론사 사이트 제목이라 엔티티가 '한국인공지능신문',
+        # '뉴스'로 잡힌 적이 있는데, 그걸 필수로 요구하는 바람에 조회수 230만짜리
+        # 정확한 주제 영상이 "인공지능 언급이 없다"는 이유로 탈락했다.
+        _entity_str = (
+            ', '.join(_required_entities[:5])
+            if (_entity_gate_active and _required_entities)
+            else topic
+        )
         prompt = (
             f"유튜브 영상 자막을 읽고 아래 슬라이드 내용을 실제로 다루는지 판단하세요.\n\n"
             f"필수 엔티티: {_entity_str}\n"
@@ -959,7 +1068,11 @@ def find_verified_video_for_slide(
                 new_cands.append(v)
 
     if new_cands:
-        new_cands = _validate_candidates(new_cands, min_views=2000, max_workers=3, limit=8)
+        # 슬라이드 전용 검색은 이미 그 슬라이드 내용으로 좁혀 찾은 결과이고, 통과한
+        # 후보는 전부 자막 내용 검증을 거친다. 조회수는 여기서 품질 지표로서의
+        # 역할이 작은 반면, 특정 사건을 실제로 다루는 니치 채널을 통째로 걸러낸다
+        # (예: 'Anthropic urges slowdown in AI' 462회가 주제 일치인데도 탈락).
+        new_cands = _validate_candidates(new_cands, min_views=300, max_workers=3, limit=8)
 
     for vi in new_cands[:max_verify]:
         matched, start = _verify_via_transcript(vi)

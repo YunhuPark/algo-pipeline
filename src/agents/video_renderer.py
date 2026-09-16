@@ -5,12 +5,26 @@ YouTube 다운로드 영상과 카드뉴스 PNG 이미지를 합성하여 MP4 �
 from __future__ import annotations
 from pathlib import Path
 
-def create_video_slide(bg_image_path: Path, video_snippet_path: Path, output_path: Path, thumb_ratio: float = 0.45):
+def create_video_slide(
+    bg_image_path: Path,
+    video_snippet_path: Path,
+    output_path: Path,
+    thumb_ratio: float | None = None,
+):
     """
     moviepy를 사용해 배경 이미지(PNG)와 유튜브 클립 영상(MP4)을 합성.
     영상은 카드 상단(0부터 thumb_ratio 비율까지)에 오버레이 됩니다.
+
+    thumb_ratio는 카드 PNG의 썸네일 영역 높이와 반드시 같아야 한다. 값이
+    어긋나면 클립이 디자인의 썸네일 자리를 벗어나 구분선·본문을 덮는다.
+    기본값은 레이아웃을 정의한 design_renderer에서 가져온다.
     """
     from moviepy import ImageClip, VideoFileClip, CompositeVideoClip
+
+    if thumb_ratio is None:
+        from src.agents.design_renderer import SPLIT_THUMB_RATIO
+
+        thumb_ratio = SPLIT_THUMB_RATIO
 
     try:
         # 배경 이미지 (디자인 렌더러가 만들어둔 카드 이미지)
