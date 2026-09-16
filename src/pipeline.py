@@ -574,7 +574,7 @@ def _run_once(
                 )
                 if snippet_path:
                     out_mp4 = target_path.with_suffix(".mp4")
-                    res = create_video_slide(target_path, snippet_path, out_mp4, thumb_ratio=0.45)
+                    res = create_video_slide(target_path, snippet_path, out_mp4)
                     if res:
                         return target_idx, res, best_t, slide_script.slide_number
             except Exception as e:
