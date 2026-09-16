@@ -308,12 +308,14 @@ class ScriptAssembler:
 
         # 1a. Cover slide: frame the factual topic as a safe question instead
         # of copying generic input such as "... 핵심 요약" verbatim.
+        # 커버는 배경과 타이포로 성립시킨다. 예전에는 주제와 무관하게 신문
+        # 이모지를 붙였는데, 폴더블폰 기사에 신문 아이콘이 걸리는 식이라
+        # 그래픽이라기보다 자리 채우기로 읽혔다. 렌더러도 더는 그리지 않는다.
         slides.append(Slide(
             slide_number=1,
             slide_type="cover",
             title=cover_title,
             body=cover_hook,
-            emoji="📰"
         ))
 
         # 2. Content slides
