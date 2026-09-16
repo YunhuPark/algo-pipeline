@@ -368,6 +368,50 @@ def _draw_body_panel(
     return img
 
 
+def _draw_statement_body(img: Image.Image, body: str, *, top: int) -> Image.Image:
+    """수치가 없는 주장을 도형 대신 큰 문장으로 싣는다.
+
+    warning/entity/impact 비주얼은 삼각형·동심원 안에 단어 하나를 넣는 장식이라
+    본문에 이미 있는 정보를 되풀이할 뿐이었다. 그 자리를 비워 문장을 키우면
+    같은 공간이 실제로 읽히는 내용이 된다.
+    """
+    measure = ImageDraw.Draw(img)
+    label_font = _font(21, bold=True)
+    label = "근거로 확인된 내용"
+
+    cleaned = _clean(body)
+    body_font = _auto_font(
+        cleaned,
+        50,
+        bold=False,
+        steps=((45, 1.0), (70, 0.88), (100, 0.76), (130, 0.66)),
+    )
+    lines = wrap_text(cleaned, body_font, measure, W - PAD * 2 - 68)[:7]
+    _, _, _, line_h = measure.textbbox((0, 0), "가나다", font=body_font)
+    _, _, _, label_h = measure.textbbox((0, 0), label, font=label_font)
+
+    # 패널을 내용 높이에 맞춘다. 항상 카드 바닥까지 늘이면 문장이 짧을 때
+    # 속이 텅 빈 상자가 된다.
+    pad_top, gap, pad_bottom = 34, 26, 42
+    block_h = len(lines) * int(line_h * 1.34)
+    panel_h = pad_top + label_h + gap + block_h + pad_bottom
+    region_top, region_bot = top, H - 92
+    panel_top = region_top + max(0, (region_bot - region_top - panel_h) // 2)
+    panel_bot = min(region_bot, panel_top + panel_h)
+
+    img = _draw_glass_panel(
+        img, (PAD, panel_top, W - PAD, panel_bot), fill_alpha=170, outline_alpha=60
+    )
+    draw = ImageDraw.Draw(img)
+    draw.text((PAD + 34, panel_top + pad_top), label, font=label_font, fill=STYLE["accent2"])
+
+    y = panel_top + pad_top + label_h + gap
+    for line in lines:
+        draw.text((PAD + 34, y), line, font=body_font, fill=STYLE["text_primary"])
+        y += int(line_h * 1.34)
+    return img
+
+
 def _draw_infographic_title(img: Image.Image, title: str) -> tuple[Image.Image, int]:
     """Top-align the claim headline so the visual can occupy the center."""
 
@@ -443,6 +487,14 @@ def _render_infographic_content(
     visual_top = max(330, title_bottom + 30)
     visual_bottom = 800
     visual_box = (PAD, visual_top, W - PAD, visual_bottom)
+
+    # 인포그래픽은 보여줄 데이터가 있을 때만 그린다. warning/entity/impact는
+    # 삼각형·동심원 안에 단어 하나를 넣을 뿐이라 470px을 장식에 쓰고 정작
+    # 주장은 아래로 밀려났다. 그런 카드는 문장을 키워 그 공간을 쓴다.
+    if visual_type not in {"hero_stat", "comparison", "process"}:
+        img = _draw_statement_body(img, slide.body, top=visual_top)
+        _bottom_accent_line(ImageDraw.Draw(img))
+        return img
 
     if visual_type == "process":
         clauses = _split_verified_clauses(slide.body)
