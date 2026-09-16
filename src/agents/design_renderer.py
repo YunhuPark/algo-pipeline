@@ -23,6 +23,11 @@ from src.persona import Persona, load_persona
 W, H = 1080, 1350
 PAD = 96
 
+# 영상 슬라이드에서 카드 상단이 썸네일/클립에 내주는 높이 비율.
+# 카드 PNG(_render_split)와 mp4 합성(video_renderer)이 같은 값을 써야 하며,
+# 어긋나면 클립이 구분선과 본문 영역을 덮는다.
+SPLIT_THUMB_RATIO = 0.45
+
 
 # ── 색상/스타일 ────────────────────────────────────────────
 
@@ -258,14 +263,22 @@ def _draw_badge(img: Image.Image, slide_num: int, total: int, handle: str) -> Im
     ld.rounded_rectangle([PAD, y, PAD + bw, y + bh], radius=8,
                           fill=(*STYLE["accent"], 210))
 
+    # 핸들도 배경판 위에 올린다. 영상 썸네일이 깔리는 카드에서는 상단이 밝아
+    # 배경판 없이 뮤티드 색으로만 그리면 글자가 사실상 보이지 않는다.
+    hf = _font(24, bold=False)
+    hw = int(ld.textlength(handle, font=hf)) if handle else 0
+    if handle:
+        ld.rounded_rectangle(
+            [W - PAD - hw - 14, y, W - PAD + 10, y + bh],
+            radius=8,
+            fill=(12, 12, 24, 170),
+        )
+
     result = Image.alpha_composite(img.convert("RGBA"), layer).convert("RGB")
     draw = ImageDraw.Draw(result)
     draw.text((PAD + 12, y + 7), badge, font=f, fill=(255, 255, 255))
 
-    # 핸들
     if handle:
-        hf = _font(24, bold=False)
-        hw = int(draw.textlength(handle, font=hf))
         draw.text((W - PAD - hw, y + 8), handle, font=hf, fill=STYLE["text_muted"])
 
     return result
@@ -768,7 +781,7 @@ def _render_split(
     하단 55% = 텍스트 중앙 정렬
     """
     img = img.copy().convert("RGB")
-    thumb_h = int(H * 0.45)
+    thumb_h = int(H * SPLIT_THUMB_RATIO)
 
     # 썸네일 붙이기
     thumb = thumbnail.copy().convert("RGB").resize((W, thumb_h), Image.LANCZOS)
