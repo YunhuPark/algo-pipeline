@@ -200,7 +200,7 @@ def _fetch_tavily_trends(query: str = "오늘 주요 뉴스 AI IT 트렌드") ->
 _NAVER_RANKING_URL = "https://news.naver.com/main/ranking/popularDay.naver"
 
 
-def _fetch_naver_ranking_news(top_n: int = 2, max_press: int = 8) -> list[NewsItem]:
+def _fetch_naver_ranking_news(top_n: int = 1, max_press: int = 6) -> list[NewsItem]:
     try:
         from bs4 import BeautifulSoup
     except ImportError:
@@ -330,11 +330,17 @@ _SYSTEM = """
 - 위 조건을 만족하는 것 중에서 MZ세대가 "와 이거 알아야 해!" 라고 느낄 주제
 - AI, IT, 비즈니스, 사회 이슈 중 파급력이 큰 것
 - 지나치게 특정 정치적 편향이 없는 것
+- 연예인 스캔들, 강력범죄, 여야 정쟁성 공방, 자극적인 사건·사고 단신은
+  수치가 많아도 고르지 마십시오 — 이 계정은 AI·IT·비즈니스·사회 트렌드를
+  다루는 계정이지 일반 사회면 가십·사건 계정이 아닙니다. "많이 읽혔다"는
+  것과 "이 계정에 맞다"는 것은 다른 문제입니다
 - 선택한 한 기사의 고유명사·제품명·핵심 수치를 topic에 그대로 유지할 것
 - "AI 필수 용어", "알아야 할 것", "최신 트렌드" 같은 포괄적 주제로 바꾸지 말 것
-- [네이버 랭킹 N위] 표시는 실제로 그날 많이 읽힌 기사라는 뜻입니다. 위 조건이
-  비슷한 후보들 사이에서는 이 표시가 있는 쪽을 우선하십시오 (표시가 없다고
-  배제하지는 마십시오 — 팩트 조건이 먼저입니다)
+- [네이버 랭킹 N위] 표시는 그날 많이 읽힌 기사라는 뜻이지만, 네이버 랭킹은
+  종합 뉴스라 위 계정 성격과 무관한 기사도 많이 섞여 있습니다. 위 모든
+  조건(특히 계정 성격 부합)을 이미 만족하는 후보들끼리 우열을 가릴 때만
+  참고하는 부차적 신호로 쓰고, 계정 성격에 안 맞는 기사를 이 표시 때문에
+  끌어올리지 마십시오
 
 selected_index: 선택한 헤드라인의 번호 (1부터 시작)
 topic: 카드뉴스 제목으로 쓸 간결한 주제명 (예: "애플 AI 전략 대전환")

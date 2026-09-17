@@ -448,7 +448,9 @@ def _extract_approximate_number_mentions(text: str) -> Iterable[Tuple[int, str]]
 def _raw_text_verbatim_in_evidence(raw_text: str, evidence_text: str) -> bool:
     """Last-resort check for numeral idioms none of the structured parsers
     above recognize: does this exact numeric phrase already appear in the
-    evidence, ignoring only whitespace and full/half-width differences?
+    evidence, ignoring only whitespace, digit-grouping commas, and
+    full/half-width differences (all of which are pure formatting, not
+    semantic, elsewhere in this file's number matching)?
 
     Deliberately narrow — no digit-string this short would match unless the
     claim actually copied evidence's own wording, since the phrase must
@@ -456,7 +458,8 @@ def _raw_text_verbatim_in_evidence(raw_text: str, evidence_text: str) -> bool:
     """
 
     def _norm(s: str) -> str:
-        return re.sub(r"\s+", "", unicodedata.normalize("NFKC", s or ""))
+        s = re.sub(r"\s+", "", unicodedata.normalize("NFKC", s or ""))
+        return s.replace(",", "")
 
     raw = _norm(raw_text)
     if not raw or not any(ch.isdigit() for ch in raw):
