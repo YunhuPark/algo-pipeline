@@ -9,11 +9,13 @@ from __future__ import annotations
 
 import re
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Optional
 
 import feedparser
+import httpx
 from langchain_openai import ChatOpenAI
 from langchain_core.prompts import ChatPromptTemplate
 from pydantic import BaseModel
@@ -49,6 +51,8 @@ class NewsItem:
     source: str
     url: str
     published: Optional[datetime] = None
+    is_trending: bool = False   # 네이버 랭킹뉴스(실제 많이 본 기사) 출신이면 True
+    rank: int | None = None     # 위 랭킹에서의 순위 (언론사별 1위~)
 
 
 @dataclass
@@ -67,6 +71,12 @@ class _SelectedTopic(BaseModel):
     topic: str
     reason: str
     context: str
+    # 1순위 기사에 영상 근거가 부실하면 대신 쓸 2순위 후보. 0이면 대안 없음.
+    # 1순위와 마찬가지로 팩트 조건을 만족하는 것 중에서 고르게 한다.
+    alt_selected_index: int = 0
+    alt_topic: str = ""
+    alt_reason: str = ""
+    alt_context: str = ""
 
 
 _SOURCE_ANCHOR_STOPWORDS = {
@@ -182,6 +192,96 @@ def _fetch_tavily_trends(query: str = "오늘 주요 뉴스 AI IT 트렌드") ->
         return []
 
 
+# ── 네이버 랭킹뉴스 (실제 "많이 본 뉴스") ─────────────────
+# RSS·Tavily는 관련도만 알려줄 뿐 실제로 얼마나 읽혔는지는 모른다. 네이버는
+# 언론사별 "많이 본 뉴스" TOP을 매일 공개 페이지로 제공한다 — 공식 API가
+# 아니라 페이지를 직접 파싱하므로, 마크업이 바뀌면 이 함수만 조용히 빈
+# 리스트를 반환하고 나머지 파이프라인은 RSS/Tavily만으로 계속 진행한다.
+_NAVER_RANKING_URL = "https://news.naver.com/main/ranking/popularDay.naver"
+
+
+def _fetch_naver_ranking_news(top_n: int = 2, max_press: int = 8) -> list[NewsItem]:
+    try:
+        from bs4 import BeautifulSoup
+    except ImportError:
+        return []
+
+    try:
+        headers = {
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+            ),
+        }
+        resp = httpx.get(_NAVER_RANKING_URL, headers=headers, timeout=10)
+        resp.raise_for_status()
+        # 페이지가 EUC-KR로 인코딩돼 있어 기본 디코딩을 쓰면 제목이 깨진다.
+        html = resp.content.decode("euc-kr", errors="replace")
+        soup = BeautifulSoup(html, "html.parser")
+
+        stubs: list[dict] = []
+        for box in soup.select("div.rankingnews_box")[:max_press]:
+            name_tag = box.select_one(".rankingnews_name")
+            press = name_tag.get_text(strip=True) if name_tag else "네이버"
+            for li in box.select(".rankingnews_list li")[:top_n]:
+                title_tag = li.select_one(".list_title")
+                if not title_tag:
+                    continue
+                url = title_tag.get("href", "")
+                title = title_tag.get_text(strip=True)
+                if not title or not url:
+                    continue
+                rank_tag = li.select_one(".list_ranking_num")
+                rank_digits = re.sub(r"\D", "", rank_tag.get_text()) if rank_tag else ""
+                stubs.append({
+                    "press": press,
+                    "title": title,
+                    "url": url,
+                    "rank": int(rank_digits) if rank_digits else 0,
+                })
+
+        if not stubs:
+            print("  [NewsCollector] 네이버 랭킹뉴스: 목록을 못 찾음 (마크업 변경 추정)")
+            return []
+
+        # 본문은 기사당 1회씩 별도 크롤링이 필요해 순차로 하면 느리다(15개면
+        # 15~30초). 병렬로 돌려 지연을 줄인다 — 실패한 항목은 빈 본문으로
+        # 남기고(제목만으로도 GPT 선택에는 참고가 된다) 전체를 막지 않는다.
+        from src.agents.trend_analyzer import _crawl_article
+
+        bodies: dict[str, str] = {}
+        with ThreadPoolExecutor(max_workers=6) as executor:
+            future_to_url = {
+                executor.submit(_crawl_article, s["url"]): s["url"] for s in stubs
+            }
+            for future in future_to_url:
+                url = future_to_url[future]
+                try:
+                    bodies[url] = future.result(timeout=15)
+                except Exception:
+                    bodies[url] = ""
+
+        items = [
+            NewsItem(
+                title=s["title"],
+                summary=bodies.get(s["url"], ""),
+                source=f"네이버랭킹·{s['press']}",
+                url=s["url"],
+                is_trending=True,
+                rank=s["rank"],
+            )
+            for s in stubs
+        ]
+        print(
+            f"  [NewsCollector] 네이버 랭킹뉴스 수집: {len(items)}개 "
+            f"(언론사 {len(soup.select('div.rankingnews_box')[:max_press])}곳 × 상위 {top_n}개)"
+        )
+        return items
+    except Exception as e:
+        print(f"  [NewsCollector] 네이버 랭킹뉴스 실패({type(e).__name__}): {e}")
+        return []
+
+
 # ── GPT-4o 주제 선택 ─────────────────────────────────────
 
 # 카드가 실을 수 있는 건 근거로 확인되는 사실뿐이다. 본문에 단위가 붙은 숫자가
@@ -232,11 +332,19 @@ _SYSTEM = """
 - 지나치게 특정 정치적 편향이 없는 것
 - 선택한 한 기사의 고유명사·제품명·핵심 수치를 topic에 그대로 유지할 것
 - "AI 필수 용어", "알아야 할 것", "최신 트렌드" 같은 포괄적 주제로 바꾸지 말 것
+- [네이버 랭킹 N위] 표시는 실제로 그날 많이 읽힌 기사라는 뜻입니다. 위 조건이
+  비슷한 후보들 사이에서는 이 표시가 있는 쪽을 우선하십시오 (표시가 없다고
+  배제하지는 마십시오 — 팩트 조건이 먼저입니다)
 
 selected_index: 선택한 헤드라인의 번호 (1부터 시작)
 topic: 카드뉴스 제목으로 쓸 간결한 주제명 (예: "애플 AI 전략 대전환")
 reason: 왜 이 주제를 선택했는지 한 줄
 context: 카드뉴스 작성에 필요한 핵심 배경 정보 3~5문장
+
+또한 1순위와 별개로, 위 조건을 비슷한 수준으로 만족하는 서로 다른 기사를
+2순위 대안으로 하나 더 골라주세요 (alt_*). 실제 생성 단계에서 1순위 기사에
+쓸 만한 영상 자료가 전혀 없을 때만 대신 씁니다. 마땅한 대안이 없으면
+alt_selected_index를 0으로 두세요.
 """
 
 _HUMAN = """
@@ -272,8 +380,11 @@ def _select_topic_with_gpt(items: list[NewsItem]) -> _SelectedTopic:
             f"{len(candidates)}건에서 선택"
         )
 
+    def _badge(it: NewsItem) -> str:
+        return f" [네이버 랭킹 {it.rank}위]" if it.is_trending and it.rank else ""
+
     headlines = "\n".join(
-        f"[{n+1}] ({it.source}) {it.title} — 수치 {fact_counts[idx]}개\n"
+        f"[{n+1}] ({it.source}) {it.title} — 수치 {fact_counts[idx]}개{_badge(it)}\n"
         f"    본문: {_excerpt(it.summary)}"
         for n, (idx, it) in enumerate(pool)
     )
@@ -293,7 +404,44 @@ def _select_topic_with_gpt(items: list[NewsItem]) -> _SelectedTopic:
     original_idx, chosen = pool[pool_pos]
     selected.selected_index = original_idx + 1
     print(f"  [NewsCollector] 선택 기사 본문 수치: {fact_counts[original_idx]}개")
+
+    # alt도 같은 방식으로 pool 기준 → items 기준으로 되돌린다. 범위를 벗어나면
+    # (LLM이 이상한 번호를 주면) 대안 없음으로 취급 — 잘못된 기사로 바뀌는 것보다 안전하다.
+    if selected.alt_selected_index and 1 <= selected.alt_selected_index <= len(pool):
+        alt_pool_pos = selected.alt_selected_index - 1
+        alt_original_idx, _ = pool[alt_pool_pos]
+        selected.alt_selected_index = alt_original_idx + 1
+    else:
+        selected.alt_selected_index = 0
+
     return selected
+
+
+# ── 영상 커버리지 사전 확인 ────────────────────────────────
+
+def _quick_video_coverage(article_title: str, topic: str) -> int:
+    """주제 선택 단계에서 쓸 가벼운 영상 후보 개수 추정.
+
+    Phase 1.5의 정식 탐색(youtube_fetcher.fetch_video_candidates, 키워드
+    6개·조회수 2000+)보다 키워드/후보 수를 줄여 빠르게 대략적인 커버리지만
+    잰다. 실패해도(네트워크, rate limit 등) 주제 선택 자체를 막지 않도록
+    -1(확인 불가)을 돌려주고 호출부는 이를 "판단 보류"로 취급한다.
+    """
+    try:
+        from src.agents.youtube_fetcher import fetch_video_candidates
+
+        candidates = fetch_video_candidates(
+            article_title=article_title,
+            topic=topic,
+            n_keywords=3,
+            n_per=3,
+            days=60,
+            min_views=1000,
+        )
+        return len(candidates)
+    except Exception as e:
+        print(f"  [NewsCollector] 영상 커버리지 확인 실패({type(e).__name__}) — 무시하고 계속")
+        return -1
 
 
 # ── 공개 API ──────────────────────────────────────────────
@@ -305,11 +453,14 @@ def collect_and_select() -> NewsSelection:
     """
     print("\n[NewsCollector] 뉴스 수집 시작...")
 
+    # 네이버 랭킹뉴스(실제 인기 신호)를 맨 앞에 두어, RSS/Tavily가 많아도
+    # 아래 [:40] 컷에서 밀려나지 않게 한다.
+    naver_items = _fetch_naver_ranking_news()
     rss_items = _parse_rss_feeds()
     tavily_items = _fetch_tavily_trends()
     all_items = [
         item
-        for item in rss_items + tavily_items
+        for item in naver_items + rss_items + tavily_items
         if item.title.strip() and item.url.startswith(("http://", "https://"))
     ]
 
@@ -324,6 +475,34 @@ def collect_and_select() -> NewsSelection:
         selected.topic,
         selected_item.title,
     )
+
+    # 1순위 기사에 쓸 영상이 거의 없어 보이면, GPT가 함께 제안한 2순위
+    # 대안의 영상 커버리지를 확인해 더 나은 쪽으로 바꾼다. 확인 자체가
+    # 실패하면(-1) 원래 선택을 그대로 둔다 — 이 단계는 어디까지나 보조 신호다.
+    if selected.alt_selected_index:
+        primary_coverage = _quick_video_coverage(selected_item.title, source_locked_topic)
+        print(
+            "  [NewsCollector] 1순위 영상 커버리지: "
+            f"{primary_coverage if primary_coverage >= 0 else '확인불가'}"
+        )
+        if 0 <= primary_coverage < 2:
+            alt_index = max(1, min(selected.alt_selected_index, len(all_items)))
+            alt_item = all_items[alt_index - 1]
+            alt_topic = _ensure_source_locked_topic(
+                selected.alt_topic or selected.topic, alt_item.title
+            )
+            alt_coverage = _quick_video_coverage(alt_item.title, alt_topic)
+            print(
+                f"  [NewsCollector] 2순위 '{alt_topic}' 영상 커버리지: "
+                f"{alt_coverage if alt_coverage >= 0 else '확인불가'}"
+            )
+            if alt_coverage > primary_coverage:
+                print(f"  [NewsCollector] 영상 커버리지 기준으로 2순위 주제 채택")
+                selected_item = alt_item
+                source_locked_topic = alt_topic
+                selected.topic = selected.alt_topic or selected.topic
+                selected.reason = selected.alt_reason or selected.reason
+                selected.context = selected.alt_context or selected.context
 
     if source_locked_topic != selected.topic.strip():
         print(
