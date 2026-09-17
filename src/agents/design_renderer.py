@@ -500,7 +500,11 @@ def _render_infographic_content(
         clauses = _split_verified_clauses(slide.body)
         card_gap = 18
         card_h = min(235, (H - 120 - visual_top - card_gap * (len(clauses) - 1)) // len(clauses))
-        y = visual_top
+        # 항목 수가 적으면(예: 2개) card_h가 235로 캡되면서 블록 아래에
+        # 큰 여백이 남는다 — 블록 전체를 예약 영역 안에서 세로 중앙 정렬한다.
+        block_h = card_h * len(clauses) + card_gap * (len(clauses) - 1)
+        avail_h = (H - 120) - visual_top
+        y = visual_top + max(0, (avail_h - block_h) // 2)
         for index, clause in enumerate(clauses, start=1):
             box = (PAD, y, W - PAD, y + card_h)
             img = _draw_glass_panel(img, box, fill_alpha=178, outline_alpha=80)
@@ -972,7 +976,34 @@ def _render_cta(img: Image.Image, slide: Slide, total: int,
     HASHTAG_RESERVE = 100   # 하단에서 이 위치까지 해시태그 영역
     CONTENT_BOTTOM  = H - HASHTAG_RESERVE
 
-    y = int(H * 0.20)
+    # 타이틀·본문 줄바꿈은 실제로 그리기 전에 먼저 계산 — 콘텐츠 블록
+    # 전체 높이를 알아야 세로 중앙에 배치할 시작 y를 구할 수 있다.
+    _cta_title = _clean(slide.title)
+    tf = _auto_font(_cta_title, 54, bold=True)
+    t_lines = wrap_text(_cta_title, tf, draw, text_w)
+    _, _, _, lh = draw.textbbox((0, 0), "가나다", font=tf)
+
+    bf = _font(34, bold=False)
+    b_lines = wrap_text(_clean(slide.body), bf, draw, text_w)
+    _, _, _, lh2 = draw.textbbox((0, 0), "가나다", font=bf)
+
+    est_h = 0
+    if slide.emoji:
+        ep = _find_emoji_font()
+        if ep:
+            ef = ImageFont.truetype(ep, 90)
+            draw_char = slide.emoji.replace("️", "")
+            ebb = draw.textbbox((0, 0), draw_char, font=ef, embedded_color=True)
+            est_h += (ebb[3] - ebb[1]) + 8 + 12
+    est_h += 26                                          # accent bar + gap
+    est_h += sum(int(lh * 1.2) for _ in t_lines) + 16    # 타이틀
+    est_h += sum(int(lh2 * 1.5) for _ in b_lines) + 20   # 본문
+    if handle:
+        est_h += 52                                      # handle pill
+
+    top_margin = int(H * 0.12)   # 상단 배지와 겹치지 않을 최소 여백
+    free_space = (CONTENT_BOTTOM - top_margin) - est_h
+    y = top_margin + max(0, free_space // 2)             # 콘텐츠 블록 세로 중앙 정렬
 
     # 이모지 — 정확한 중앙 (size 기준으로 계산)
     if slide.emoji:
@@ -986,10 +1017,6 @@ def _render_cta(img: Image.Image, slide: Slide, total: int,
     y += 26
 
     # 타이틀
-    _cta_title = _clean(slide.title)
-    tf = _auto_font(_cta_title, 54, bold=True)
-    t_lines = wrap_text(_cta_title, tf, draw, text_w)
-    _, _, _, lh = draw.textbbox((0, 0), "가나다", font=tf)
     for line in t_lines:
         if y + int(lh) < CONTENT_BOTTOM - 160:   # 본문·handle 공간 남긴 채
             draw.text((_cx(draw, line, tf), y), line, font=tf, fill=STYLE["text_primary"])
@@ -997,9 +1024,6 @@ def _render_cta(img: Image.Image, slide: Slide, total: int,
     y += 16
 
     # 본문
-    bf = _font(34, bold=False)
-    b_lines = wrap_text(_clean(slide.body), bf, draw, text_w)
-    _, _, _, lh2 = draw.textbbox((0, 0), "가나다", font=bf)
     for line in b_lines:
         if y + int(lh2) < CONTENT_BOTTOM - 80:   # handle 공간 남긴 채
             draw.text((_cx(draw, line, bf), y), line, font=bf, fill=STYLE["text_secondary"])
