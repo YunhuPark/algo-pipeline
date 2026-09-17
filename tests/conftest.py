@@ -15,18 +15,3 @@ def _no_real_cover_copy_llm_call(monkeypatch):
         "src.qa.script_assembler._generate_cover_copy",
         lambda *args, **kwargs: None,
     )
-
-
-@pytest.fixture(autouse=True)
-def _no_real_naver_ranking_call(monkeypatch):
-    """``collect_and_select()`` scrapes a live Naver page for trending articles.
-
-    Tests must stay fast, free, and network-independent. Default every test
-    to an empty result (as if the page were unreachable) unless a test
-    explicitly monkeypatches ``_fetch_naver_ranking_news`` again to exercise
-    that path.
-    """
-    monkeypatch.setattr(
-        "src.agents.news_collector._fetch_naver_ranking_news",
-        lambda *args, **kwargs: [],
-    )
