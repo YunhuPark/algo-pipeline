@@ -879,7 +879,10 @@ def _render_split(
     img = Image.alpha_composite(img.convert("RGBA"), btn).convert("RGB")
 
     # 썸네일 → 텍스트 영역: 하드 라인 대신 그라디언트 페이드
-    fade_h = 100
+    # (영상 자체에 자막이 있는 경우가 많아 이 구간을 넉넉히 어둡게 덮어야
+    # 우리 카드의 제목·본문과 겹쳐 보이지 않는다 — video_renderer의 하단
+    # 트리밍과 함께 적용)
+    fade_h = 150
     fade_layer = Image.new("RGBA", (W, H), (0, 0, 0, 0))
     fl = ImageDraw.Draw(fade_layer)
     for fi in range(fade_h):
@@ -912,7 +915,7 @@ def _render_split(
 
     # 텍스트 영역 (썸네일 아래 55% — 세로 중앙 정렬)
     text_w = W - PAD * 2
-    text_zone_top = thumb_h + 8
+    text_zone_top = thumb_h + 20
     text_zone_bot = H - 30   # 하단 여백 확보
 
     _split_title = _clean(slide.title)

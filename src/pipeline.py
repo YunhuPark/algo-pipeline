@@ -483,11 +483,20 @@ def _run_once(
     # 엉뚱한 유튜브 영상을 붙이는 대신, 못 찾은 슬라이드에는 정적 사진보다
     # 나은 대안으로 주제에 맞는 짧은 스톡 클립을 시도한다. render_card_set이
     # 이 미리보기 이미지로 카드를 그려야 하므로 렌더링(Phase 4) 전에 구한다.
+    #
+    # 단, "임시공휴일 지정 가능성"처럼 수치·개체 없는 추상적 주장 슬라이드
+    # (visual_type이 hero_stat/comparison/process가 아닌 것)는 애초에 사진으로
+    # 찍을 만한 구체적 대상이 없다 — Pexels가 "촛불·호박" 같은 그럴듯하지만
+    # 무관한 클립을 골라도 검증할 방법이 없다(유튜브처럼 자막 대조가 불가능).
+    # 그런 슬라이드는 스톡 영상을 시도하지 않고 중앙 정렬된 문장형 카드 그대로
+    # 둔다 — 무관한 영상보다 깔끔한 무영상 카드가 낫다는 판단.
+    _CONCRETE_VISUAL_TYPES = {"hero_stat", "comparison", "process"}
     pexels_preview_map: dict[int, "Image.Image"] = {}
     pexels_video_paths: dict[int, Path] = {}
     no_video_slides = [
         s for i, s in enumerate(content_slides_list)
-        if i >= len(video_infos) or video_infos[i] is None
+        if (i >= len(video_infos) or video_infos[i] is None)
+        and s.visual_type in _CONCRETE_VISUAL_TYPES
     ]
     if no_video_slides:
         print(f"\n[3.5] 영상 없는 슬라이드 {len(no_video_slides)}개 → Pexels 스톡 영상 확인...")

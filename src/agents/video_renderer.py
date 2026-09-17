@@ -50,6 +50,17 @@ def create_video_slide(
             new_h = video_clip.size[1]
             video_clip = video_clip.cropped(y_center=new_h/2, height=target_h)
 
+        # 방송 뉴스 영상은 하단에 자막 바가 붙어 있는 경우가 많다. 그대로
+        # 두면 카드 자체의 제목·본문 바로 위에서 두 텍스트가 겹쳐 보인다
+        # (영상 자체 자막 vs 우리 카드 텍스트). 하단 일부를 잘라내고 다시
+        # 채워서 자막 바가 화면 밖으로 밀려나게 한다.
+        CAPTION_TRIM_RATIO = 0.14  # 하단 14%를 잘라내고 다시 채움
+        trimmed_h = int(target_h * (1 - CAPTION_TRIM_RATIO))
+        video_clip = video_clip.cropped(y1=0, y2=trimmed_h)
+        video_clip = video_clip.resized(height=target_h)
+        if video_clip.size[0] != target_w:
+            video_clip = video_clip.cropped(x_center=video_clip.size[0] / 2, width=target_w)
+
         # 목표 위치(상단)에 영상 배치
         video_clip = video_clip.with_position(("center", "top"))
 
