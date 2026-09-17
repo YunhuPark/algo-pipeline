@@ -1152,6 +1152,7 @@ def render_card_set(
     persona: Persona | None = None,
     youtube_keyword: str = "",
     video_infos: list | None = None,
+    pexels_video_map: dict[int, Image.Image] | None = None,
 ) -> list[Path]:
     p = persona or load_persona()
     active_handle = handle or p.handle
@@ -1180,7 +1181,18 @@ def render_card_set(
                         vid_url_with_t = f"youtu.be/{vi.video_id}?t={vi.start_seconds}"
                     thumb_map[slide.slide_number] = (vi.thumbnail, vid_url_with_t)
 
-    # content 슬라이드 중 YouTube 썸네일 없는 것 → 슬라이드별 개별 Pexels 이미지 준비
+    # 유튜브 매칭이 없는 슬라이드 중, 미리 구해둔 Pexels 스톡 영상이 있으면
+    # 그것도 "split" 레이아웃으로 취급한다 (실제 모션이 있는 편이 정적 사진보다
+    # 낫다는 판단). video_url 자리에는 유튜브 URL 대신 출처만 짧게 표기.
+    if pexels_video_map:
+        for slide in content_slides:
+            if slide.slide_number in thumb_map:
+                continue
+            preview = pexels_video_map.get(slide.slide_number)
+            if preview is not None:
+                thumb_map[slide.slide_number] = (preview, "Pexels")
+
+    # 그 나머지(영상도 Pexels 클립도 없는) 슬라이드 → 슬라이드별 개별 Pexels 사진
     slide_bg_map: dict[int, Image.Image] = {}   # {slide_number: bg_image}
     no_thumb_content = [s for s in content_slides if s.slide_number not in thumb_map]
     if no_thumb_content:

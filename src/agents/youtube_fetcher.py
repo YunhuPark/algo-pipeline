@@ -18,7 +18,7 @@ from pathlib import Path
 import httpx
 from PIL import Image
 
-from src.config import TAVILY_API_KEY, DATA_DIR
+from src.config import TAVILY_API_KEY, YOUTUBE_API_KEY, DATA_DIR
 
 _CACHE_DIR = DATA_DIR / "yt_cache"
 _CACHE_DIR.mkdir(parents=True, exist_ok=True)
@@ -106,6 +106,8 @@ class VideoInfo:
     view_count: int = 0    # 조회수 (검증 후 채워짐)
     duration: int = 0      # 영상 길이 (초)
     start_seconds: int = 0 # 슬라이드 내용 관련 구간 시작 시간(초)
+    like_count: int = 0    # 좋아요 수 (YOUTUBE_API_KEY 있을 때만 채워짐)
+    comment_count: int = 0 # 댓글 수 (YOUTUBE_API_KEY 있을 때만 채워짐)
 
 
 def _extract_video_id(url: str) -> str | None:
@@ -221,6 +223,58 @@ _SNIPPET_DEAD_SIGNALS = [
 _SNIPPET_DURATION_RE = re.compile(
     r'\b(\d{1,2}):(\d{2}):(\d{2})\b|\b(\d{1,3})\s*(?:minutes?|mins?|시간|분)\b'
 )
+
+
+def _parse_iso8601_duration(value: str) -> int:
+    """"PT4M13S" 같은 ISO 8601 길이 표기를 초로 변환."""
+    m = re.fullmatch(
+        r"P(?:\d+D)?T?(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?", value or ""
+    )
+    if not m:
+        return 0
+    h, mi, s = (int(g) if g else 0 for g in m.groups())
+    return h * 3600 + mi * 60 + s
+
+
+def _fetch_official_stats(video_ids: list[str]) -> dict[str, dict]:
+    """공식 YouTube Data API v3로 조회수·좋아요·댓글 수·길이를 한 번에 가져온다.
+
+    YOUTUBE_API_KEY가 없으면 빈 dict를 돌려주고, 호출부는 기존처럼 yt-dlp
+    스크래핑만으로 계속 동작한다. 있으면 최대 50개씩 배치 조회해 개별
+    yt-dlp 호출보다 훨씬 빠르고, yt-dlp가 안 주는 좋아요·댓글 수까지 얻는다.
+    실패해도(rate limit, 키 오류 등) 예외를 던지지 않고 빈 dict를 돌려준다.
+    """
+    if not YOUTUBE_API_KEY or not video_ids:
+        return {}
+
+    stats: dict[str, dict] = {}
+    try:
+        for i in range(0, len(video_ids), 50):
+            batch = video_ids[i:i + 50]
+            resp = httpx.get(
+                "https://www.googleapis.com/youtube/v3/videos",
+                params={
+                    "part": "statistics,contentDetails",
+                    "id": ",".join(batch),
+                    "key": YOUTUBE_API_KEY,
+                },
+                timeout=10,
+            )
+            resp.raise_for_status()
+            for item in resp.json().get("items", []):
+                stat = item.get("statistics", {})
+                content = item.get("contentDetails", {})
+                stats[item["id"]] = {
+                    "view_count": int(stat.get("viewCount", 0) or 0),
+                    "like_count": int(stat.get("likeCount", 0) or 0),
+                    "comment_count": int(stat.get("commentCount", 0) or 0),
+                    "duration": _parse_iso8601_duration(content.get("duration", "")),
+                }
+    except Exception as e:
+        print(f"  [YouTubeFetcher] 공식 API 통계 조회 실패({type(e).__name__}) — yt-dlp로만 진행")
+        return {}
+
+    return stats
 
 
 def _snippet_prefilter(candidates: list[VideoInfo]) -> list[VideoInfo]:
@@ -768,6 +822,35 @@ def fetch_video_candidates(
             relevant_candidates.append(v)
         else:
             print(f"  [YouTubeFetcher] ✗ 주제 무관(앵커 없음): '{v.title[:35]}'")
+
+    # YOUTUBE_API_KEY가 있으면 아래 yt-dlp 개별 검증(최대 8개로 제한됨) 전에
+    # 배치 조회로 조회수·좋아요·댓글 수를 미리 채워 넣는다. 이러면 후보가
+    # 8개 넘게 있어도 "먼저 검색된 순"이 아니라 "실제로 인기 있는 순"으로
+    # 추려져 8개 제한 안에 더 좋은 후보가 남는다. 키가 없으면 이 블록은
+    # 그대로 건너뛰고 기존 동작(첫 8개를 yt-dlp로 검증)과 동일하게 진행된다.
+    official_stats = _fetch_official_stats([v.video_id for v in relevant_candidates])
+    if official_stats:
+        enriched: list[VideoInfo] = []
+        for v in relevant_candidates:
+            s = official_stats.get(v.video_id)
+            if s is None:
+                enriched.append(v)   # 통계를 못 받은 후보는 그대로 두고 yt-dlp에 맡김
+                continue
+            if s["view_count"] < min_views:
+                print(f"  [YouTubeFetcher] ✗ '{v.title[:30]}' 조회수 {s['view_count']:,} < {min_views:,} (공식 API)")
+                continue
+            if s["duration"] and (s["duration"] < 60 or s["duration"] > max_duration):
+                print(f"  [YouTubeFetcher] ✗ '{v.title[:30]}' 길이 {s['duration']}초 범위 초과 (공식 API)")
+                continue
+            v.view_count = s["view_count"]
+            v.like_count = s["like_count"]
+            v.comment_count = s["comment_count"]
+            v.duration = s["duration"]
+            enriched.append(v)
+        print(f"  [YouTubeFetcher] 공식 API 통계 {len(official_stats)}개 확인 → {len(enriched)}개 남음")
+        # 조회수+좋아요 가중치로 정렬 — yt-dlp 8개 제한 안에 실제 인기 영상이 남게 한다
+        enriched.sort(key=lambda v: v.view_count + v.like_count * 20, reverse=True)
+        relevant_candidates = enriched
 
     print(
         f"  [YouTubeFetcher] 총 {len(all_candidates)}개 수집 → "
