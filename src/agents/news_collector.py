@@ -9,13 +9,11 @@ from __future__ import annotations
 
 import re
 import time
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Optional
 
 import feedparser
-import httpx
 from langchain_openai import ChatOpenAI
 from langchain_core.prompts import ChatPromptTemplate
 from pydantic import BaseModel
@@ -51,8 +49,6 @@ class NewsItem:
     source: str
     url: str
     published: Optional[datetime] = None
-    is_trending: bool = False   # 네이버 랭킹뉴스(실제 많이 본 기사) 출신이면 True
-    rank: int | None = None     # 위 랭킹에서의 순위 (언론사별 1위~)
 
 
 @dataclass
@@ -192,96 +188,6 @@ def _fetch_tavily_trends(query: str = "오늘 주요 뉴스 AI IT 트렌드") ->
         return []
 
 
-# ── 네이버 랭킹뉴스 (실제 "많이 본 뉴스") ─────────────────
-# RSS·Tavily는 관련도만 알려줄 뿐 실제로 얼마나 읽혔는지는 모른다. 네이버는
-# 언론사별 "많이 본 뉴스" TOP을 매일 공개 페이지로 제공한다 — 공식 API가
-# 아니라 페이지를 직접 파싱하므로, 마크업이 바뀌면 이 함수만 조용히 빈
-# 리스트를 반환하고 나머지 파이프라인은 RSS/Tavily만으로 계속 진행한다.
-_NAVER_RANKING_URL = "https://news.naver.com/main/ranking/popularDay.naver"
-
-
-def _fetch_naver_ranking_news(top_n: int = 1, max_press: int = 6) -> list[NewsItem]:
-    try:
-        from bs4 import BeautifulSoup
-    except ImportError:
-        return []
-
-    try:
-        headers = {
-            "User-Agent": (
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-                "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-            ),
-        }
-        resp = httpx.get(_NAVER_RANKING_URL, headers=headers, timeout=10)
-        resp.raise_for_status()
-        # 페이지가 EUC-KR로 인코딩돼 있어 기본 디코딩을 쓰면 제목이 깨진다.
-        html = resp.content.decode("euc-kr", errors="replace")
-        soup = BeautifulSoup(html, "html.parser")
-
-        stubs: list[dict] = []
-        for box in soup.select("div.rankingnews_box")[:max_press]:
-            name_tag = box.select_one(".rankingnews_name")
-            press = name_tag.get_text(strip=True) if name_tag else "네이버"
-            for li in box.select(".rankingnews_list li")[:top_n]:
-                title_tag = li.select_one(".list_title")
-                if not title_tag:
-                    continue
-                url = title_tag.get("href", "")
-                title = title_tag.get_text(strip=True)
-                if not title or not url:
-                    continue
-                rank_tag = li.select_one(".list_ranking_num")
-                rank_digits = re.sub(r"\D", "", rank_tag.get_text()) if rank_tag else ""
-                stubs.append({
-                    "press": press,
-                    "title": title,
-                    "url": url,
-                    "rank": int(rank_digits) if rank_digits else 0,
-                })
-
-        if not stubs:
-            print("  [NewsCollector] 네이버 랭킹뉴스: 목록을 못 찾음 (마크업 변경 추정)")
-            return []
-
-        # 본문은 기사당 1회씩 별도 크롤링이 필요해 순차로 하면 느리다(15개면
-        # 15~30초). 병렬로 돌려 지연을 줄인다 — 실패한 항목은 빈 본문으로
-        # 남기고(제목만으로도 GPT 선택에는 참고가 된다) 전체를 막지 않는다.
-        from src.agents.trend_analyzer import _crawl_article
-
-        bodies: dict[str, str] = {}
-        with ThreadPoolExecutor(max_workers=6) as executor:
-            future_to_url = {
-                executor.submit(_crawl_article, s["url"]): s["url"] for s in stubs
-            }
-            for future in future_to_url:
-                url = future_to_url[future]
-                try:
-                    bodies[url] = future.result(timeout=15)
-                except Exception:
-                    bodies[url] = ""
-
-        items = [
-            NewsItem(
-                title=s["title"],
-                summary=bodies.get(s["url"], ""),
-                source=f"네이버랭킹·{s['press']}",
-                url=s["url"],
-                is_trending=True,
-                rank=s["rank"],
-            )
-            for s in stubs
-        ]
-        print(
-            f"  [NewsCollector] 네이버 랭킹뉴스 수집: {len(items)}개 "
-            f"(언론사 {len(soup.select('div.rankingnews_box')[:max_press])}곳 × 상위 {top_n}개)"
-        )
-        return items
-    except Exception as e:
-        print(f"  [NewsCollector] 네이버 랭킹뉴스 실패({type(e).__name__}): {e}")
-        return []
-
-
 # ── GPT-4o 주제 선택 ─────────────────────────────────────
 
 # 카드가 실을 수 있는 건 근거로 확인되는 사실뿐이다. 본문에 단위가 붙은 숫자가
@@ -301,11 +207,11 @@ _MIN_FACTS = 2            # 이 정도는 있어야 카드 4장에 쓸 수치가
 _MIN_GROUNDED_POOL = 5    # 후보를 좁혀도 선택지가 남을 만큼은 있어야 한다
 _MIN_ON_PERSONA_POOL = 2  # AI·IT·비즈니스 후보는 이 정도만 있어도 우선한다
 
-# 프롬프트로 "AI·IT·비즈니스를 먼저 고르라"고만 해서는, 사회 뉴스 하나가
-# 팩트를 압도적으로 많이 담고 있으면(예: 27개) GPT가 그쪽으로 넘어가는 걸
-# 계속 봤다 — 카테고리 필터는 프롬프트가 아니라 코드에서 걸어야 안정적이다.
-# RSS 피드는 전부 IT 전문 매체라 항상 통과시키고, 종합 뉴스인 네이버
-# 랭킹·Tavily만 이 키워드로 걸러 AI·IT·비즈니스 관련 여부를 판단한다.
+# 프롬프트로 "AI·IT·비즈니스를 먼저 고르라"고만 해서는, 팩트가 압도적으로
+# 많은(예: 27개) 무관한 기사가 있으면 GPT가 그쪽으로 넘어가는 걸 계속
+# 봤다 — 카테고리 필터는 프롬프트가 아니라 코드에서 걸어야 안정적이다.
+# RSS_FEEDS는 전부 IT 전문 매체라 항상 통과시키고, Tavily(종합 검색) 같은
+# 소스만 이 키워드로 걸러 AI·IT·비즈니스 관련 여부를 판단한다.
 _ON_PERSONA_RE = re.compile(
     r"\bAI\b|인공지능|생성형|챗봇|LLM|\bIT\b|아이티|테크|tech|스타트업|startup|"
     r"애플|삼성전자|삼성|구글|google|apple|마이크로소프트|microsoft|openai|"
@@ -319,12 +225,14 @@ _ON_PERSONA_RE = re.compile(
     re.IGNORECASE,
 )
 
+_RSS_SOURCE_NAMES = {name for name, _ in RSS_FEEDS}
+
 
 def _is_on_persona_candidate(item: NewsItem) -> bool:
-    """RSS는 소스 자체가 IT 전문 매체라 항상 통과. 네이버 랭킹·Tavily 같은
-    종합 소스는 제목·본문 앞부분에 AI·IT·비즈니스 키워드가 있을 때만
-    "카테고리 부합" 후보로 인정한다."""
-    if not (item.source == "Tavily" or item.source.startswith("네이버랭킹")):
+    """RSS_FEEDS 출신은 소스 자체가 IT 전문 매체라 항상 통과. 그 외(Tavily
+    같은 종합 검색 소스)는 제목·본문 앞부분에 AI·IT·비즈니스 키워드가 있을
+    때만 "카테고리 부합" 후보로 인정한다."""
+    if item.source in _RSS_SOURCE_NAMES:
         return True
     return bool(_ON_PERSONA_RE.search(f"{item.title} {item.summary[:200]}"))
 
@@ -373,11 +281,6 @@ _SYSTEM = """
 7. 지나치게 특정 정치적 편향이 없는 것
 8. 선택한 한 기사의 고유명사·제품명·핵심 수치를 topic에 그대로 유지할 것
 9. "AI 필수 용어", "알아야 할 것", "최신 트렌드" 같은 포괄적 주제로 바꾸지 말 것
-10. [네이버 랭킹 N위] 표시는 그날 많이 읽힌 기사라는 뜻이지만, 네이버 랭킹은
-    종합 뉴스라 카테고리 1번과 무관한 기사도 많이 섞여 있습니다. 위 모든
-    조건(특히 1·2번 카테고리 필터)을 이미 통과한 후보들끼리 우열을 가릴
-    때만 참고하는 부차적 신호로 쓰고, 카테고리에 안 맞는 기사를 이 표시
-    때문에 끌어올리지 마십시오
 
 selected_index: 선택한 헤드라인의 번호 (1부터 시작)
 topic: 카드뉴스 제목으로 쓸 간결한 주제명 (예: "애플 AI 전략 대전환")
@@ -440,11 +343,8 @@ def _select_topic_with_gpt(items: list[NewsItem]) -> _SelectedTopic:
             f"{len(candidates)}건에서 선택"
         )
 
-    def _badge(it: NewsItem) -> str:
-        return f" [네이버 랭킹 {it.rank}위]" if it.is_trending and it.rank else ""
-
     headlines = "\n".join(
-        f"[{n+1}] ({it.source}) {it.title} — 수치 {fact_counts[idx]}개{_badge(it)}\n"
+        f"[{n+1}] ({it.source}) {it.title} — 수치 {fact_counts[idx]}개\n"
         f"    본문: {_excerpt(it.summary)}"
         for n, (idx, it) in enumerate(pool)
     )
@@ -513,14 +413,11 @@ def collect_and_select() -> NewsSelection:
     """
     print("\n[NewsCollector] 뉴스 수집 시작...")
 
-    # 네이버 랭킹뉴스(실제 인기 신호)를 맨 앞에 두어, RSS/Tavily가 많아도
-    # 아래 [:40] 컷에서 밀려나지 않게 한다.
-    naver_items = _fetch_naver_ranking_news()
     rss_items = _parse_rss_feeds()
     tavily_items = _fetch_tavily_trends()
     all_items = [
         item
-        for item in naver_items + rss_items + tavily_items
+        for item in rss_items + tavily_items
         if item.title.strip() and item.url.startswith(("http://", "https://"))
     ]
 
