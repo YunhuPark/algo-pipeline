@@ -72,7 +72,13 @@ class SemanticCritic:
 
         try:
             chain = self.prompt | self._get_llm()
-            response = chain.invoke({"evidence": evidence_text, "claim": claim.claim_text})
+            claim_copy = claim.claim_text
+            if claim.display_title.strip():
+                claim_copy = (
+                    f"카드 제목: {claim.display_title.strip()}\n"
+                    f"카드 본문: {claim.claim_text}"
+                )
+            response = chain.invoke({"evidence": evidence_text, "claim": claim_copy})
 
             # OpenAI sometimes wraps json in markdown
             content = getattr(response, "content", None)

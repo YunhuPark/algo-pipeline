@@ -14,6 +14,9 @@ Phase 7: Multi-Platform — Threads / 블로그 동시 발행
 from __future__ import annotations
 
 import json as _json
+import os
+import time
+from dataclasses import replace
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
@@ -51,7 +54,7 @@ def run_pipeline(
     select_angle: bool = False,
     human_approval: bool = False,
     auto: bool = False,
-    template: str = "auto",       # auto=주제 자동 감지, dark/light/bold/minimal/gradient
+    template: str = "brand",      # brand=브랜드 기본값, auto=주제 기반 실험 선택
     fact_check: bool = True,      # 팩트체크 레이어 실행 여부
     publish_threads: bool = False, # Threads 동시 발행
     publish_blog: bool = False,   # 블로그 동시 발행
@@ -102,7 +105,7 @@ def run_pipeline(
             on_remote_id=on_remote_id,
         )
         if res is not None:
-            return res
+            return replace(res, retry_count=retry)
 
         # 기사 교체 없이 재시도 = 팩트체크 실패 (같은 기사 재시도)
         if ignored_titles == prev_ignored:
@@ -157,7 +160,10 @@ def _run_once(
     print(_sep)
 
     # ── 템플릿 결정 ───────────────────────────────────────
-    tmpl_name = get_template_for_topic(topic) if template == "auto" else template
+    if template == "brand":
+        tmpl_name = os.getenv("DEFAULT_CARD_TEMPLATE", "brand").strip() or "brand"
+    else:
+        tmpl_name = get_template_for_topic(topic) if template == "auto" else template
     tmpl = get_template(tmpl_name)
     print(f"\n  템플릿: [{tmpl_name}] {tmpl['name']} — {tmpl.get('description','')}")
 
@@ -191,11 +197,22 @@ def _run_once(
     if should_select_angle:
         reason = "자동 (시사성 높은 주제)" if auto_angle and not select_angle else "수동"
         print(f"\n[0] 마케팅 앵글 선택 중... ({reason})")
+
+        # 이 계정의 실제 게시물 성과(analytics.sync_all_insights로 쌓인 데이터)를
+        # 반영 — 데이터가 아직 없거나 조회 자체가 실패해도 앵글 선택을 막지 않는다.
+        performance_hints = ""
+        try:
+            from src.agents.analytics import get_performance_hints
+            performance_hints = get_performance_hints()
+        except Exception as e:
+            print(f"  [AngleSelector] 성과 데이터 조회 실패({type(e).__name__}) — 일반 기준으로 진행")
+
         selected_angle = pick_angle(
             topic=topic,
             trend_summary=trend_context or topic,
             persona=p,
             auto=auto,
+            performance_hints=performance_hints,
         )
 
     # ── Phase 1: Trend Analyzer ──────────────────────────
@@ -204,14 +221,32 @@ def _run_once(
 
     if source_lineage:
         print("\n[1] Source Lineage 주입...")
+        lineage_results: list[TrendResult] = []
+        seen_evidence: set[tuple[str, str]] = set()
+        for evidence in source_lineage.evidence_passages:
+            key = (evidence.source_url, evidence.content_hash)
+            if key in seen_evidence:
+                continue
+            seen_evidence.add(key)
+            is_primary = (
+                evidence.article_id == source_lineage.article_id
+                and evidence.source_url == source_lineage.source_url
+            )
+            lineage_results.append(
+                TrendResult(
+                    title=(
+                        source_lineage.source_title
+                        if is_primary
+                        else evidence.location or evidence.source_url
+                    ),
+                    url=evidence.source_url,
+                    content=evidence.text,
+                    score=1.0 if is_primary else 0.8,
+                )
+            )
         trend_report = TrendReport(
             query=source_lineage.topic,
-            results=[TrendResult(
-                title=source_lineage.source_title,
-                url=source_lineage.source_url,
-                content=source_lineage.context,
-                score=1.0
-            )],
+            results=lineage_results,
             summary=source_lineage.context,
         )
     elif trend_context:
@@ -272,14 +307,6 @@ def _run_once(
 
     # ── Phase 2: Content Creator ─────────────────────────
     print("\n[2] 카드뉴스 스크립트 생성 중 (GPT-4o + 자기검증)...")
-    if selected_angle:
-        angle_hint = (
-            f"\n\n[마케팅 앵글]\n앵글: {selected_angle.angle}\n"
-            f"커버 제목(반드시): {selected_angle.cover_title}\n"
-            f"캡션 훅(반드시): {selected_angle.hook}"
-        )
-        trend_report.summary = (trend_report.summary or "") + angle_hint
-
     # ── Fix A1: 단일 기사 집중 ─────────────────────────────
     # 상위 3건을 혼합하면 서로 다른 주제 기사가 섞여 카드 내용이 분산된다.
     # trend_report.results[0]이 trend_analyzer가 선정한 최고 관련 기사임.
@@ -312,6 +339,7 @@ def _run_once(
             raw_article_body=raw_article_body,
             disputed_notes=notes_state.get("last", "") if notes_state else "",
             source_lineage=source_lineage,
+            editorial_angle=selected_angle.angle if selected_angle else "",
         )
         fc_report = cc.last_fact_check_report
         from src.qa.publish_quality_gate import validate_publish_quality
@@ -383,16 +411,25 @@ def _run_once(
                 # 리스트형: 슬라이드별 개별 검색 + 자막 검증 (12초 간격으로 429 방지)
                 import re as _re_kw
                 _raw_title = _re_kw.sub(r'\[\d+/\d+\]\s*', '', slide.title).strip()
-                vi, start_t = find_verified_video_for_slide(
-                    slide_title=slide.title,
-                    slide_body=slide.body,
-                    topic=f"{topic} {_raw_title}",
-                    candidates=[],
-                    used_video_ids=used_video_ids,
-                    article_title="",   # 기사 없음 → topic 기반 엔티티
-                    max_verify=2,
-                    search_days=365,
-                )
+                try:
+                    vi, start_t = find_verified_video_for_slide(
+                        slide_title=slide.title,
+                        slide_body=slide.body,
+                        topic=f"{topic} {_raw_title}",
+                        candidates=[],
+                        used_video_ids=used_video_ids,
+                        article_title="",   # 기사 없음 → topic 기반 엔티티
+                        max_verify=2,
+                        search_days=365,
+                    )
+                except Exception as _video_err:
+                    # 영상 후보 자체는 근거와 무관한 부가 요소 — 자막 다운로드
+                    # rate limit 등 일시적 오류로 기사 전체를 버리지 않는다.
+                    print(
+                        f"  ⚠️  슬라이드{i+1} 영상 검증 오류({type(_video_err).__name__}) "
+                        "→ 이미지 슬라이드로 처리"
+                    )
+                    vi, start_t = None, 0
                 if vi is not None:
                     vi.start_seconds = start_t
                     used_video_ids.add(vi.video_id)
@@ -405,14 +442,23 @@ def _run_once(
                     video_infos.append(None)
             else:
                 _entity_src = _article_title_for_match
-                vi, start_t = find_verified_video_for_slide(
-                    slide_title=slide.title,
-                    slide_body=slide.body,
-                    topic=topic,
-                    candidates=available_pool,
-                    used_video_ids=used_video_ids,
-                    article_title=_entity_src,
-                )
+                try:
+                    vi, start_t = find_verified_video_for_slide(
+                        slide_title=slide.title,
+                        slide_body=slide.body,
+                        topic=topic,
+                        candidates=available_pool,
+                        used_video_ids=used_video_ids,
+                        article_title=_entity_src,
+                    )
+                except Exception as _video_err:
+                    # 영상 후보 자체는 근거와 무관한 부가 요소 — 자막 다운로드
+                    # rate limit 등 일시적 오류로 기사 전체를 버리지 않는다.
+                    print(
+                        f"  ⚠️  슬라이드{i+1} 영상 검증 오류({type(_video_err).__name__}) "
+                        "→ 이미지 슬라이드로 처리"
+                    )
+                    vi, start_t = None, 0
                 if vi is not None:
                     vi.start_seconds = start_t
                     used_video_ids.add(vi.video_id)
@@ -432,6 +478,42 @@ def _run_once(
         if ignored_titles is not None and trend_report.results:
             ignored_titles.add(trend_report.results[0].title)
         return None  # retry loop로 복귀
+
+    # ── Phase 3.5: 영상 없는 슬라이드 → Pexels 스톡 영상 사전 확보 ──
+    # 엉뚱한 유튜브 영상을 붙이는 대신, 못 찾은 슬라이드에는 정적 사진보다
+    # 나은 대안으로 주제에 맞는 짧은 스톡 클립을 시도한다. render_card_set이
+    # 이 미리보기 이미지로 카드를 그려야 하므로 렌더링(Phase 4) 전에 구한다.
+    #
+    # 단, "임시공휴일 지정 가능성"처럼 수치·개체 없는 추상적 주장 슬라이드
+    # (visual_type이 hero_stat/comparison/process가 아닌 것)는 애초에 사진으로
+    # 찍을 만한 구체적 대상이 없다 — Pexels가 "촛불·호박" 같은 그럴듯하지만
+    # 무관한 클립을 골라도 검증할 방법이 없다(유튜브처럼 자막 대조가 불가능).
+    # 그런 슬라이드는 스톡 영상을 시도하지 않고 중앙 정렬된 문장형 카드 그대로
+    # 둔다 — 무관한 영상보다 깔끔한 무영상 카드가 낫다는 판단.
+    _CONCRETE_VISUAL_TYPES = {"hero_stat", "comparison", "process"}
+    pexels_preview_map: dict[int, "Image.Image"] = {}
+    pexels_video_paths: dict[int, Path] = {}
+    no_video_slides = [
+        s for i, s in enumerate(content_slides_list)
+        if (i >= len(video_infos) or video_infos[i] is None)
+        and s.visual_type in _CONCRETE_VISUAL_TYPES
+    ]
+    if no_video_slides:
+        print(f"\n[3.5] 영상 없는 슬라이드 {len(no_video_slides)}개 → Pexels 스톡 영상 확인...")
+        try:
+            from src.agents.image_searcher import search_pexels_video
+            for s_idx, slide in enumerate(no_video_slides):
+                try:
+                    result = search_pexels_video(f"{slide.title} {topic}"[:50], page=s_idx + 1)
+                except Exception as e:
+                    print(f"  ⚠️ 슬라이드 {slide.slide_number} Pexels 영상 확인 실패: {e}")
+                    continue
+                if result:
+                    preview, local_path = result
+                    pexels_preview_map[slide.slide_number] = preview
+                    pexels_video_paths[slide.slide_number] = local_path
+        except Exception as e:
+            print(f"  ⚠️ Pexels 영상 확인 스킵({type(e).__name__})")
 
     # ── Phase 3: Image Searcher ──────────────────────────
     print("\n[3] 배경 이미지 준비 중...")
@@ -458,6 +540,7 @@ def _run_once(
     paths = design_renderer.render_card_set(
         script=script, background=bg, handle=h, persona=p_tmpl,
         video_infos=video_infos,
+        pexels_video_map=pexels_preview_map or None,
     )
 
     # ── Phase 2.6 후처리: script.json에 영상 매핑 결과 저장 ──
@@ -539,7 +622,7 @@ def _run_once(
                 )
                 if snippet_path:
                     out_mp4 = target_path.with_suffix(".mp4")
-                    res = create_video_slide(target_path, snippet_path, out_mp4, thumb_ratio=0.45)
+                    res = create_video_slide(target_path, snippet_path, out_mp4)
                     if res:
                         return target_idx, res, best_t, slide_script.slide_number
             except Exception as e:
@@ -579,6 +662,42 @@ def _run_once(
                 except Exception as e:
                     print(f"  ⚠️ start_seconds script.json 저장 실패: {e}")
 
+    # ── Phase 4.2: Pexels 스톡 영상 슬라이드 합성 ────────────
+    # 유튜브가 없어 Phase 3.5에서 대신 받아둔 클립들 — 이미 로컬에 있으므로
+    # 다운로드 없이 바로 합성한다 (자막 검증도 불필요: 특정 사건을 말하는
+    # 영상이 아니라 주제와 어울리는 일반적인 스톡 모션이기 때문).
+    if pexels_video_paths:
+        from src.agents.video_renderer import create_video_slide
+
+        pexels_tasks = []
+        for slide_number, video_path in pexels_video_paths.items():
+            for p_idx, p_item in enumerate(paths):
+                if f"card_{slide_number:02d}_" in p_item.name and p_item.suffix == ".png":
+                    pexels_tasks.append((slide_number, video_path, p_item, p_idx))
+                    break
+
+        if pexels_tasks:
+            print(f"\n[4.2] Pexels 영상 슬라이드 합성 중 ({len(pexels_tasks)}개)...")
+
+            def _process_pexels_slide(args):
+                slide_number, video_path, target_path, target_idx = args
+                try:
+                    out_mp4 = target_path.with_suffix(".mp4")
+                    res = create_video_slide(target_path, video_path, out_mp4)
+                    if res:
+                        return target_idx, res
+                except Exception as e:
+                    print(f"  ⚠️ 슬라이드 {slide_number} Pexels 영상 합성 실패: {e}")
+                return target_idx, None
+
+            max_workers = min(4, len(pexels_tasks))
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                futures = {executor.submit(_process_pexels_slide, t): t for t in pexels_tasks}
+                for future in as_completed(futures):
+                    target_idx, result_path = future.result()
+                    if result_path:
+                        paths[target_idx] = result_path
+
     # ── Phase 4.5: Reels MP4 생성 ────────────────────────
     if make_reels:
         print("\n[4.5] Reels MP4 생성 중...")
@@ -603,14 +722,30 @@ def _run_once(
 
     # ── Phase 5: 사용자 최종 확인 ────────────────────────
     decision = "upload"
+    approval_decision = "NOT_REQUIRED"
+    review_duration_sec = 0.0
     if human_approval:
         print("\n[5] 최종 확인 — 이미지를 검토해주세요.")
+        review_started = time.monotonic()
         decision = wait_for_approval(paths, auto=auto)
+        review_duration_sec = time.monotonic() - review_started
         if decision == "retry":
             return None
         if decision == "skip":
             print("  업로드 취소.")
-            return PipelineResult(image_paths=paths, generation_succeeded=True, publish_requested=publish, publish_succeeded=False, ig_post_id=None, permalink=None, failure_stage=None, error_code=None)
+            return PipelineResult(
+                image_paths=paths,
+                generation_succeeded=True,
+                publish_requested=publish,
+                publish_succeeded=False,
+                ig_post_id=None,
+                permalink=None,
+                failure_stage="approval",
+                error_code="HUMAN_REJECTED",
+                approval_decision="REJECTED",
+                review_duration_sec=review_duration_sec,
+            )
+        approval_decision = "APPROVED"
 
     publish_succeeded = False
     ig_post_id = None
@@ -783,4 +918,17 @@ def _run_once(
     except Exception:
         pass
 
-    return PipelineResult(image_paths=paths, generation_succeeded=True, publish_requested=publish, publish_succeeded=publish_succeeded, ig_post_id=ig_post_id, permalink=_permalink, failure_stage=failure_stage, error_code=error_code, publish_attempt_state=attempt_state, publish_attempt_id=publish_attempt_id)
+    return PipelineResult(
+        image_paths=paths,
+        generation_succeeded=True,
+        publish_requested=publish,
+        publish_succeeded=publish_succeeded,
+        ig_post_id=ig_post_id,
+        permalink=_permalink,
+        failure_stage=failure_stage,
+        error_code=error_code,
+        publish_attempt_state=attempt_state,
+        publish_attempt_id=publish_attempt_id,
+        approval_decision=approval_decision,
+        review_duration_sec=review_duration_sec,
+    )
