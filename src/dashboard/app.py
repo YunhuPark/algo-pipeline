@@ -1213,7 +1213,7 @@ def settings_page():
     # .env 키 현황
     load_dotenv(ROOT / ".env")
     keys = [
-        "OPENAI_API_KEY", "TAVILY_API_KEY", "PEXELS_API_KEY",
+        "OPENAI_API_KEY", "TAVILY_API_KEY", "PEXELS_API_KEY", "YOUTUBE_API_KEY",
         "IG_ACCESS_TOKEN", "IG_USER_ID",
         "THREADS_ACCESS_TOKEN", "THREADS_USER_ID",
         "TISTORY_ACCESS_TOKEN",

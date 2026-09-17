@@ -197,11 +197,22 @@ def _run_once(
     if should_select_angle:
         reason = "자동 (시사성 높은 주제)" if auto_angle and not select_angle else "수동"
         print(f"\n[0] 마케팅 앵글 선택 중... ({reason})")
+
+        # 이 계정의 실제 게시물 성과(analytics.sync_all_insights로 쌓인 데이터)를
+        # 반영 — 데이터가 아직 없거나 조회 자체가 실패해도 앵글 선택을 막지 않는다.
+        performance_hints = ""
+        try:
+            from src.agents.analytics import get_performance_hints
+            performance_hints = get_performance_hints()
+        except Exception as e:
+            print(f"  [AngleSelector] 성과 데이터 조회 실패({type(e).__name__}) — 일반 기준으로 진행")
+
         selected_angle = pick_angle(
             topic=topic,
             trend_summary=trend_context or topic,
             persona=p,
             auto=auto,
+            performance_hints=performance_hints,
         )
 
     # ── Phase 1: Trend Analyzer ──────────────────────────
@@ -468,6 +479,33 @@ def _run_once(
             ignored_titles.add(trend_report.results[0].title)
         return None  # retry loop로 복귀
 
+    # ── Phase 3.5: 영상 없는 슬라이드 → Pexels 스톡 영상 사전 확보 ──
+    # 엉뚱한 유튜브 영상을 붙이는 대신, 못 찾은 슬라이드에는 정적 사진보다
+    # 나은 대안으로 주제에 맞는 짧은 스톡 클립을 시도한다. render_card_set이
+    # 이 미리보기 이미지로 카드를 그려야 하므로 렌더링(Phase 4) 전에 구한다.
+    pexels_preview_map: dict[int, "Image.Image"] = {}
+    pexels_video_paths: dict[int, Path] = {}
+    no_video_slides = [
+        s for i, s in enumerate(content_slides_list)
+        if i >= len(video_infos) or video_infos[i] is None
+    ]
+    if no_video_slides:
+        print(f"\n[3.5] 영상 없는 슬라이드 {len(no_video_slides)}개 → Pexels 스톡 영상 확인...")
+        try:
+            from src.agents.image_searcher import search_pexels_video
+            for s_idx, slide in enumerate(no_video_slides):
+                try:
+                    result = search_pexels_video(f"{slide.title} {topic}"[:50], page=s_idx + 1)
+                except Exception as e:
+                    print(f"  ⚠️ 슬라이드 {slide.slide_number} Pexels 영상 확인 실패: {e}")
+                    continue
+                if result:
+                    preview, local_path = result
+                    pexels_preview_map[slide.slide_number] = preview
+                    pexels_video_paths[slide.slide_number] = local_path
+        except Exception as e:
+            print(f"  ⚠️ Pexels 영상 확인 스킵({type(e).__name__})")
+
     # ── Phase 3: Image Searcher ──────────────────────────
     print("\n[3] 배경 이미지 준비 중...")
     bg = image_searcher.get_background_image(
@@ -493,6 +531,7 @@ def _run_once(
     paths = design_renderer.render_card_set(
         script=script, background=bg, handle=h, persona=p_tmpl,
         video_infos=video_infos,
+        pexels_video_map=pexels_preview_map or None,
     )
 
     # ── Phase 2.6 후처리: script.json에 영상 매핑 결과 저장 ──
@@ -613,6 +652,42 @@ def _run_once(
                             print(f"  [4.1] start_seconds → script.json 저장 ({len(start_time_map)}건)")
                 except Exception as e:
                     print(f"  ⚠️ start_seconds script.json 저장 실패: {e}")
+
+    # ── Phase 4.2: Pexels 스톡 영상 슬라이드 합성 ────────────
+    # 유튜브가 없어 Phase 3.5에서 대신 받아둔 클립들 — 이미 로컬에 있으므로
+    # 다운로드 없이 바로 합성한다 (자막 검증도 불필요: 특정 사건을 말하는
+    # 영상이 아니라 주제와 어울리는 일반적인 스톡 모션이기 때문).
+    if pexels_video_paths:
+        from src.agents.video_renderer import create_video_slide
+
+        pexels_tasks = []
+        for slide_number, video_path in pexels_video_paths.items():
+            for p_idx, p_item in enumerate(paths):
+                if f"card_{slide_number:02d}_" in p_item.name and p_item.suffix == ".png":
+                    pexels_tasks.append((slide_number, video_path, p_item, p_idx))
+                    break
+
+        if pexels_tasks:
+            print(f"\n[4.2] Pexels 영상 슬라이드 합성 중 ({len(pexels_tasks)}개)...")
+
+            def _process_pexels_slide(args):
+                slide_number, video_path, target_path, target_idx = args
+                try:
+                    out_mp4 = target_path.with_suffix(".mp4")
+                    res = create_video_slide(target_path, video_path, out_mp4)
+                    if res:
+                        return target_idx, res
+                except Exception as e:
+                    print(f"  ⚠️ 슬라이드 {slide_number} Pexels 영상 합성 실패: {e}")
+                return target_idx, None
+
+            max_workers = min(4, len(pexels_tasks))
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                futures = {executor.submit(_process_pexels_slide, t): t for t in pexels_tasks}
+                for future in as_completed(futures):
+                    target_idx, result_path = future.result()
+                    if result_path:
+                        paths[target_idx] = result_path
 
     # ── Phase 4.5: Reels MP4 생성 ────────────────────────
     if make_reels:
