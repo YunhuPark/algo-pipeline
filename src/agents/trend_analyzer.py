@@ -482,6 +482,18 @@ def _crawl_article(url: str, timeout: int = 10) -> str:
             if len(p.get_text(strip=True)) >= 30
         ]
         paragraph_text = "\n\n".join(paragraphs)
+
+        # 네이버를 비롯한 다수 한국 언론사는 본문을 <p>로 감싸지 않고
+        # <br>로만 줄바꿈한 텍스트 노드로 둔다 — 위 추출이 항상 빈 채로
+        # 끝난다. 그럴 때만 태그 구조를 버리고 본문 영역 텍스트를 통째로
+        # 줄 단위로 뽑아, 30자 미만인 짧은 줄(캡션·저작권 표시 등)만 거른다.
+        if len(paragraph_text) < 30:
+            lines = [
+                line.strip()
+                for line in body.get_text(separator="\n").split("\n")
+            ]
+            paragraph_text = "\n".join(line for line in lines if len(line) >= 30)
+
         text = max([paragraph_text, *structured_bodies], key=len, default="")
 
         # 최대 4000자
