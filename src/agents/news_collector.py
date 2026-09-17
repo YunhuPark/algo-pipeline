@@ -288,6 +288,8 @@ def _fetch_naver_ranking_news(top_n: int = 1, max_press: int = 6) -> list[NewsIt
 # 하나도 없는 기사(주로 논평·사설)를 고르면 "~라는 의견이 있습니다" 수준의
 # 카드밖에 나오지 않으므로, 선택 단계에서 본문의 구체성을 신호로 쓴다.
 _FACT_TOKEN_RE = re.compile(
+    r"[$₩€£]\s*\d[\d,]*(?:\.\d+)?(?:\s*(?:billion|million|trillion|k))?"  # "$2,200"처럼
+    r"|"                                                                   # 통화 기호가 접두된 금액
     r"\d[\d,]*(?:\.\d+)?\s*"
     r"(?:%|퍼센트|퍼센트포인트|조|억|만|천|명|개|건|배|년|개월|주|일|시간|"
     r"달러|원|엔|유로|"
@@ -297,6 +299,34 @@ _FACT_TOKEN_RE = re.compile(
 
 _MIN_FACTS = 2            # 이 정도는 있어야 카드 4장에 쓸 수치가 나온다
 _MIN_GROUNDED_POOL = 5    # 후보를 좁혀도 선택지가 남을 만큼은 있어야 한다
+_MIN_ON_PERSONA_POOL = 2  # AI·IT·비즈니스 후보는 이 정도만 있어도 우선한다
+
+# 프롬프트로 "AI·IT·비즈니스를 먼저 고르라"고만 해서는, 사회 뉴스 하나가
+# 팩트를 압도적으로 많이 담고 있으면(예: 27개) GPT가 그쪽으로 넘어가는 걸
+# 계속 봤다 — 카테고리 필터는 프롬프트가 아니라 코드에서 걸어야 안정적이다.
+# RSS 피드는 전부 IT 전문 매체라 항상 통과시키고, 종합 뉴스인 네이버
+# 랭킹·Tavily만 이 키워드로 걸러 AI·IT·비즈니스 관련 여부를 판단한다.
+_ON_PERSONA_RE = re.compile(
+    r"\bAI\b|인공지능|생성형|챗봇|LLM|\bIT\b|아이티|테크|tech|스타트업|startup|"
+    r"애플|삼성전자|삼성|구글|google|apple|마이크로소프트|microsoft|openai|"
+    r"오픈에이아이|앤스로픽|anthropic|메타(?!버스)|meta|엔비디아|nvidia|"
+    r"아마존|amazon|테슬라|tesla|소프트웨어|software|하드웨어|hardware|"
+    r"반도체|semiconductor|클라우드|cloud|스마트폰|smartphone|로봇|robot|"
+    r"블록체인|blockchain|핀테크|fintech|이커머스|커머스|플랫폼|platform|"
+    r"디지털|digital|사이버|cyber|알고리즘|algorithm|비트코인|암호화폐|"
+    r"가상자산|crypto|주가|증시|코스피|나스닥|상장|유니콘|매출|영업이익|"
+    r"시가총액|투자유치|앱\b|app\b",
+    re.IGNORECASE,
+)
+
+
+def _is_on_persona_candidate(item: NewsItem) -> bool:
+    """RSS는 소스 자체가 IT 전문 매체라 항상 통과. 네이버 랭킹·Tavily 같은
+    종합 소스는 제목·본문 앞부분에 AI·IT·비즈니스 키워드가 있을 때만
+    "카테고리 부합" 후보로 인정한다."""
+    if not (item.source == "Tavily" or item.source.startswith("네이버랭킹")):
+        return True
+    return bool(_ON_PERSONA_RE.search(f"{item.title} {item.summary[:200]}"))
 
 
 def _fact_count(text: str) -> int:
@@ -321,26 +351,33 @@ _SYSTEM = """
 본문에 확인 가능한 사실이 없으면 "~라는 의견이 있습니다" 수준의 카드밖에
 나오지 않습니다. 본문에 무엇이 들어있는지를 최우선으로 보고 고르십시오.
 
+이 계정은 원래 AI·IT·비즈니스 전문 뉴스 계정입니다("사회" 이슈는 AI·IT·
+비즈니스와 뚜렷이 맞닿아 있을 때만 예외로 허용하는 부차 카테고리이지,
+동등한 한 축이 아닙니다). 그러니 카테고리부터 걸러낸 다음에 그 안에서
+품질(수치·근거)로 고르십시오 — 수치가 아무리 많아도 카테고리가 안 맞으면
+탈락입니다.
+
 선택 기준 (위에서부터 우선):
-- 본문에 구체적 수치(금액·비율·건수·날짜)와 그 수치의 주체가 실제로 적혀 있는 기사
-- 누가 무엇을 했는지가 명확한 기사. "일부 전문가들", "논란이 제기된다" 수준의
-  익명·수동 서술만 있는 논평·사설·오피니언은 피하십시오
-  (제목이 "~인가?", "Is ...?"처럼 질문형이고 본문에 수치가 없으면 대개 논평입니다)
-- 서로 다른 핵심 사실을 4개 이상 뽑을 수 있을 만큼 본문이 충분한 기사
-- 위 조건을 만족하는 것 중에서 MZ세대가 "와 이거 알아야 해!" 라고 느낄 주제
-- AI, IT, 비즈니스, 사회 이슈 중 파급력이 큰 것
-- 지나치게 특정 정치적 편향이 없는 것
-- 연예인 스캔들, 강력범죄, 여야 정쟁성 공방, 자극적인 사건·사고 단신은
-  수치가 많아도 고르지 마십시오 — 이 계정은 AI·IT·비즈니스·사회 트렌드를
-  다루는 계정이지 일반 사회면 가십·사건 계정이 아닙니다. "많이 읽혔다"는
-  것과 "이 계정에 맞다"는 것은 다른 문제입니다
-- 선택한 한 기사의 고유명사·제품명·핵심 수치를 topic에 그대로 유지할 것
-- "AI 필수 용어", "알아야 할 것", "최신 트렌드" 같은 포괄적 주제로 바꾸지 말 것
-- [네이버 랭킹 N위] 표시는 그날 많이 읽힌 기사라는 뜻이지만, 네이버 랭킹은
-  종합 뉴스라 위 계정 성격과 무관한 기사도 많이 섞여 있습니다. 위 모든
-  조건(특히 계정 성격 부합)을 이미 만족하는 후보들끼리 우열을 가릴 때만
-  참고하는 부차적 신호로 쓰고, 계정 성격에 안 맞는 기사를 이 표시 때문에
-  끌어올리지 마십시오
+1. AI·IT·비즈니스 기사인가? 후보 중 하나라도 있으면 반드시 그 안에서만
+   고르십시오. 대중교통·행정·생활 밀착 "사회" 뉴스(예: 버스 노선, 공휴일
+   지정, 지역 축제)는 후보 전체에 AI·IT·비즈니스 기사가 단 하나도 없을
+   때만 마지막 수단으로 고르십시오
+2. 연예인 스캔들, 강력범죄, 여야 정쟁성 공방, 자극적인 사건·사고 단신은
+   카테고리·수치와 무관하게 절대 고르지 마십시오
+3. 본문에 구체적 수치(금액·비율·건수·날짜)와 그 수치의 주체가 실제로 적혀 있는 기사
+4. 누가 무엇을 했는지가 명확한 기사. "일부 전문가들", "논란이 제기된다" 수준의
+   익명·수동 서술만 있는 논평·사설·오피니언은 피하십시오
+   (제목이 "~인가?", "Is ...?"처럼 질문형이고 본문에 수치가 없으면 대개 논평입니다)
+5. 서로 다른 핵심 사실을 4개 이상 뽑을 수 있을 만큼 본문이 충분한 기사
+6. 위 조건을 만족하는 것 중에서 MZ세대가 "와 이거 알아야 해!" 라고 느낄 주제
+7. 지나치게 특정 정치적 편향이 없는 것
+8. 선택한 한 기사의 고유명사·제품명·핵심 수치를 topic에 그대로 유지할 것
+9. "AI 필수 용어", "알아야 할 것", "최신 트렌드" 같은 포괄적 주제로 바꾸지 말 것
+10. [네이버 랭킹 N위] 표시는 그날 많이 읽힌 기사라는 뜻이지만, 네이버 랭킹은
+    종합 뉴스라 카테고리 1번과 무관한 기사도 많이 섞여 있습니다. 위 모든
+    조건(특히 1·2번 카테고리 필터)을 이미 통과한 후보들끼리 우열을 가릴
+    때만 참고하는 부차적 신호로 쓰고, 카테고리에 안 맞는 기사를 이 표시
+    때문에 끌어올리지 마십시오
 
 selected_index: 선택한 헤드라인의 번호 (1부터 시작)
 topic: 카드뉴스 제목으로 쓸 간결한 주제명 (예: "애플 AI 전략 대전환")
@@ -369,18 +406,35 @@ _HUMAN = """
 def _select_topic_with_gpt(items: list[NewsItem]) -> _SelectedTopic:
     """주제를 고르고, selected_index를 items 기준 1-based로 맞춰 돌려준다."""
     candidates = list(enumerate(items[:40]))   # (원본 인덱스, 기사)
-    fact_counts = {idx: _fact_count(it.summary) for idx, it in candidates}
+    # 해외 RSS(TechCrunch 등)는 본문 대신 한두 문장짜리 부제만 오는 경우가
+    # 많아, 정작 핵심 수치는 제목에만 있고 summary는 0건으로 잡히는 일이
+    # 잦았다(예: "$18 million"가 제목에만 있음) — 제목도 함께 스캔한다.
+    fact_counts = {
+        idx: _fact_count(f"{it.title} {it.summary}") for idx, it in candidates
+    }
 
-    # 수치가 있는 기사가 충분히 모이면 그쪽만 후보로 좁힌다. 부족하면 전체를
-    # 그대로 두어, 조건을 못 맞춘다고 생성 자체가 막히는 일은 없게 한다.
+    # 후보 압축 3단계 — 우선순위: (1) 카테고리 부합 + 팩트 충분 → (2) 팩트만
+    # 충분(카테고리 무관) → (3) 전체. 프롬프트 지시만으로는 사회 뉴스가
+    # 팩트를 아주 많이 담고 있을 때 그쪽으로 넘어가는 걸 막지 못해, 코드
+    # 단계에서 먼저 카테고리로 걸러 GPT에게 애초에 후보로 보여주지 않는다.
     grounded = [(idx, it) for idx, it in candidates if fact_counts[idx] >= _MIN_FACTS]
-    pool = grounded if len(grounded) >= _MIN_GROUNDED_POOL else candidates
-    if pool is grounded:
+    on_persona_grounded = [
+        (idx, it) for idx, it in grounded if _is_on_persona_candidate(it)
+    ]
+    if len(on_persona_grounded) >= _MIN_ON_PERSONA_POOL:
+        pool = on_persona_grounded
         print(
-            f"  [NewsCollector] 본문 수치 {_MIN_FACTS}개 이상 기사 "
-            f"{len(grounded)}건으로 후보 압축"
+            f"  [NewsCollector] AI·IT·비즈니스 + 본문 수치 {_MIN_FACTS}개 이상 "
+            f"기사 {len(pool)}건으로 후보 압축"
+        )
+    elif len(grounded) >= _MIN_GROUNDED_POOL:
+        pool = grounded
+        print(
+            f"  [NewsCollector] 카테고리 부합 후보 부족({len(on_persona_grounded)}건) "
+            f"→ 본문 수치 {_MIN_FACTS}개 이상 기사 {len(grounded)}건에서 선택"
         )
     else:
+        pool = candidates
         print(
             f"  [NewsCollector] 수치 있는 기사 {len(grounded)}건뿐 → 전체 "
             f"{len(candidates)}건에서 선택"

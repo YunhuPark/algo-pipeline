@@ -15,6 +15,33 @@ def _grounded(i: int) -> nc.NewsItem:
     return _item(f"데이터{i}", f"매출 {i + 1},200억 원으로 전년 대비 {i + 5}% 증가했다.")
 
 
+def _naver_off_persona(i: int) -> nc.NewsItem:
+    """네이버 랭킹 출신에 팩트는 많지만 AI·IT·비즈니스와 무관한 기사."""
+    return nc.NewsItem(
+        title=f"연예인 스캔들{i}",
+        summary=f"경찰은 사건 관계자 {i + 3}명을 조사했으며 피해 규모는 {i + 1}00억 원으로 추산된다.",
+        source="네이버랭킹·아무개일보",
+        url="https://example.com/naver",
+        is_trending=True,
+        rank=1,
+    )
+
+
+def _naver_on_persona(i: int) -> nc.NewsItem:
+    """네이버 랭킹 출신이면서 AI·IT 키워드가 있는 기사."""
+    return nc.NewsItem(
+        title=f"AI 스타트업 투자유치 {i}",
+        summary=(
+            f"이 스타트업은 시리즈 {i + 1}00억 원 규모의 투자를 유치했으며 "
+            f"이용자는 {i + 50}만 명으로 늘었다고 밝혔다."
+        ),
+        source="네이버랭킹·아무개일보",
+        url="https://example.com/naver-it",
+        is_trending=True,
+        rank=2,
+    )
+
+
 def _stub_llm(monkeypatch, selected_index: int) -> None:
     """LLM이 pool 기준 selected_index를 고른 것처럼 만든다."""
 
@@ -54,9 +81,29 @@ def test_selected_index_maps_back_to_the_original_list(monkeypatch):
     assert items[selected.selected_index - 1].title == "데이터0"
 
 
+def test_off_persona_naver_item_does_not_outrank_on_persona_candidates(monkeypatch):
+    """네이버 랭킹 기사가 팩트를 훨씬 많이 담고 있어도, AI·IT 관련 후보가
+    최소 기준(_MIN_ON_PERSONA_POOL)을 채우면 카테고리 무관 기사에 밀리지
+    않아야 한다 — 프롬프트 지시만으로는 안 지켜지던 걸 코드로 강제한 부분.
+    """
+    items = (
+        [_naver_off_persona(i) for i in range(6)]      # 팩트 많음, 카테고리 무관
+        + [_naver_on_persona(i) for i in range(2)]      # 팩트 있음, 카테고리 부합
+    )
+    _stub_llm(monkeypatch, selected_index=1)   # 압축된 후보(온퍼소나 2건)의 첫 번째
+
+    selected = nc._select_topic_with_gpt(items)
+
+    assert items[selected.selected_index - 1].title == "AI 스타트업 투자유치 0"
+
+
 def test_falls_back_to_every_candidate_when_few_are_grounded(monkeypatch):
-    """수치 있는 기사가 적다고 생성이 막히면 안 된다."""
-    items = [_opinion(i) for i in range(8)] + [_grounded(i) for i in range(2)]
+    """수치 있는 기사가 적다고 생성이 막히면 안 된다.
+
+    _MIN_ON_PERSONA_POOL(2) 미만으로 남겨야 카테고리 압축 단계도 건너뛰고
+    "전체 후보" 단계까지 떨어진다 — 그래야 이 안전망 자체를 검증한다.
+    """
+    items = [_opinion(i) for i in range(8)] + [_grounded(i) for i in range(1)]
     _stub_llm(monkeypatch, selected_index=1)
 
     selected = nc._select_topic_with_gpt(items)

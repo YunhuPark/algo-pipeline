@@ -937,6 +937,16 @@ def _render_split(
     # 세로 중앙 시작점
     y = text_zone_top + max(0, (text_zone_bot - text_zone_top - total_h) // 2)
 
+    # 사진 배경이 밝거나 디테일이 많으면(예: 사람·창문·좌석 등) 본문이 묻혀
+    # 안 읽힌다 — 텍스트 블록 뒤에 반투명 패널을 깔아 사진과 무관하게 항상
+    # 읽히게 한다 (accent 박스는 자체 배경이 있어 이 패널에는 안 넣는다).
+    img = _draw_glass_panel(
+        img,
+        (PAD - 6, y - 20, W - PAD + 6, y + total_h - accent_h + 14),
+        radius=20, fill_alpha=150, outline_alpha=50,
+    )
+    draw = ImageDraw.Draw(img)
+
     # 타이틀 — 이모지 제거 + 중앙
     for line in t_lines:
         draw.text((_cx(draw, line, tf), y), line, font=tf, fill=STYLE["text_primary"])
