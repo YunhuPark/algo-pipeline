@@ -99,7 +99,10 @@ _KOREAN_SCALED_PART_RE = re.compile(
 _KOREAN_COMPOUND_NUMBER_RE = re.compile(
     rf"(?<![\w.])(?P<expression>"
     rf"{_NUMBER_PATTERN}\s*{_KOREAN_SCALE_PATTERN}"
-    rf"(?:\s*{_NUMBER_PATTERN}\s*{_KOREAN_SCALE_PATTERN})+)"
+    rf"(?:\s*{_NUMBER_PATTERN}\s*{_KOREAN_SCALE_PATTERN})*)"
+    # "60만 3293명"처럼 마지막 자리가 별도 단위(만/억 등) 없이 그냥 나머지
+    # 숫자로만 붙는 표기도 흔하다 — 있으면 더해서 하나의 값으로 합친다.
+    rf"(?:\s*(?P<residual>{_NUMBER_PATTERN}))?"
     rf"\s*(?P<unit>{_UNIT_PATTERN})?",
     re.IGNORECASE,
 )
@@ -288,8 +291,18 @@ def _extract_number_mentions(text: str) -> Iterable[Tuple[Decimal, str]]:
                 valid = False
                 break
             total += value * factor
+        residual_raw = compound.group("residual")
+        if valid and residual_raw:
+            residual_value = _to_decimal(residual_raw)
+            if residual_value is None:
+                valid = False
+            else:
+                total += residual_value
         if valid:
-            compound_spans.append(compound.span("expression"))
+            # residual/unit까지 포함한 전체 매치 구간을 제외해야, 아래
+            # _NUMBER_MENTION_RE가 같은 잔여 숫자를 별개 숫자로 다시 잡아
+            # "숫자 2개라 모호함"으로 오판하지 않는다.
+            compound_spans.append(compound.span())
             yield total, _canonical_unit(compound.group("unit") or "")
 
     for match in _NUMBER_MENTION_RE.finditer(normalized):
