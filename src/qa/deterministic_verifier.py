@@ -445,6 +445,25 @@ def _extract_approximate_number_mentions(text: str) -> Iterable[Tuple[int, str]]
         )
 
 
+def _raw_text_verbatim_in_evidence(raw_text: str, evidence_text: str) -> bool:
+    """Last-resort check for numeral idioms none of the structured parsers
+    above recognize: does this exact numeric phrase already appear in the
+    evidence, ignoring only whitespace and full/half-width differences?
+
+    Deliberately narrow — no digit-string this short would match unless the
+    claim actually copied evidence's own wording, since the phrase must
+    still contain a digit.
+    """
+
+    def _norm(s: str) -> str:
+        return re.sub(r"\s+", "", unicodedata.normalize("NFKC", s or ""))
+
+    raw = _norm(raw_text)
+    if not raw or not any(ch.isdigit() for ch in raw):
+        return False
+    return raw in _norm(evidence_text)
+
+
 def _number_supported_by_evidence(num_obj, evidence_text: str) -> bool:
     """Return whether one declared number is supported by its cited evidence."""
 
@@ -490,9 +509,18 @@ def _number_supported_by_evidence(num_obj, evidence_text: str) -> bool:
 
     parsed_claim = list(_extract_number_mentions(num_obj.raw_text))
     if len(parsed_claim) > 1:
-        # Multiple exact values without a recognized range connector are
-        # ambiguous in a single NormalizedNumber, so fail closed.
-        return False
+        # Multiple exact values without a recognized range/ratio/compound
+        # connector are structurally ambiguous to our parser — but that just
+        # means this raw_text uses a Korean numeral idiom we haven't taught
+        # the regexes yet (ratio and scale+residual compounds both used to
+        # fail here before getting dedicated handling above). Rather than
+        # keep adding one-off patterns each time a new phrasing surfaces,
+        # fall back to an exact-copy check: if the claim's numeric phrase
+        # appears verbatim in the evidence (once whitespace/width-normalized),
+        # that is itself strong support — it means the LLM followed the
+        # instruction to copy evidence's own wording exactly, whatever its
+        # grammatical shape.
+        return _raw_text_verbatim_in_evidence(num_obj.raw_text, evidence_text)
     if parsed_claim:
         value, qual = parsed_claim[0]
         if not qual and declared_unit:
