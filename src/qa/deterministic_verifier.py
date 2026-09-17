@@ -132,6 +132,20 @@ _BETWEEN_NUMERIC_RANGE_RE = re.compile(
     rf"(?P<right>{_RANGE_VALUE_PATTERN})",
     re.IGNORECASE,
 )
+# "10명 중 6명"(10명 가운데 6명, 즉 10명 중 6명꼴)처럼 "분모 중 분자" 형태의
+# 한국어 비율 표현. 숫자 두 개가 한 raw_text에 들어가는 유일한 정상 패턴이라
+# _extract_number_mentions만으로 보면 "숫자 2개라 모호함 → fail closed"에
+# 걸린다 — evidence에 있는 그대로 옮겨도 검증이 항상 거부하는 버그였다.
+_KOREAN_RATIO_RE = re.compile(
+    rf"(?P<denom_number>{_NUMBER_PATTERN})\s*"
+    rf"(?P<denom_scale>{_KOREAN_SCALE_PATTERN})?\s*"
+    rf"(?P<denom_unit>{_UNIT_PATTERN})?\s*"
+    rf"중\s*"
+    rf"(?P<num_number>{_NUMBER_PATTERN})\s*"
+    rf"(?P<num_scale>{_KOREAN_SCALE_PATTERN})?\s*"
+    rf"(?P<num_unit>{_UNIT_PATTERN})?",
+    re.IGNORECASE,
+)
 _KOREAN_EOK_USD_RE = re.compile(
     rf"(?<![\w.])(?P<number>{_NUMBER_PATTERN})\s*억\s*(?P<unit>달러|usd)",
     re.IGNORECASE,
@@ -371,6 +385,27 @@ def _extract_numeric_ranges(
                 yield canonical
 
 
+def _extract_ratio_mentions(text: str) -> Iterable[tuple[Decimal, Decimal, str]]:
+    """Yield (분모, 분자, unit) for Korean "X중 Y" ratio phrases like "10명 중 6명".
+
+    분모·분자가 같은 단위를 공유하는 게 보통이라(둘 다 명), 한쪽에만 단위가
+    적혀 있으면 다른 쪽에서 물려받는다 — 범위(range) 처리와 같은 방식.
+    """
+
+    normalized = unicodedata.normalize("NFKC", text or "")
+    for match in _KOREAN_RATIO_RE.finditer(normalized):
+        denom = _to_decimal(match.group("denom_number"))
+        num = _to_decimal(match.group("num_number"))
+        if denom is None or num is None:
+            continue
+        denom_scale = _SCALE_FACTORS.get((match.group("denom_scale") or "").lower(), Decimal("1"))
+        num_scale = _SCALE_FACTORS.get((match.group("num_scale") or "").lower(), Decimal("1"))
+        denom *= denom_scale
+        num *= num_scale
+        unit = _canonical_unit(match.group("num_unit") or match.group("denom_unit") or "")
+        yield denom, num, unit
+
+
 def _extract_approximate_number_mentions(text: str) -> Iterable[Tuple[int, str]]:
     """Yield magnitude bands without inventing precision for vague amounts."""
 
@@ -412,6 +447,18 @@ def _number_supported_by_evidence(num_obj, evidence_text: str) -> bool:
             claim_range == evidence_range
             for claim_range in claim_ranges
             for evidence_range in evidence_ranges
+        )
+
+    # "10명 중 6명" 같은 비율 표현은 숫자 두 개가 정상적으로 한 raw_text에
+    # 들어간다. 아래 parsed_claim 분기는 이런 경우를 "모호함"으로 보고
+    # 무조건 거부하므로, 그전에 비율로 먼저 인식해 evidence와 그대로 대조한다.
+    claim_ratios = list(_extract_ratio_mentions(num_obj.raw_text))
+    if claim_ratios:
+        evidence_ratios = list(_extract_ratio_mentions(evidence_text))
+        return any(
+            claim_ratio == evidence_ratio
+            for claim_ratio in claim_ratios
+            for evidence_ratio in evidence_ratios
         )
 
     approximate_claim = list(
