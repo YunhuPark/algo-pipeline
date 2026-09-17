@@ -39,6 +39,12 @@ def _ensure_ffmpeg_on_path() -> str | None:
     """
     found = shutil.which("ffmpeg")
     if found:
+        # PATH는 프로세스 전역이라 이미 다른 스레드가 고쳐뒀을 수 있지만,
+        # _ffmpeg_location은 contextvars.ContextVar라 스레드마다 별도 컨텍스트를
+        # 갖는다 — 여기서 매번 등록하지 않으면 PATH를 고친 스레드가 아닌
+        # 다른 스레드(비디오 병렬 합성의 ThreadPoolExecutor 워커 등)는 여전히
+        # 오염된 캐시(FFmpegFD.available() == False)를 보고 다운로드에 실패한다.
+        _register_ffmpeg_location(Path(found))
         return found
 
     try:
@@ -55,7 +61,7 @@ def _ensure_ffmpeg_on_path() -> str | None:
         print(f"  [YouTubeFetcher] ffmpeg 준비 완료: {target.name}")
 
     os.environ["PATH"] = f"{_FFMPEG_BIN_DIR}{os.pathsep}{os.environ.get('PATH', '')}"
-    _register_ffmpeg_location(target)
+    _register_ffmpeg_location(target)   # 이 스레드의 컨텍스트에도 등록
     return str(target)
 
 
