@@ -112,9 +112,16 @@ def run_pipeline(
             fact_check_retries += 1
             if fact_check_retries >= MAX_FACT_RETRIES:
                 # 팩트체크 재시도 한도 초과 → 현재 기사 포기하고 다음으로
-                print(f"  ⚠️ 팩트체크 재시도 {MAX_FACT_RETRIES}회 초과 → 이 기사 포기, 다음 기사 시도")
                 if trend_context:
-                    break  # trend_context 고정 모드에서는 기사 교체 불가
+                    # trend_context(또는 source_lineage) 고정 모드에서는 원문이
+                    # 이미 정해져 있어 기사 교체가 불가능하다 — 다른 기사를
+                    # 시도한다고 로그를 남기면 실제 동작과 어긋난다.
+                    print(
+                        f"  ⚠️ 팩트체크 재시도 {MAX_FACT_RETRIES}회 초과 → "
+                        "원문이 고정되어 기사 교체 불가 → 생성 중단"
+                    )
+                    break
+                print(f"  ⚠️ 팩트체크 재시도 {MAX_FACT_RETRIES}회 초과 → 이 기사 포기, 다음 기사 시도")
                 # notes_state에 저장된 기사 제목으로 ignored_titles 추가
                 failed_title = notes_state.get("last_article_title", "")
                 if failed_title:
