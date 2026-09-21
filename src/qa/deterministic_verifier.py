@@ -96,13 +96,28 @@ _KOREAN_SCALED_PART_RE = re.compile(
     rf"(?P<number>{_NUMBER_PATTERN})\s*(?P<scale>{_KOREAN_SCALE_PATTERN})",
     re.IGNORECASE,
 )
+# "60만 3293명"의 "3293"처럼 같은 수량을 잇는 잔여 숫자와, "3억 2020년"의
+# "2020"처럼 그냥 뒤이어 나오는 완전히 별개의 숫자(대개 날짜)를 구분해야
+# 한다 — 후자를 이걸로 오인해 합치면 "3억 2020년"이 300,002,020이 된다.
+# 잔여 숫자 바로 뒤에 날짜/시간류 단위가 오면 "같은 수량의 나머지"가 아니라
+# "별개의 숫자"로 보고 잔여 캡처 자체를 포기한다(전체 매치가 뒤로 물러나
+# expression만 남는다 — 뒤에 남은 숫자는 평범한 단일 숫자로 따로 처리됨).
+_COMPOUND_RESIDUAL_EXCLUDED_UNIT_PATTERN = (
+    r"(?:개월|months?|년|years?|일|days?|시간|hours?|분|minutes?|초|seconds?)"
+)
 _KOREAN_COMPOUND_NUMBER_RE = re.compile(
     rf"(?<![\w.])(?P<expression>"
     rf"{_NUMBER_PATTERN}\s*{_KOREAN_SCALE_PATTERN}"
     rf"(?:\s*{_NUMBER_PATTERN}\s*{_KOREAN_SCALE_PATTERN})*)"
     # "60만 3293명"처럼 마지막 자리가 별도 단위(만/억 등) 없이 그냥 나머지
     # 숫자로만 붙는 표기도 흔하다 — 있으면 더해서 하나의 값으로 합친다.
-    rf"(?:\s*(?P<residual>{_NUMBER_PATTERN}))?"
+    # residual을 원자 그룹(?>...)으로 묶어야 한다: 그냥 "(?P<residual>...)"라면
+    # 뒤이은 부정 전방탐색이 실패했을 때 정규식 엔진이 숫자를 한 자리씩
+    # 줄여가며 재시도해(예: "2020" 실패 → "202"는 통과) "3억 2020년"이
+    # 300000202처럼 부분적으로만 틀리게 합쳐지는 새 버그가 생긴다. 원자
+    # 그룹은 그런 역추적을 막아 실패 시 잔여 캡처 전체를 깔끔하게 포기한다.
+    rf"(?:\s*(?>(?P<residual>{_NUMBER_PATTERN}))"
+    rf"(?!\s*{_COMPOUND_RESIDUAL_EXCLUDED_UNIT_PATTERN}))?"
     rf"\s*(?P<unit>{_UNIT_PATTERN})?",
     re.IGNORECASE,
 )
@@ -380,6 +395,22 @@ def _canonical_numeric_range(
     return (left_value, left_unit), (right_value, right_unit)
 
 
+# _RANGE_ENDPOINT_RE/_KOREAN_RATIO_RE는 "60만 3293명"처럼 복합수인 끝점을
+# 모른다 — "60만 "을 남겨두고 "3293명"만 끝점으로 붙잡아버리면, 이후 다른
+# 끝점의 scale을 물려받는 로직과 맞물려 값이 몇 배씩 틀어진다(예:
+# 32,930,000으로 54배 부풀려짐). 이런 경우 억지로 잘못된 값을 만드는 대신
+# "복합수 인식 못 함"으로 보고 그 매치를 통째로 버린다 — 이후 호출부의
+# 일반 숫자 경로나 verbatim 안전망이 대신 처리한다.
+_COMPOUND_PREFIX_SUFFIX_RE = re.compile(
+    rf"{_NUMBER_PATTERN}\s*{_KOREAN_SCALE_PATTERN}\s*$"
+)
+
+
+def _truncates_a_compound_number(text: str, start_pos: int) -> bool:
+    """Return True if text right before start_pos ends with "NUMBER SCALE"."""
+    return bool(_COMPOUND_PREFIX_SUFFIX_RE.search(text[:start_pos]))
+
+
 def _extract_numeric_ranges(
     text: str,
     declared_unit: str = "",
@@ -389,6 +420,10 @@ def _extract_numeric_ranges(
     normalized = unicodedata.normalize("NFKC", text or "")
     for pattern in (_BETWEEN_NUMERIC_RANGE_RE, _SIMPLE_NUMERIC_RANGE_RE):
         for match in pattern.finditer(normalized):
+            if _truncates_a_compound_number(
+                normalized, match.start("left")
+            ) or _truncates_a_compound_number(normalized, match.start("right")):
+                continue
             canonical = _canonical_numeric_range(
                 match.group("left"),
                 match.group("right"),
@@ -407,6 +442,10 @@ def _extract_ratio_mentions(text: str) -> Iterable[tuple[Decimal, Decimal, str]]
 
     normalized = unicodedata.normalize("NFKC", text or "")
     for match in _KOREAN_RATIO_RE.finditer(normalized):
+        if _truncates_a_compound_number(
+            normalized, match.start("denom_number")
+        ) or _truncates_a_compound_number(normalized, match.start("num_number")):
+            continue
         denom = _to_decimal(match.group("denom_number"))
         num = _to_decimal(match.group("num_number"))
         if denom is None or num is None:
@@ -454,11 +493,19 @@ def _raw_text_verbatim_in_evidence(raw_text: str, evidence_text: str) -> bool:
 
     Deliberately narrow — no digit-string this short would match unless the
     claim actually copied evidence's own wording, since the phrase must
-    still contain a digit.
+    still contain a digit. In particular this only collapses whitespace next
+    to a Korean scale word (as in "1만 4900원" vs "1만4900원", the same
+    number typed two ways) — it must NOT strip whitespace between two
+    otherwise-unrelated bare numbers, or "20 26" would wrongly collapse into
+    "2026" and coincidentally match an unrelated year in evidence text.
     """
 
     def _norm(s: str) -> str:
-        s = re.sub(r"\s+", "", unicodedata.normalize("NFKC", s or ""))
+        s = unicodedata.normalize("NFKC", s or "")
+        s = re.sub(rf"\s+(?={_KOREAN_SCALE_PATTERN})", "", s)
+        # 가변 길이라 lookbehind로 못 쓰니(파이썬 re는 고정폭만 허용) 캡처 후
+        # 치환하는 방식으로 같은 효과를 낸다.
+        s = re.sub(rf"({_KOREAN_SCALE_PATTERN})\s+", r"\1", s)
         return s.replace(",", "")
 
     raw = _norm(raw_text)
