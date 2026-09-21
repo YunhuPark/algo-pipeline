@@ -9,7 +9,13 @@ from __future__ import annotations
 
 from typing import Optional
 
-from src.schemas.card_news import CardNewsScript, TrendReport, SourceLineage
+from src.schemas.card_news import (
+    CardNewsScript,
+    TrendReport,
+    SourceLineage,
+    MIN_CONTENT_BODY_CHARS,
+    MAX_CONTENT_BODY_CHARS,
+)
 from src.persona import load_persona, Persona
 from src.qa.claim_generator import ClaimGenerator
 from src.qa.deterministic_verifier import (
@@ -350,14 +356,35 @@ class ContentCreator:
                             "Evidence 안에서 독립적으로 검증되는 다른 Claim을 선택하세요."
                         )
                 elif exc.error_code == "EDITORIAL_COPY_LENGTH_INVALID":
-                    targeted_feedback = (
-                        " 길이 오류가 난 Claim만 우선 고쳐 주세요. 지난 시도가 45자 미만으로 너무 짧았습니다. "
-                        "모든 본문 Claim은 55~85자로 작성하고, 출력 전 글자 수를 반드시 스스로 세어 "
-                        "55자 미만이면 문장을 보강해 다시 세십시오 (새 사실 추가 금지, 인용 근거 안에서 "
-                        "이유·비교 기준·구체적 수식어를 보태 자연스럽게 늘리세요). "
-                        "한 카드에는 인용 근거가 직접 뒷받침하는 핵심 사실 하나만 남기고, "
-                        "길이를 맞추기 위한 새 정보·평가·전망은 추가하지 마세요."
-                    )
+                    if error_repairs >= MAX_CLAIM_QUALITY_REPAIRS_PER_ERROR:
+                        # 같은 Claim을 계속 늘리려다 반복 실패했다는 건, 인용 근거
+                        # 자체가 그 사실 하나로는 자연스럽게 35자를 못 채울 만큼
+                        # 짧다는 뜻일 수 있다 — 새 사실을 지어내게 만드는 대신
+                        # 통째로 다른 Evidence-backed Claim으로 바꾸게 한다.
+                        targeted_feedback = (
+                            " 길이 조정이 반복 실패했습니다. 같은 Claim을 다시 늘리려 하지 말고 "
+                            "해당 Claim 전체를 버리고, 자연스럽게 "
+                            f"{MIN_CONTENT_BODY_CHARS}~{MAX_CONTENT_BODY_CHARS}자로 쓸 수 있는 "
+                            "다른 Evidence-backed 사실로 교체하세요."
+                        )
+                    else:
+                        current_note = ""
+                        if failed_claim is not None:
+                            current_len = len(failed_claim.claim_text.replace("\n", ""))
+                            current_note = (
+                                f" 방금 쓴 문장(\"{failed_claim.claim_text}\", {current_len}자)에 "
+                                "같은 사실 그대로 살을 붙여 다시 쓰세요."
+                            )
+                        targeted_feedback = (
+                            " 길이 오류가 난 Claim만 우선 고쳐 주세요. 본문은 반드시 "
+                            f"{MIN_CONTENT_BODY_CHARS}~{MAX_CONTENT_BODY_CHARS}자여야 합니다 "
+                            "(목표 50~90자). 출력 전 글자 수를 반드시 스스로 세십시오."
+                            + current_note +
+                            " 새 사실 추가 금지 — 인용 근거 안에서 이유·비교 기준·구체적 수식어를 "
+                            "보태 자연스럽게 늘리세요. 한 카드에는 인용 근거가 직접 뒷받침하는 "
+                            "핵심 사실 하나만 남기고, 길이를 맞추기 위한 새 정보·평가·전망은 "
+                            "추가하지 마세요."
+                        )
                 elif exc.error_code == "EDITORIAL_QUALITY_FAILED":
                     targeted_feedback = (
                         " 편집 평가 피드백을 그대로 반영하되 사실을 새로 만들지 마세요. "
