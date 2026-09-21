@@ -286,6 +286,12 @@ _SYSTEM = """
 6. 위 조건을 만족하는 것 중에서 MZ세대가 "와 이거 알아야 해!" 라고 느낄 주제
 7. 지나치게 특정 정치적 편향이 없는 것
 8. 선택한 한 기사의 고유명사·제품명·핵심 수치를 topic에 그대로 유지할 것
+8-1. topic은 선택한 기사의 제목이 다루는 주된 사건이어야 합니다. "2025년 IT
+     동향 총정리", "올해의 트렌드 총정리"처럼 여러 소식을 나열하는 동향·총정리형
+     기사를 골랐다면, 그 안에서 잠깐 스쳐가듯 언급된 세부 사례 하나만 뽑아
+     topic으로 삼지 마십시오 — 그런 세부 사례는 그 기사의 본문만으로는 독립적인
+     근거가 부족합니다. 총정리 기사 안의 한 사례가 마음에 든다면, 그 기사를
+     선택하는 대신 그 사례를 다룬 다른 후보(있다면)를 선택하십시오.
 9. "AI 필수 용어", "알아야 할 것", "최신 트렌드" 같은 포괄적 주제로 바꾸지 말 것
 
 selected_index: 선택한 헤드라인의 번호 (1부터 시작)
@@ -466,6 +472,36 @@ def collect_and_select() -> NewsSelection:
                 selected.topic = selected.alt_topic or selected.topic
                 selected.reason = selected.alt_reason or selected.reason
                 selected.context = selected.alt_context or selected.context
+
+    # ── 주제-원문 앵커 사전 확인 ──────────────────────────────
+    # LLM이 총정리성 기사 안의 세부 사례 하나만 뽑아 topic으로 삼으면, 정작
+    # 고정 원문(selected_item)에는 그 topic의 핵심 앵커가 없어 다운스트림
+    # (assert_source_lineage_matches_topic)에서 값비싼 원문 추출을 이미 마친
+    # 뒤에야 실패한다. 같은 검증을 여기서 먼저 돌려, 실패 시 GPT가 함께 고른
+    # 2순위 대안이 앵커와 맞는지 확인하고 맞으면 그쪽으로 바꾼다.
+    from src.qa.topic_source_guard import topic_matches_source
+
+    if not topic_matches_source(source_locked_topic, selected_item.title, selected_item.summary):
+        print(
+            f"  ⚠️ [NewsCollector] 선택 주제 '{source_locked_topic}'가 원문 "
+            f"'{selected_item.title}'의 핵심 앵커와 겹치지 않습니다."
+        )
+        if selected.alt_selected_index and 1 <= selected.alt_selected_index <= len(all_items):
+            alt_candidate_item = all_items[selected.alt_selected_index - 1]
+            if alt_candidate_item.url != selected_item.url:
+                alt_candidate_topic = _ensure_source_locked_topic(
+                    selected.alt_topic or selected.topic, alt_candidate_item.title
+                )
+                if topic_matches_source(
+                    alt_candidate_topic, alt_candidate_item.title, alt_candidate_item.summary
+                ):
+                    print(f"  → 앵커가 맞는 2순위 주제로 교체: '{alt_candidate_topic}'")
+                    selected_item = alt_candidate_item
+                    source_locked_topic = alt_candidate_topic
+                    selected.reason = selected.alt_reason or selected.reason
+                    selected.context = selected.alt_context or selected.context
+        if not topic_matches_source(source_locked_topic, selected_item.title, selected_item.summary):
+            print("  ⚠️ 대안도 앵커가 맞지 않음 — 다운스트림 검증에서 최종 판단합니다.")
 
     if source_locked_topic != selected.topic.strip():
         print(
