@@ -6,7 +6,7 @@ from collections import Counter
 from difflib import SequenceMatcher
 from typing import Iterable
 
-from src.qa.deterministic_verifier import QualityGateError
+from src.qa.deterministic_verifier import QualityGateError, _number_supported_by_evidence
 from src.qa.editorial_intent import is_roundup_topic
 from src.schemas.card_news import (
     Claim,
@@ -122,6 +122,34 @@ def _topic_tokens(text: str) -> set[str]:
                     break
         tokens.add(token)
     return {token for token in tokens if token not in _GENERIC_TOPIC_TOKENS}
+
+
+def _validate_numbers_stated_in_copy(selected: list[Claim]) -> None:
+    """Reject a claim whose cited numbers never appear in its own claim_text.
+
+    A number that only lives in ``claim.numbers`` ends up rendered as a
+    disconnected stat overlay (design_renderer reads it from there) while the
+    card's readable sentence stays a vague, unverifiable-feeling statement.
+    Verified numeric evidence is exactly what should make the copy feel
+    concrete, so require every claim that cites a number to actually say it.
+    """
+
+    for claim in selected:
+        if not claim.numbers:
+            continue
+        if any(
+            _number_supported_by_evidence(number, claim.claim_text)
+            for number in claim.numbers
+        ):
+            continue
+        raise QualityGateError(
+            "EDITORIAL_NUMBER_NOT_IN_COPY",
+            f"Claim {claim.claim_id} cites numeric evidence in its numbers "
+            "array but claim_text never states that number — spell the "
+            "value out in the sentence instead of leaving it only as a "
+            "separate stat.",
+            claim.claim_id,
+        )
 
 
 def _validate_roundup_theme_diversity(topic: str, selected: list[Claim]) -> None:
@@ -269,6 +297,8 @@ def validate_claim_editorial_quality(
                 f"got {body_length}.",
                 claim.claim_id,
             )
+
+    _validate_numbers_stated_in_copy(selected)
 
     required_role_count = min(3, target_content_slides)
     roles = {claim.editorial_role for claim in selected} & _EDITORIAL_ROLES

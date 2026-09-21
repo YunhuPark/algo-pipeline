@@ -64,6 +64,7 @@ _EDITORIAL_CLAIM_QUALITY_ERRORS = {
     "EDITORIAL_CLAIM_REDUNDANT",
     "EDITORIAL_TOPIC_MISMATCH",
     "EDITORIAL_QUALITY_FAILED",
+    "EDITORIAL_NUMBER_NOT_IN_COPY",
 }
 
 _RETRYABLE_CLAIM_QUALITY_ERRORS = (
@@ -385,6 +386,14 @@ class ContentCreator:
                             "핵심 사실 하나만 남기고, 길이를 맞추기 위한 새 정보·평가·전망은 "
                             "추가하지 마세요."
                         )
+                elif exc.error_code == "EDITORIAL_NUMBER_NOT_IN_COPY":
+                    targeted_feedback = (
+                        " 해당 Claim의 numbers 배열에 있는 숫자를 claim_text 문장 "
+                        "안에 그대로 적으세요 — 숫자를 카드 상단 강조 수치로만 "
+                        "남겨두고 본문 문장에서는 빼는 대신, '그의 순자산은 "
+                        "192억 달러입니다'처럼 숫자와 그 의미를 문장에 직접 "
+                        "포함하세요. numbers.raw_text와 다른 표기로 바꾸지 마세요."
+                    )
                 elif exc.error_code == "EDITORIAL_QUALITY_FAILED":
                     targeted_feedback = (
                         " 편집 평가 피드백을 그대로 반영하되 사실을 새로 만들지 마세요. "
