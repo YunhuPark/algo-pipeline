@@ -18,6 +18,10 @@ from src.schemas.card_news import SourceLineage
 
 _GENERIC_TOPIC_TOKENS = {
     "ai",
+    # 이 계정의 후보 기사 대부분이 AI·IT·비즈니스 카테고리라 "it"이 거의
+    # 모든 기사에 등장한다 — 다른 기사와 구분해주는 고유명사가 아니라
+    # 카테고리 자체를 가리키는 일반 단어이므로 "ai"처럼 앵커에서 제외한다.
+    "it",
     "핵심",
     "요약",
     "정리",
