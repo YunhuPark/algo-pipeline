@@ -127,6 +127,12 @@ def run_pipeline(
             fact_check_retries = 0  # 기사 교체 됐으면 카운터 초기화
 
     print("  ⚠️ 재생성 최대 횟수 초과.")
+    # 재시도를 다 썼는데도 실패했다면, 마지막으로 겪은 실패의 error_code를
+    # 그냥 버리지 않고 돌려준다 — 그래야 호출부(대시보드 등)가 "알 수 없는
+    # 오류"가 아니라 실제 원인을 보여줄 수 있다.
+    last_failure = notes_state.get("last_failure_result") if notes_state else None
+    if last_failure is not None:
+        return replace(last_failure, retry_count=MAX_RETRY)
     return None
 
 
@@ -347,16 +353,31 @@ def _run_once(
         print(f"  → {len(script.slides)}장 생성 완료")
     except QualityGateError as e:
         print(f"  ⚠️ Quality Gate 실패 (생성 중): {e.error_code} - {e}")
-        return PipelineResult(
-            image_paths=[],
-            generation_succeeded=False,
-            publish_requested=publish,
-            publish_succeeded=False,
-            ig_post_id=None,
-            permalink=None,
-            failure_stage=e.failure_stage,
-            error_code=e.error_code
-        )
+        # run_pipeline()의 바깥 재시도 루프는 이 함수가 None을 돌려줘야만
+        # "기사 교체 없이 재시도 = 팩트체크 실패" 분기(같은 기사에 피드백을
+        # 실어 재시도하고, MAX_FACT_RETRIES를 넘기면 이 기사를 블랙리스트에
+        # 넣고 다음 기사로 교체)를 탄다. 예전에는 여기서 PipelineResult를
+        # 곧장 돌려줘 그 분기가 하드코드상 도달 불가능했다 — claim 하나만
+        # 근거와 어긋나도 남은 후보 기사와 재시도 예산을 전혀 못 쓰고
+        # 바로 실패했다. notes_state를 채우고 None을 돌려 그 재시도
+        # 메커니즘이 실제로 동작하게 한다. 재시도가 전부 소진되면
+        # run_pipeline()이 이 정보를 최종 실패 결과로 대신 돌려준다.
+        if notes_state is not None:
+            notes_state["last"] = f"{e.error_code}: {str(e)[:200]}"
+            notes_state["last_article_title"] = (
+                trend_report.results[0].title if trend_report.results else ""
+            )
+            notes_state["last_failure_result"] = PipelineResult(
+                image_paths=[],
+                generation_succeeded=False,
+                publish_requested=publish,
+                publish_succeeded=False,
+                ig_post_id=None,
+                permalink=None,
+                failure_stage=e.failure_stage,
+                error_code=e.error_code,
+            )
+        return None
 
     if save_script:
         safe = "".join(c if c.isalnum() or c in "가-힣" else "_" for c in topic)[:25]

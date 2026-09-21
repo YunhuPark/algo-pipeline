@@ -96,6 +96,18 @@ def test_off_persona_item_does_not_outrank_on_persona_candidates(monkeypatch):
     assert items[selected.selected_index - 1].title == "AI 스타트업 투자유치 0"
 
 
+def test_on_persona_regex_matches_korean_glued_to_the_abbreviation():
+    # 파이썬 정규식의 \b는 한글도 \w로 취급해서, "AI기술"·"IT업계"처럼
+    # 영문 약어 바로 뒤에 공백 없이 한글이 붙으면(실제로 흔한 표기) 예전
+    # \bAI\b/\bIT\b가 매칭에 실패해 온퍼소나 후보를 놓치고 있었다.
+    assert nc._ON_PERSONA_RE.search("AI기술 도입 확산")
+    assert nc._ON_PERSONA_RE.search("IT업계 재편 가속")
+    assert nc._ON_PERSONA_RE.search("AI 기술 도입")  # 공백 있는 기존 케이스도 유지
+    # 영문 단어 내부의 우연한 일치까지 넓어지면 안 된다.
+    assert not nc._ON_PERSONA_RE.search("DETAILED 보고서")
+    assert not nc._ON_PERSONA_RE.search("MAINSTREAM 뉴스")
+
+
 def test_falls_back_to_every_candidate_when_few_are_grounded(monkeypatch):
     """수치 있는 기사가 적다고 생성이 막히면 안 된다.
 
