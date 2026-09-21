@@ -237,6 +237,23 @@ _ON_PERSONA_RE = re.compile(
 
 _RSS_SOURCE_NAMES = {name for name, _ in RSS_FEEDS}
 
+# "2025년 IT 기술 동향 분석 및 핵심 트렌드 예측" 같은 총정리·동향분석형
+# 기사는 특정 사건 하나를 뒷받침하기엔 근거가 옅다. 프롬프트로 "이런 기사를
+# 고르지 말라"고만 해서는 GPT가 본문 수치가 많다는 이유로 계속 이쪽을 골라,
+# topic은 그 안에 스쳐 지나가듯 언급된 세부 사건("애플카 프로젝트 타이탄")
+# 으로 짓고 고정 원문은 이 총정리 기사로 남는 불일치가 실제로 반복됐다.
+# 코드 단계에서 후보 풀 자체에 안 보이게 거른다.
+_ROUNDUP_TITLE_RE = re.compile(
+    r"총정리|총망라|한눈에\s*보는|핵심\s*트렌드|트렌드\s*예측|동향\s*분석|"
+    r"연간\s*리뷰|결산|올해의|이슈\s*모음|round[- ]?up|year in review|"
+    r"trends?\s*(?:to watch|for\s*\d{4})",
+    re.IGNORECASE,
+)
+
+
+def _is_roundup_title(title: str) -> bool:
+    return bool(_ROUNDUP_TITLE_RE.search(title or ""))
+
 
 def _is_on_persona_candidate(item: NewsItem) -> bool:
     """RSS_FEEDS 출신은 소스 자체가 IT 전문 매체라 항상 통과. 그 외(Tavily
@@ -358,6 +375,14 @@ def _select_topic_with_gpt(items: list[NewsItem]) -> _SelectedTopic:
             f"  [NewsCollector] 수치 있는 기사 {len(grounded)}건뿐 → 전체 "
             f"{len(candidates)}건에서 선택"
         )
+
+    non_roundup_pool = [(idx, it) for idx, it in pool if not _is_roundup_title(it.title)]
+    if len(non_roundup_pool) >= _MIN_ON_PERSONA_POOL and len(non_roundup_pool) < len(pool):
+        print(
+            f"  [NewsCollector] 총정리·동향분석형 기사 {len(pool) - len(non_roundup_pool)}건 "
+            f"제외 → {len(non_roundup_pool)}건에서 선택"
+        )
+        pool = non_roundup_pool
 
     headlines = "\n".join(
         f"[{n+1}] ({it.source}) {it.title} — 수치 {fact_counts[idx]}개\n"

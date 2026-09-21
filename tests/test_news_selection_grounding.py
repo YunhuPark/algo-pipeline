@@ -120,3 +120,28 @@ def test_falls_back_to_every_candidate_when_few_are_grounded(monkeypatch):
     selected = nc._select_topic_with_gpt(items)
 
     assert items[selected.selected_index - 1].title == "논평0"
+
+
+def _roundup(i: int) -> nc.NewsItem:
+    """팩트는 많지만 특정 사건이 아니라 여러 소식을 나열한 총정리형 기사."""
+    return nc.NewsItem(
+        title=f"{2020 + i}년 IT 기술 동향 분석 및 핵심 트렌드 예측",
+        summary=f"매출 {i + 1},200억 원으로 전년 대비 {i + 5}% 증가했다.",
+        source="TechCrunch",
+        url=f"https://example.com/roundup{i}",
+    )
+
+
+def test_roundup_titled_article_is_excluded_from_the_candidate_pool(monkeypatch):
+    """총정리·동향분석형 기사는 팩트가 많아도 후보 풀에서 빠져야 한다.
+
+    안 그러면 GPT가 그 기사를 고른 뒤 topic만 그 안에 스쳐 지나가듯 언급된
+    세부 사건으로 지어, 고정 원문(총정리 기사)과 topic이 어긋나는 실제
+    불일치가 반복됐다.
+    """
+    items = [_roundup(i) for i in range(2)] + [_on_persona(i) for i in range(2)]
+    _stub_llm(monkeypatch, selected_index=1)   # 압축된 후보의 첫 번째
+
+    selected = nc._select_topic_with_gpt(items)
+
+    assert items[selected.selected_index - 1].title == "AI 스타트업 투자유치 0"
