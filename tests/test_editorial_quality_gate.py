@@ -118,6 +118,61 @@ def test_editorial_claim_gate_rejects_repeated_card_points():
     assert exc.value.error_code == "EDITORIAL_CLAIM_REDUNDANT"
 
 
+def test_editorial_claim_gate_rejects_number_missing_from_claim_copy():
+    # 카드 상단 강조 수치(accent)는 claim.numbers에서 따로 그려지므로, 본문
+    # 문장이 그 숫자를 실제로 말하지 않으면 "$192 billion"이 카드에 떠 있어도
+    # 읽을 수 있는 문장 자체는 근거 없는 막연한 평가처럼 느껴진다.
+    claims = _distinct_claims()
+    claims[3] = claims[3].model_copy(
+        update={
+            "claim_type": "numerical",
+            "claim_text": "AI 산업의 확장에 제동이 걸리면 그의 부의 상승이 느려질 수 있습니다.",
+            "numbers": [
+                NormalizedNumber(
+                    raw_text="$192 billion",
+                    normalized_value=192_000_000_000,
+                    unit="dollars",
+                    subject="순자산",
+                )
+            ],
+        }
+    )
+
+    with pytest.raises(QualityGateError) as exc:
+        validate_claim_editorial_quality(
+            claims,
+            topic="모델 개발 발표",
+            target_content_slides=4,
+        )
+
+    assert exc.value.error_code == "EDITORIAL_NUMBER_NOT_IN_COPY"
+    assert exc.value.claim_id == "c4"
+
+
+def test_editorial_claim_gate_accepts_number_stated_in_claim_copy():
+    claims = _distinct_claims()
+    claims[3] = claims[3].model_copy(
+        update={
+            "claim_type": "numerical",
+            "claim_text": "그의 순자산은 1920억 달러로 세계 최상위권 부호에 속한다고 알려졌다.",
+            "numbers": [
+                NormalizedNumber(
+                    raw_text="1920억 달러",
+                    normalized_value=192_000_000_000,
+                    unit="dollars",
+                    subject="순자산",
+                )
+            ],
+        }
+    )
+
+    validate_claim_editorial_quality(
+        claims,
+        topic="모델 개발 발표",
+        target_content_slides=4,
+    )
+
+
 def test_editorial_claim_gate_rejects_generic_topic_drift():
     with pytest.raises(QualityGateError) as exc:
         validate_claim_editorial_quality(
