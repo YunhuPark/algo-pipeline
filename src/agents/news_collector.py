@@ -210,6 +210,7 @@ _FACT_TOKEN_RE = re.compile(
 _MIN_FACTS = 2            # 이 정도는 있어야 카드 4장에 쓸 수치가 나온다
 _MIN_GROUNDED_POOL = 5    # 후보를 좁혀도 선택지가 남을 만큼은 있어야 한다
 _MIN_ON_PERSONA_POOL = 2  # AI·IT·비즈니스 후보는 이 정도만 있어도 우선한다
+_MIN_AI_POOL = 2          # AI 특화 후보는 이 정도만 있어도 IT·비즈니스보다 우선한다
 
 # 프롬프트로 "AI·IT·비즈니스를 먼저 고르라"고만 해서는, 팩트가 압도적으로
 # 많은(예: 27개) 무관한 기사가 있으면 GPT가 그쪽으로 넘어가는 걸 계속
@@ -221,11 +222,24 @@ _MIN_ON_PERSONA_POOL = 2  # AI·IT·비즈니스 후보는 이 정도만 있어�
 # (흔한 한국어 표기인데 못 잡음 → 카테고리 필터가 온퍼소나 후보를 놓침).
 # 한글 앞뒤는 신경 안 쓰고 "다른 영문자와 안 붙어있으면 된다"로 좁혀서
 # "MAIL"/"WAIT" 같은 단어 내부의 우연한 일치만 막는다.
+# AI 자체를 다루는 기사(모델·연구·AI 기업)는 IT/비즈니스 일반 뉴스보다
+# 우선한다 — 이 계정의 1순위는 AI이고 IT·비즈니스는 AI 후보가 부족할 때만
+# 채우는 보조 카테고리다. _ON_PERSONA_RE(전체 카테고리 게이트)와 별도로
+# 유지해, "삼성전자 반도체 실적"처럼 IT/비즈니스이긴 해도 AI 자체를
+# 다루지는 않는 기사와 구분한다.
+_AI_SPECIFIC_RE = re.compile(
+    r"(?<![A-Za-z])AI(?![A-Za-z])|인공지능|생성형|챗봇|LLM|머신러닝|딥러닝|"
+    r"신경망|GPT|Claude|클로드|Gemini|제미나이|Llama|라마|Grok|그록|"
+    r"오픈AI|openai|오픈에이아이|앤스로픽|anthropic|딥마인드|deepmind|"
+    r"엔비디아|nvidia",
+    re.IGNORECASE,
+)
+
 _ON_PERSONA_RE = re.compile(
-    r"(?<![A-Za-z])AI(?![A-Za-z])|인공지능|생성형|챗봇|LLM|"
+    _AI_SPECIFIC_RE.pattern + "|"
     r"(?<![A-Za-z])IT(?![A-Za-z])|아이티|테크|tech|스타트업|startup|"
-    r"애플|삼성전자|삼성|구글|google|apple|마이크로소프트|microsoft|openai|"
-    r"오픈에이아이|앤스로픽|anthropic|메타(?!버스)|meta|엔비디아|nvidia|"
+    r"애플|삼성전자|삼성|구글|google|apple|마이크로소프트|microsoft|"
+    r"메타(?!버스)|meta|"
     r"아마존|amazon|테슬라|tesla|소프트웨어|software|하드웨어|hardware|"
     r"반도체|semiconductor|클라우드|cloud|스마트폰|smartphone|로봇|robot|"
     r"블록체인|blockchain|핀테크|fintech|이커머스|커머스|플랫폼|platform|"
@@ -253,6 +267,29 @@ _ROUNDUP_TITLE_RE = re.compile(
 
 def _is_roundup_title(title: str) -> bool:
     return bool(_ROUNDUP_TITLE_RE.search(title or ""))
+
+
+# "그가 이렇게 말했다/주장했다/경고했다"류 발언·의견 인용 기사는 팩트 수치
+# 기준(_MIN_FACTS)을 겨우 넘겨도 실제로는 검증 가능한 사건·수치보다 한 사람의
+# 주관적 평가가 카드 대부분을 채운다 — "AI 공포는 과장이다"처럼 반응은
+# 끌지만 본문이 얄팍해진다. 중립적 사실 보도에도 흔한 "밝혔다"는 일부러
+# 빼고, 논쟁·평가성이 뚜렷한 동사·명사만 잡는다.
+_OPINION_STATEMENT_RE = re.compile(
+    r"주장했다|주장하|경고했다|경고하|비판했다|비판하|반박했다|반박하|"
+    r"우려했다|우려하|지적했다|지적하|비난했다|비난하|발언|논란|사설|칼럼|"
+    r"오피니언|says|warns?|claims?|slams?|blasts?|accuses?|rejects?",
+    re.IGNORECASE,
+)
+
+
+def _is_opinion_statement_title(title: str) -> bool:
+    return bool(_OPINION_STATEMENT_RE.search(title or ""))
+
+
+def _is_ai_specific_candidate(item: NewsItem) -> bool:
+    """AI 자체(모델·연구·AI 기업)를 다루는지 — IT/비즈니스 일반과 구분해
+    이 계정의 1순위인 AI 후보를 먼저 우선한다."""
+    return bool(_AI_SPECIFIC_RE.search(f"{item.title} {item.summary[:200]}"))
 
 
 def _is_on_persona_candidate(item: NewsItem) -> bool:
@@ -296,13 +333,17 @@ _SYSTEM = """
 1. AI·IT·비즈니스 기사인가? 후보 중 하나라도 있으면 반드시 그 안에서만
    고르십시오. 대중교통·행정·생활 밀착 "사회" 뉴스(예: 버스 노선, 공휴일
    지정, 지역 축제)는 후보 전체에 AI·IT·비즈니스 기사가 단 하나도 없을
-   때만 마지막 수단으로 고르십시오
+   때만 마지막 수단으로 고르십시오. 이 안에서도 AI(모델·연구·AI 기업)를
+   직접 다루는 기사가 있으면 IT/비즈니스 일반 기사보다 우선하십시오.
 2. 연예인 스캔들, 강력범죄, 여야 정쟁성 공방, 자극적인 사건·사고 단신은
    카테고리·수치와 무관하게 절대 고르지 마십시오
 3. 본문에 구체적 수치(금액·비율·건수·날짜)와 그 수치의 주체가 실제로 적혀 있는 기사
 4. 누가 무엇을 했는지가 명확한 기사. "일부 전문가들", "논란이 제기된다" 수준의
    익명·수동 서술만 있는 논평·사설·오피니언은 피하십시오
-   (제목이 "~인가?", "Is ...?"처럼 질문형이고 본문에 수치가 없으면 대개 논평입니다)
+   (제목이 "~인가?", "Is ...?"처럼 질문형이고 본문에 수치가 없으면 대개 논평입니다).
+   특정 인물이 실명으로 한 발언·주장·경고를 다루는 기사도, 그 발언 자체가
+   내용의 전부이고 독립적으로 검증 가능한 사건·수치가 따로 없다면 피하십시오
+   — "OOO가 이렇게 말했다"는 카드로 만들어도 근거 없는 의견처럼 읽힙니다.
 5. 서로 다른 핵심 사실을 4개 이상 뽑을 수 있을 만큼 본문이 충분한 기사
 6. 위 조건을 만족하는 것 중에서 MZ세대가 "와 이거 알아야 해!" 라고 느낄 주제
 7. 지나치게 특정 정치적 편향이 없는 것
@@ -349,19 +390,29 @@ def _select_topic_with_gpt(items: list[NewsItem]) -> _SelectedTopic:
         idx: _fact_count(f"{it.title} {it.summary}") for idx, it in candidates
     }
 
-    # 후보 압축 3단계 — 우선순위: (1) 카테고리 부합 + 팩트 충분 → (2) 팩트만
-    # 충분(카테고리 무관) → (3) 전체. 프롬프트 지시만으로는 사회 뉴스가
-    # 팩트를 아주 많이 담고 있을 때 그쪽으로 넘어가는 걸 막지 못해, 코드
-    # 단계에서 먼저 카테고리로 걸러 GPT에게 애초에 후보로 보여주지 않는다.
+    # 후보 압축 4단계 — 우선순위: (1) AI 특화 + 팩트 충분 → (2) AI·IT·비즈니스
+    # 전체 + 팩트 충분 → (3) 팩트만 충분(카테고리 무관) → (4) 전체. 프롬프트
+    # 지시만으로는 사회 뉴스가 팩트를 아주 많이 담고 있을 때 그쪽으로 넘어가는
+    # 걸 막지 못해, 코드 단계에서 먼저 카테고리로 걸러 GPT에게 애초에 후보로
+    # 보여주지 않는다.
     grounded = [(idx, it) for idx, it in candidates if fact_counts[idx] >= _MIN_FACTS]
+    ai_grounded = [
+        (idx, it) for idx, it in grounded if _is_ai_specific_candidate(it)
+    ]
     on_persona_grounded = [
         (idx, it) for idx, it in grounded if _is_on_persona_candidate(it)
     ]
-    if len(on_persona_grounded) >= _MIN_ON_PERSONA_POOL:
+    if len(ai_grounded) >= _MIN_AI_POOL:
+        pool = ai_grounded
+        print(
+            f"  [NewsCollector] AI 특화 + 본문 수치 {_MIN_FACTS}개 이상 "
+            f"기사 {len(pool)}건으로 후보 압축 (AI 최우선)"
+        )
+    elif len(on_persona_grounded) >= _MIN_ON_PERSONA_POOL:
         pool = on_persona_grounded
         print(
-            f"  [NewsCollector] AI·IT·비즈니스 + 본문 수치 {_MIN_FACTS}개 이상 "
-            f"기사 {len(pool)}건으로 후보 압축"
+            f"  [NewsCollector] AI 후보 부족({len(ai_grounded)}건) → AI·IT·비즈니스 + "
+            f"본문 수치 {_MIN_FACTS}개 이상 기사 {len(pool)}건으로 후보 압축"
         )
     elif len(grounded) >= _MIN_GROUNDED_POOL:
         pool = grounded
@@ -383,6 +434,16 @@ def _select_topic_with_gpt(items: list[NewsItem]) -> _SelectedTopic:
             f"제외 → {len(non_roundup_pool)}건에서 선택"
         )
         pool = non_roundup_pool
+
+    non_opinion_pool = [
+        (idx, it) for idx, it in pool if not _is_opinion_statement_title(it.title)
+    ]
+    if len(non_opinion_pool) >= _MIN_ON_PERSONA_POOL and len(non_opinion_pool) < len(pool):
+        print(
+            f"  [NewsCollector] 발언·의견 중심 기사 {len(pool) - len(non_opinion_pool)}건 "
+            f"제외 → {len(non_opinion_pool)}건에서 선택"
+        )
+        pool = non_opinion_pool
 
     headlines = "\n".join(
         f"[{n+1}] ({it.source}) {it.title} — 수치 {fact_counts[idx]}개\n"

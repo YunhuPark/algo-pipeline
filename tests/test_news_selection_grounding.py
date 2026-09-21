@@ -132,6 +132,39 @@ def _roundup(i: int) -> nc.NewsItem:
     )
 
 
+def _opinion_statement(i: int) -> nc.NewsItem:
+    """발언/의견이 내용의 전부인 기사 — 팩트 기준은 겨우 넘기지만 실제로는
+    한 사람의 주장·경고가 카드 대부분을 채운다."""
+    return nc.NewsItem(
+        title=f"CEO, AI 위험성 경고는 무책임하다고 주장{i}",
+        summary=f"그는 AI 산업 규제가 매출 {i + 1}00억 원 손실로 이어질 것이라고 경고했다.",
+        source="TechCrunch",
+        url=f"https://example.com/opinion{i}",
+    )
+
+
+def test_ai_specific_candidate_outranks_it_business_only_candidates(monkeypatch):
+    """AI 자체를 다루는 기사가 있으면, 카테고리는 부합해도 AI가 아닌
+    IT/비즈니스 기사보다 우선해야 한다(이 계정의 1순위는 AI)."""
+    items = [_grounded(i) for i in range(4)] + [_on_persona(i) for i in range(2)]
+    _stub_llm(monkeypatch, selected_index=1)   # 압축된 AI 후보의 첫 번째
+
+    selected = nc._select_topic_with_gpt(items)
+
+    assert items[selected.selected_index - 1].title == "AI 스타트업 투자유치 0"
+
+
+def test_opinion_statement_titled_article_is_excluded_when_alternative_exists(monkeypatch):
+    """발언/주장이 내용의 전부인 기사는, 팩트 기준을 넘겨도 대안이 있으면
+    후보 풀에서 빠져야 한다."""
+    items = [_opinion_statement(i) for i in range(2)] + [_on_persona(i) for i in range(2)]
+    _stub_llm(monkeypatch, selected_index=1)
+
+    selected = nc._select_topic_with_gpt(items)
+
+    assert items[selected.selected_index - 1].title == "AI 스타트업 투자유치 0"
+
+
 def test_roundup_titled_article_is_excluded_from_the_candidate_pool(monkeypatch):
     """총정리·동향분석형 기사는 팩트가 많아도 후보 풀에서 빠져야 한다.
 
