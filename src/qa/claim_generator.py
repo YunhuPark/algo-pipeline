@@ -18,7 +18,7 @@ from src.qa.deterministic_verifier import (
     parse_number_with_qualifier,
 )
 from src.qa.editorial_intent import is_roundup_topic
-from src.schemas.card_news import Claim, SourceLineage
+from src.schemas.card_news import Claim, SourceLineage, MIN_CONTENT_BODY_CHARS
 
 
 MAX_GENERATED_CLAIMS = 12
@@ -124,7 +124,7 @@ _CLAIM_SYSTEM_PROMPT = """
 8-2. 독자가 이미 제목만 보고 아는 내용(사건이 일어났다는 사실 자체)만 있는 Claim은 만들지 마십시오. 그 사건의 무엇이 구체적으로 어떠한지를 적으십시오.
 8-3. 원문에 근거가 없는 전망·추측·평가를 쓰지 마십시오. "예고됩니다", "전망입니다", "될 것으로 보입니다", "관측됩니다" 같은 서술은 금지합니다. 원문이 실제로 보도한 사실만 단정형으로 적으십시오.
 9. display_title은 10~18자의 자연스러운 한국어 완결형 제목이어야 하며 말줄임표를 쓰지 마십시오. claim_text에 없는 사실을 추가하면 안 됩니다.
-10. claim_text는 카드 한 장에서 독립적으로 이해되는 40~70자의 자연스러운 한국어로 작성하십시오. 글자 수를 반드시 스스로 세어 40자 미만이면 절대 출력하지 마십시오. 짧고 끊어지는 문장이 좋습니다. 한 카드에 핵심 사실 하나만 담되, 나열·수식을 덧붙여 억지로 늘리지 말고 고유명사·수치의 의미와 비교 기준만 빠뜨리지 마십시오.
+10. claim_text는 카드 한 장에서 독립적으로 이해되는 __CLAIM_LEN_TARGET_MIN__~__CLAIM_LEN_TARGET_MAX__자의 자연스러운 한국어로 작성하십시오. 글자 수를 반드시 스스로 세어 __CLAIM_LEN_SAFE_FLOOR__자 미만이면 절대 출력하지 마십시오 (실제 최소 기준은 __CLAIM_LEN_REAL_MIN__자이지만, 스스로 세는 글자 수는 실제보다 적게 나오는 경우가 많으니 여유를 두십시오). 짧고 끊어지는 문장이 좋습니다. 한 카드에 핵심 사실 하나만 담되, 나열·수식을 덧붙여 억지로 늘리지 말고 고유명사·수치의 의미와 비교 기준만 빠뜨리지 마십시오.
 11. entities 배열에는 각 Claim이 인용한 Evidence에 실제로 등장하는 고유명사의 원문 철자만 넣으십시오. 근거에 없는 번역명·상위 조직·업계명은 넣지 마십시오.
 12. 일반적인 단일 사건 주제라면 모든 Claim이 카드뉴스 주제와 고정 원문 제목이 가리키는 동일한 사건을 설명해야 합니다. 요약·총정리·roundup·recap처럼 여러 핵심 포인트를 요청한 주제라면 고정 원문 한 건으로 범위를 좁히지 말고 제공된 Evidence 전체에서 서로 다른 발표·기능·변화·제한·영향을 선택하십시오. 요약형에서는 4개 카드 중 같은 세부 기능이나 같은 좁은 키워드에 3개 이상 몰리지 않게 하십시오.
 13. 원문이 "hundreds of millions"처럼 범위형 수치를 사용하면 임의의 정확한 금액으로 바꾸지 마십시오. claim_text와 numbers.raw_text에는 "수억 달러"처럼 같은 범위의 자연스러운 한국어 표현을 사용하고 근거의 정밀도를 그대로 유지하십시오.
@@ -143,6 +143,19 @@ _CLAIM_SYSTEM_PROMPT = """
 26. ENTITY_UNSUPPORTED 피드백으로 지적된 고유명사는 다음 응답에서 특별히 금지된 값으로 취급하십시오. 그 문자열이 실제로 선택한 evidence_ids 안에 문자 그대로 존재하고 Claim 전체를 뒷받침하는 경우에만 다시 사용할 수 있습니다. 그렇지 않으면 그 entity만 억지로 지우지 말고, 해당 고유명사에 의존하는 Claim 전체를 삭제하고 다른 Evidence-backed Claim으로 교체하십시오.
 27. 출력 직전에 각 numbers 항목도 자신이 선택한 evidence_ids의 원문과 대조하십시오. 숫자·통화·단위 표면형을 가능한 한 원문에서 그대로 복사하고, normalized_value만 그 표면형의 실제 값으로 계산하십시오. 원문과 다른 decimal/scale 표기는 만들지 마십시오.
 """
+
+# 위 프롬프트는 LangChain ChatPromptTemplate의 템플릿 문자열로 그대로 쓰이므로
+# (JSON 스키마 예시의 중괄호가 {{ }}로 이스케이프돼 있음), 여기서 f-string이나
+# .format()으로 치환하면 이스케이프가 풀려 LangChain이 그 중괄호를 자기 템플릿
+# 변수로 오인해 KeyError가 난다. 그래서 .replace()로만 값을 끼워 넣는다 —
+# 실제 게이트 기준(schemas.card_news)과 항상 같은 값을 쓰도록 동기화한다.
+_CLAIM_SYSTEM_PROMPT = (
+    _CLAIM_SYSTEM_PROMPT
+    .replace("__CLAIM_LEN_TARGET_MIN__", str(MIN_CONTENT_BODY_CHARS + 15))
+    .replace("__CLAIM_LEN_TARGET_MAX__", str(MIN_CONTENT_BODY_CHARS + 55))
+    .replace("__CLAIM_LEN_SAFE_FLOOR__", str(MIN_CONTENT_BODY_CHARS + 10))
+    .replace("__CLAIM_LEN_REAL_MIN__", str(MIN_CONTENT_BODY_CHARS))
+)
 
 
 class ClaimGenerationError(QualityGateError, ValueError):
