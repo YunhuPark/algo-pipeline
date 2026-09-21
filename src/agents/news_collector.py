@@ -212,8 +212,14 @@ _MIN_ON_PERSONA_POOL = 2  # AI·IT·비즈니스 후보는 이 정도만 있어�
 # 봤다 — 카테고리 필터는 프롬프트가 아니라 코드에서 걸어야 안정적이다.
 # RSS_FEEDS는 전부 IT 전문 매체라 항상 통과시키고, Tavily(종합 검색) 같은
 # 소스만 이 키워드로 걸러 AI·IT·비즈니스 관련 여부를 판단한다.
+# \b(단어 경계)는 파이썬 정규식에서 한글도 \w로 취급해, "AI기술"·"IT업계"처럼
+# 영문 약어 뒤에 공백 없이 한글이 바로 붙으면 경계가 안 생겨 매칭에 실패한다
+# (흔한 한국어 표기인데 못 잡음 → 카테고리 필터가 온퍼소나 후보를 놓침).
+# 한글 앞뒤는 신경 안 쓰고 "다른 영문자와 안 붙어있으면 된다"로 좁혀서
+# "MAIL"/"WAIT" 같은 단어 내부의 우연한 일치만 막는다.
 _ON_PERSONA_RE = re.compile(
-    r"\bAI\b|인공지능|생성형|챗봇|LLM|\bIT\b|아이티|테크|tech|스타트업|startup|"
+    r"(?<![A-Za-z])AI(?![A-Za-z])|인공지능|생성형|챗봇|LLM|"
+    r"(?<![A-Za-z])IT(?![A-Za-z])|아이티|테크|tech|스타트업|startup|"
     r"애플|삼성전자|삼성|구글|google|apple|마이크로소프트|microsoft|openai|"
     r"오픈에이아이|앤스로픽|anthropic|메타(?!버스)|meta|엔비디아|nvidia|"
     r"아마존|amazon|테슬라|tesla|소프트웨어|software|하드웨어|hardware|"
@@ -221,7 +227,7 @@ _ON_PERSONA_RE = re.compile(
     r"블록체인|blockchain|핀테크|fintech|이커머스|커머스|플랫폼|platform|"
     r"디지털|digital|사이버|cyber|알고리즘|algorithm|비트코인|암호화폐|"
     r"가상자산|crypto|주가|증시|코스피|나스닥|상장|유니콘|매출|영업이익|"
-    r"시가총액|투자유치|앱\b|app\b",
+    r"시가총액|투자유치|앱\b|(?<![A-Za-z])app(?![A-Za-z])",
     re.IGNORECASE,
 )
 
