@@ -42,7 +42,7 @@ from flask import Flask, request, redirect, url_for, send_file, Response, stream
 
 from src.db import (
     get_posts, get_analytics, get_queue,
-    mark_queue_status, queue_count,
+    queue_count, try_mark_queue_skipped,
 )
 
 app = Flask(__name__)
@@ -980,8 +980,16 @@ def queue_add():
 
 @app.route("/queue/skip/<int:qid>", methods=["POST"])
 def queue_skip(qid: int):
-    mark_queue_status(qid, "skipped")
-    return redirect(url_for("queue_page", msg=f"#{qid} 건너뜀"))
+    # 큐 워커(스케줄러/자동 수집)가 이미 이 항목을 발행 시도 중일 수 있다 —
+    # 그 경우 조건부 UPDATE라 아무것도 안 바뀌고, 이미 시작된 실제 인스타
+    # 발행은 이 시점엔 막을 방법이 없다. 조용히 "건너뜀"이라고 속이지 않고
+    # 정확한 상태를 알려준다.
+    if try_mark_queue_skipped(qid):
+        return redirect(url_for("queue_page", msg=f"#{qid} 건너뜀"))
+    return redirect(url_for(
+        "queue_page",
+        err=f"#{qid}는 이미 발행이 진행 중이라 건너뛸 수 없습니다.",
+    ))
 
 
 @app.route("/queue/generate", methods=["POST"])
@@ -2065,6 +2073,14 @@ def subtitle(video_id: str):
     _TRANSCRIPT_DIR = ROOT / "data" / "yt_cache" / "transcripts"
     _KO_DIR = _TRANSCRIPT_DIR / "ko"
     _KO_DIR.mkdir(parents=True, exist_ok=True)
+
+    # Flask의 <video_id> 컨버터는 "/"만 막고 "\\"는 안 막는다 — 다른
+    # output 라우트처럼 별도로 검증해야 한다. 검증 안 하면 Windows에서
+    # "\\" 경로 구분자를 타고 yt_cache/transcripts 밖의 파일을 읽고 쓸 수 있다.
+    try:
+        video_id = _safe_output_segment(video_id, "video_id")
+    except ValueError as exc:
+        return str(exc), 400
 
     # 1) 한국어 번역 캐시 확인
     ko_path = _KO_DIR / f"{video_id}.vtt"

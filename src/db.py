@@ -269,6 +269,32 @@ def mark_queue_status(queue_id: int, status: str) -> None:
         conn.execute("UPDATE queue SET status=? WHERE id=?", (status, queue_id))
 
 
+def try_mark_queue_skipped(queue_id: int) -> bool:
+    """Skip a queue row only while it is still safely skippable.
+
+    dequeue_next()/publish_next() run in a separate long-lived process (a
+    scheduler cron, a queue worker) that may already have claimed this row
+    via start_publish_attempt() and be mid-publish when a user asks to skip
+    it. A plain unconditional UPDATE can't tell "nothing is happening yet"
+    from "the real Instagram publish is already in flight" — and once IG's
+    API call succeeds there is nothing a DB write can undo anyway. This only
+    marks the row skipped while it is still 'pending' and unclaimed, so a
+    later complete_queue_publish() (guarded the same way) can't silently
+    resurrect it back to 'published' and hide that the skip was ignored.
+    Returns True if the skip took effect, False if the row was already
+    claimed/in-flight (or gone) and the caller should tell the user that.
+    """
+    with _conn() as conn:
+        cur = conn.execute(
+            """UPDATE queue SET status='skipped'
+               WHERE id=? AND status='pending'
+                 AND publish_attempt_id IS NULL
+                 AND publish_attempt_state='NOT_ATTEMPTED'""",
+            (queue_id,),
+        )
+        return cur.rowcount == 1
+
+
 def mark_queue_error(
     queue_id: int,
     error_code: str,
@@ -330,11 +356,20 @@ def store_queue_ig_post_id(queue_id: int, attempt_id: str, ig_post_id: str) -> N
 
 
 def complete_queue_publish(queue_id: int, attempt_id: str, ig_post_id: str) -> None:
+    """Record that a claimed queue row's Instagram publish succeeded.
+
+    ``status != 'skipped'`` guards against a race where a user skipped this
+    row (via try_mark_queue_skipped) while the real IG publish call — already
+    in flight and unstoppable by this point — was completing. It can't undo
+    that publish, but it stops this write from silently overwriting the
+    user's skip back to 'published' and hiding that the skip had no effect;
+    the caller's exception handling records an error instead.
+    """
     with _conn() as conn:
         cur = conn.execute(
             """UPDATE queue SET status='published', publish_error_code=NULL,
                    publish_attempt_state='REMOTE_ID_CONFIRMED'
-               WHERE id=? AND publish_attempt_id=? AND ig_post_id=?""",
+               WHERE id=? AND publish_attempt_id=? AND ig_post_id=? AND status != 'skipped'""",
             (queue_id, attempt_id, ig_post_id),
         )
         if cur.rowcount != 1:

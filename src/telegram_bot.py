@@ -37,7 +37,7 @@ from telegram.ext import (
     ContextTypes,
 )
 
-from src.db import get_posts, queue_count, get_queue, mark_queue_status
+from src.db import get_posts, queue_count, get_queue, try_mark_queue_skipped
 
 load_dotenv()
 
@@ -189,8 +189,15 @@ async def _cmd_skip(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_text("건너뜀 항목이 없습니다.")
         return
 
-    mark_queue_status(row["id"], "skipped")
-    await update.message.reply_text(f"건너뜀: {row['topic']}")
+    # 스케줄러 등 다른 프로세스가 이미 이 항목의 발행을 시작했을 수 있다 —
+    # 그 경우 실제 인스타 발행은 이 시점엔 막을 방법이 없으므로, 조용히
+    # "건너뜀"이라고 속이지 말고 정확한 상태를 알려준다.
+    if try_mark_queue_skipped(row["id"]):
+        await update.message.reply_text(f"건너뜀: {row['topic']}")
+    else:
+        await update.message.reply_text(
+            f"이미 발행이 진행 중이라 건너뛸 수 없습니다: {row['topic']}"
+        )
 
 
 # ── 인라인 버튼 콜백 ──────────────────────────────────────
