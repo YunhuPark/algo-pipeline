@@ -926,7 +926,11 @@ def api_stats():
 def queue_page():
     msg = request.args.get("msg", "")
     err = request.args.get("err", "")
-    rows = get_queue()
+    show_all = request.args.get("show_all") == "1"
+    all_rows = get_queue()
+    _DONE_STATUSES = {"published", "skipped"}
+    hidden_count = sum(1 for r in all_rows if r["status"] in _DONE_STATUSES)
+    rows = all_rows if show_all else [r for r in all_rows if r["status"] not in _DONE_STATUSES]
 
     def _badge(s):
         cls = {"pending": "pending", "published": "published", "skipped": "skipped"}.get(s, "pending")
@@ -957,14 +961,26 @@ def queue_page():
         f"<td><form method='post' action='/queue/skip/{r['id']}' style='margin:0'>"
         f"<button class='btn btn-danger' style='padding:5px 12px;font-size:12px'>건너뜀</button></form></td></tr>"
         for r in rows
-    ) or "<tr><td colspan='5' class='empty' style='padding:30px'><div class='empty-icon'>📭</div><p>큐가 비어있습니다</p></td></tr>"
+    ) or (
+        f"<tr><td colspan='5' class='empty' style='padding:30px'><div class='empty-icon'>📭</div>"
+        f"<p>{'큐가 비어있습니다' if show_all or not hidden_count else '대기 중인 항목이 없습니다 (완료된 항목은 숨김)'}</p></td></tr>"
+    )
+
+    toggle_link = (
+        f"<a href='/queue?show_all=0' class='btn btn-secondary' style='padding:5px 12px;font-size:12px'>완료 항목 숨기기</a>"
+        if show_all else
+        f"<a href='/queue?show_all=1' class='btn btn-secondary' style='padding:5px 12px;font-size:12px'>전체 보기 ({hidden_count}개 완료 숨김)</a>"
+    ) if (show_all or hidden_count) else ""
 
     body = f"""
     <div style="display:grid;grid-template-columns:1fr 320px;gap:20px;align-items:start">
       <div class="panel">
         <div class="panel-header">
           <div class="panel-title">예약 목록</div>
-          <span class="badge badge-pending">{len(rows)}개 대기</span>
+          <div style="display:flex;gap:8px;align-items:center">
+            {toggle_link}
+            <span class="badge badge-pending">{len(rows)}개 표시</span>
+          </div>
         </div>
         <div class="table-wrap">
           <table>
