@@ -110,6 +110,25 @@ def test_queue_page_hides_completed_rows_unless_show_all():
     assert "완료 항목 숨기기" in all_text
 
 
+def test_queue_page_shows_korean_status_labels():
+    from src.dashboard.app import app
+
+    fake_rows = [
+        {"id": 1, "topic": "대기 항목", "status": "pending", "scheduled_at": None},
+        {"id": 2, "topic": "준비 항목", "status": "ready", "scheduled_at": None},
+        {"id": 3, "topic": "발행 항목", "status": "published", "scheduled_at": None},
+        {"id": 4, "topic": "건너뛴 항목", "status": "skipped", "scheduled_at": None},
+    ]
+    with patch("src.dashboard.app.get_queue", return_value=fake_rows):
+        resp = app.test_client().get("/queue?show_all=1")
+
+    text = resp.data.decode("utf-8")
+    assert "대기 중" in text
+    assert "준비됨" in text
+    assert "발행완료" in text
+    assert "건너뜀" in text
+
+
 def test_direct_dashboard_publish_endpoint_fails_closed():
     from src.dashboard.app import app
 

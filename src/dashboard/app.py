@@ -932,9 +932,18 @@ def queue_page():
     hidden_count = sum(1 for r in all_rows if r["status"] in _DONE_STATUSES)
     rows = all_rows if show_all else [r for r in all_rows if r["status"] not in _DONE_STATUSES]
 
+    _STATUS_LABELS = {
+        "pending": "대기 중",
+        "ready": "준비됨",
+        "published": "발행완료",
+        "skipped": "건너뜀",
+        "processing": "처리 중",
+    }
+
     def _badge(s):
         cls = {"pending": "pending", "published": "published", "skipped": "skipped"}.get(s, "pending")
-        return f'<span class="badge badge-{cls}">{s}</span>'
+        label = _STATUS_LABELS.get(s, s)
+        return f'<span class="badge badge-{cls}">{escape(label)}</span>'
 
     def _error_cell(r):
         code = r["publish_error_code"] if "publish_error_code" in r.keys() else None
