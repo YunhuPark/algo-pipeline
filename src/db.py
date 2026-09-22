@@ -489,6 +489,13 @@ def complete_queue_publish(queue_id: int, attempt_id: str, ig_post_id: str) -> N
             raise RuntimeError("publish completion precondition failed")
 
 
+def get_queue_row(queue_id: int) -> sqlite3.Row | None:
+    with _conn() as conn:
+        return conn.execute(
+            "SELECT * FROM queue WHERE id=?", (queue_id,)
+        ).fetchone()
+
+
 def get_queue(status: str | None = None) -> list[sqlite3.Row]:
     with _conn() as conn:
         if status:

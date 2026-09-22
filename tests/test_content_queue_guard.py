@@ -449,6 +449,101 @@ def test_clear_queue_error_refuses_published_skipped_or_in_flight_rows(queue_db,
     assert row["publish_error_code"] == "SOME_ERROR"
 
 
+def test_publish_specific_targets_the_exact_row_even_when_queue_order_differs(
+    queue_db, tmp_path
+):
+    """Reproduces a real bug: a human previews and approves one specific
+    'ready' row, but publish_next()'s queue-order pick silently processes a
+    completely different (unreviewed) row instead - e.g. because the
+    previewed row has a stuck non-retryable error from an earlier failed
+    attempt and gets skipped by dequeue_next(). publish_specific() must
+    never substitute a different row."""
+    blocked_id = db.enqueue_v2(metadata(), CollectionMethod.NEWS_COLLECTOR)
+    with sqlite3.connect(queue_db) as conn:
+        conn.execute(
+            "UPDATE queue SET publish_error_code='REMOTE_PUBLISH_PERSISTENCE_UNCERTAIN' "
+            "WHERE id=?",
+            (blocked_id,),
+        )
+
+    reviewed_meta = QueueMetadataV2(
+        topic="검토된 기사",
+        source_title="검토된 원문",
+        source_url="https://example.com/reviewed",
+        context="검토된 충분한 문맥",
+        evidence=[{"title": "검토된 원문", "url": "https://example.com/reviewed"}],
+    )
+    reviewed_id = db.enqueue_v2(reviewed_meta, CollectionMethod.NEWS_COLLECTOR)
+    out_dir = tmp_path / "reviewed_render"
+    out_dir.mkdir()
+    (out_dir / "card_01_cover.png").write_bytes(b"fake-png")
+    (out_dir / "script.json").write_text(
+        '{"hook": "hook text", "hashtags": ["#test"]}', encoding="utf-8"
+    )
+    with sqlite3.connect(queue_db) as conn:
+        conn.execute(
+            "UPDATE queue SET status='ready', image_dir=? WHERE id=?",
+            (str(out_dir), reviewed_id),
+        )
+
+    other_meta = QueueMetadataV2(
+        topic="다른 미검토 기사",
+        source_title="다른 원문",
+        source_url="https://example.com/unreviewed",
+        context="다른 충분한 문맥",
+        evidence=[{"title": "다른 원문", "url": "https://example.com/unreviewed"}],
+    )
+    db.enqueue_v2(other_meta, CollectionMethod.NEWS_COLLECTOR)
+
+    # 대기열 순서로 보면 blocked_id가 막혀 있으니 dequeue_next()는 세 번째
+    # (미검토) 기사로 넘어갈 것이다 - publish_specific()은 그러면 안 된다.
+    with patch.object(content_queue, "_run_full_pipeline") as pipeline, patch(
+        "src.agents.publisher.publish", return_value="ig-reviewed"
+    ) as publish:
+        result = content_queue.publish_specific(reviewed_id, publish_to_ig=True)
+        pipeline.assert_not_called()
+        publish.assert_called_once()
+
+    assert result["id"] == reviewed_id
+    with sqlite3.connect(queue_db) as conn:
+        conn.row_factory = sqlite3.Row
+        reviewed_row = conn.execute(
+            "SELECT * FROM queue WHERE id=?", (reviewed_id,)
+        ).fetchone()
+    assert reviewed_row["status"] == "published"
+    assert reviewed_row["ig_post_id"] == "ig-reviewed"
+
+
+def test_publish_specific_refuses_an_already_published_row(queue_db):
+    row_id = db.enqueue_v2(metadata(), CollectionMethod.NEWS_COLLECTOR)
+    with sqlite3.connect(queue_db) as conn:
+        conn.execute(
+            "UPDATE queue SET status='published', ig_post_id='ig-1' WHERE id=?",
+            (row_id,),
+        )
+
+    with patch.object(content_queue, "_run_full_pipeline") as pipeline:
+        result = content_queue.publish_specific(row_id, publish_to_ig=True)
+        pipeline.assert_not_called()
+
+    assert result is None
+
+
+def test_publish_specific_refuses_a_row_already_claimed_by_another_process(queue_db):
+    row_id = db.enqueue_v2(metadata(), CollectionMethod.NEWS_COLLECTOR)
+    assert db.claim_queue_row(row_id) is True  # simulate a concurrent claim
+
+    with patch.object(content_queue, "_run_full_pipeline") as pipeline:
+        result = content_queue.publish_specific(row_id, publish_to_ig=True)
+        pipeline.assert_not_called()
+
+    assert result is None
+    with sqlite3.connect(queue_db) as conn:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute("SELECT * FROM queue WHERE id=?", (row_id,)).fetchone()
+    assert row["status"] == "processing"  # untouched - still the other claim's
+
+
 def test_two_concurrent_publish_next_calls_never_both_take_the_same_row(queue_db):
     """Simulates a scheduler cron and a dashboard click racing to process
     the same front-of-queue row at the same moment. Only one may proceed;
