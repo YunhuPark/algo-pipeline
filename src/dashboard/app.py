@@ -932,9 +932,26 @@ def queue_page():
         cls = {"pending": "pending", "published": "published", "skipped": "skipped"}.get(s, "pending")
         return f'<span class="badge badge-{cls}">{s}</span>'
 
+    def _error_cell(r):
+        code = r["publish_error_code"] if "publish_error_code" in r.keys() else None
+        if not code or code == "PUBLISH_IN_PROGRESS":
+            return ""
+        retry_btn = ""
+        if r["status"] not in ("published", "skipped", "processing"):
+            retry_btn = (
+                f"<form method='post' action='/queue/retry/{r['id']}' style='display:inline;margin-left:6px' "
+                "onsubmit=\"return confirm('실제 Instagram에 이미 게시됐을 수도 있습니다 — 계정을 먼저 확인한 "
+                "뒤에도 다시 시도하시겠습니까?')\">"
+                "<button class='btn btn-secondary' style='padding:2px 8px;font-size:11px'>재시도</button></form>"
+            )
+        return (
+            f"<div style='color:var(--danger,#f87171);font-size:11px;margin-top:2px'>"
+            f"{escape(code)}{retry_btn}</div>"
+        )
+
     trs = "".join(
         f"<tr><td style='color:var(--muted);font-size:12px'>#{r['id']}</td>"
-        f"<td style='font-weight:500'>{escape(r['topic'])}</td>"
+        f"<td style='font-weight:500'>{escape(r['topic'])}{_error_cell(r)}</td>"
         f"<td>{_badge(r['status'])}</td>"
         f"<td style='color:var(--muted);font-size:12px'>{r['scheduled_at'] or '다음 차례'}</td>"
         f"<td><form method='post' action='/queue/skip/{r['id']}' style='margin:0'>"
@@ -1175,6 +1192,25 @@ def queue_skip(qid: int):
     return redirect(url_for(
         "queue_page",
         err=f"#{qid}는 이미 발행이 진행 중이라 건너뛸 수 없습니다.",
+    ))
+
+
+@app.route("/queue/retry/<int:qid>", methods=["POST"])
+def queue_retry(qid: int):
+    """Manually clear a permanent publish error so the row is retryable.
+
+    Meant to be clicked only after the operator has actually checked whether
+    the Instagram post already went out for an uncertain-remote-publish
+    error — clear_queue_error() itself has no way to know that, it only
+    enforces that it can't touch a row that's already published, skipped,
+    or mid-attempt.
+    """
+    from src.db import clear_queue_error
+    if clear_queue_error(qid):
+        return redirect(url_for("queue_page", msg=f"#{qid} 오류 지움 — 재시도 가능"))
+    return redirect(url_for(
+        "queue_page",
+        err=f"#{qid}는 이미 발행됐거나 처리 중이라 재시도할 수 없습니다.",
     ))
 
 

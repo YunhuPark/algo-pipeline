@@ -70,6 +70,20 @@ def test_queue_page_escapes_html_in_topic():
     assert b"&lt;script&gt;alert(1)&lt;/script&gt;" in resp.data
 
 
+def test_queue_retry_route_reports_success_and_failure():
+    from src.dashboard.app import app
+
+    with patch("src.db.clear_queue_error", return_value=True):
+        resp = app.test_client().post("/queue/retry/1", follow_redirects=False)
+    assert resp.status_code == 302
+    assert "msg=" in resp.headers["Location"]
+
+    with patch("src.db.clear_queue_error", return_value=False):
+        resp = app.test_client().post("/queue/retry/1", follow_redirects=False)
+    assert resp.status_code == 302
+    assert "err=" in resp.headers["Location"]
+
+
 def test_direct_dashboard_publish_endpoint_fails_closed():
     from src.dashboard.app import app
 

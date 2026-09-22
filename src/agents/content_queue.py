@@ -20,6 +20,7 @@ from uuid import uuid4
 
 from src.db import (
     enqueue_v2,
+    claim_queue_row,
     dequeue_next,
     insert_post,
     mark_queue_error,
@@ -28,6 +29,7 @@ from src.db import (
     store_queue_ig_post_id,
     complete_queue_publish,
     mark_queue_status,
+    unclaim_queue_row,
     queue_count,
     get_queue,
 )
@@ -164,18 +166,29 @@ def publish_next(
     # 뒤에 있는 멀쩡한 항목까지 전부 막아버린다. mark_queue_error가 매번
     # publish_error_code를 기록해 같은 항목을 다시 dequeue하지 않으므로,
     # 큐 길이를 넘는 반복은 나지 않는다 — 그래도 상한을 둬 방어한다.
+    #
+    # dequeue_next()는 그냥 SELECT라 잠금이 없다 — 스케줄러(cron)와 대시보드
+    # 클릭이 같은 순간에 같은 행을 집을 수 있다. claim_queue_row()가 실제
+    # 상호배제를 담당한다: 이걸 통과한 호출만 이 행을 실제로 처리하고, 나머지
+    # 호출은 dequeue_next()가 (status가 'processing'으로 바뀌어) 그 행을 더
+    # 이상 돌려주지 않으므로 자연히 다음 행으로 넘어간다.
     row = None
     metadata = None
+    original_status = None
     for _ in range(50):
         candidate = dequeue_next()
         if candidate is None:
             print("  [ContentQueue] 대기 중인 큐가 없습니다.")
             return None
+        if not claim_queue_row(candidate["id"]):
+            # 다른 프로세스가 그 사이 먼저 가져감 — 다음 후보 시도
+            continue
         candidate_metadata, error = _load_queue_metadata(candidate)
         if error:
             mark_queue_error(
                 candidate["id"], error, increment_retry=False, preserve_attempt=True
             )
+            unclaim_queue_row(candidate["id"], candidate["status"])
             print(
                 f"  [ContentQueue] 게시 차단: {error} (큐 id={candidate['id']}) "
                 "→ 다음 항목 시도"
@@ -183,6 +196,7 @@ def publish_next(
             continue
         row = candidate
         metadata = candidate_metadata
+        original_status = candidate["status"]
         break
     else:
         print("  [ContentQueue] 유효한 큐 항목을 찾지 못했습니다.")
@@ -290,6 +304,11 @@ def publish_next(
         print(f"  [ContentQueue] 파이프라인 오류 (큐 id={queue_id}): {e}")
         mark_queue_error(queue_id, "UNKNOWN_PIPELINE_EXCEPTION")
         raise
+    finally:
+        # 다른 경로(mark_queue_status/complete_queue_publish)가 이미 최종
+        # 상태로 바꿔놨다면 이건 조용히 아무 일도 하지 않는다 — 그래야 위의
+        # 모든 반환 지점을 일일이 손대지 않고 한 곳에서 안전하게 반납할 수 있다.
+        unclaim_queue_row(queue_id, original_status)
 
 
 def _publish_cached_render(
