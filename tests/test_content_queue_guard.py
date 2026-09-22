@@ -319,6 +319,81 @@ def test_ready_row_is_dequeued_and_published_from_cached_render_without_regenera
     assert row["ig_post_id"] == "ig-cached-1"
 
 
+def test_publish_cached_render_with_no_pngs_becomes_retryable_pending(queue_db, tmp_path):
+    """If the cached render's PNGs are gone by the time this actually runs
+    (deleted/moved after the row went 'ready'), the row must become
+    retryable (back to 'pending'), not permanently stuck - the row itself
+    was never invalid, only its cached files are gone."""
+    row_id = db.enqueue_v2(metadata(), CollectionMethod.NEWS_COLLECTOR)
+    out_dir = tmp_path / "20260922_missing"
+    out_dir.mkdir()  # exists, but has no PNGs
+    with sqlite3.connect(queue_db) as conn:
+        conn.execute("UPDATE queue SET status='ready' WHERE id=?", (row_id,))
+
+    with patch("src.agents.publisher.publish") as publish:
+        result = content_queue._publish_cached_render(
+            row_id, str(out_dir), "topic", None, None, None
+        )
+        publish.assert_not_called()
+
+    assert result is None
+    with sqlite3.connect(queue_db) as conn:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute("SELECT * FROM queue WHERE id=?", (row_id,)).fetchone()
+    assert row["status"] == "pending"
+    assert row["image_dir"] == ""
+    assert row["publish_error_code"] is None
+
+
+def test_publish_cached_render_with_corrupted_script_json_becomes_retryable_pending(
+    queue_db, tmp_path
+):
+    row_id = db.enqueue_v2(metadata(), CollectionMethod.NEWS_COLLECTOR)
+    out_dir = tmp_path / "20260922_badscript"
+    out_dir.mkdir()
+    (out_dir / "card_01_cover.png").write_bytes(b"fake-png")
+    (out_dir / "script.json").write_text("{not valid json", encoding="utf-8")
+    with sqlite3.connect(queue_db) as conn:
+        conn.execute("UPDATE queue SET status='ready' WHERE id=?", (row_id,))
+
+    with patch("src.agents.publisher.publish") as publish:
+        result = content_queue._publish_cached_render(
+            row_id, str(out_dir), "topic", None, None, None
+        )
+        publish.assert_not_called()
+
+    assert result is None
+    with sqlite3.connect(queue_db) as conn:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute("SELECT * FROM queue WHERE id=?", (row_id,)).fetchone()
+    assert row["status"] == "pending"
+    assert row["image_dir"] == ""
+
+
+def test_cached_publish_normalizes_non_list_hashtags(queue_db, tmp_path):
+    """script.json's hashtags can be malformed (null, or not a list) if it
+    was hand-edited or written by an older schema - this must not reach
+    ig_publisher.publish() as a non-list and blow up with a TypeError."""
+    row_id = db.enqueue_v2(metadata(), CollectionMethod.NEWS_COLLECTOR)
+    out_dir = tmp_path / "20260922_badtags"
+    out_dir.mkdir()
+    (out_dir / "card_01_cover.png").write_bytes(b"fake-png")
+    (out_dir / "script.json").write_text(
+        '{"hook": "hook text", "hashtags": null}', encoding="utf-8"
+    )
+    with sqlite3.connect(queue_db) as conn:
+        conn.execute(
+            "UPDATE queue SET status='ready', image_dir=? WHERE id=?",
+            (str(out_dir), row_id),
+        )
+
+    with patch("src.agents.publisher.publish", return_value="ig-1") as publish:
+        result = content_queue.publish_next(publish_to_ig=True)
+
+    assert result["id"] == row_id
+    publish.assert_called_once_with(image_paths=[out_dir / "card_01_cover.png"], hook="hook text", hashtags=[])
+
+
 def test_human_rejection_marks_queue_skipped_without_remote_attempt(queue_db):
     row_id = db.enqueue_v2(metadata(), CollectionMethod.NEWS_COLLECTOR)
     rejected = PipelineResult(

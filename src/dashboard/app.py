@@ -39,6 +39,7 @@ from dotenv import load_dotenv
 load_dotenv(ROOT / ".env", override=False)
 
 from flask import Flask, request, redirect, url_for, send_file, Response, stream_with_context
+from markupsafe import escape
 
 from src.db import (
     get_posts, get_analytics, get_queue,
@@ -81,6 +82,16 @@ def _resolve_output_file(dir_name: str, filename: str) -> Path:
 # ── 생성 작업 상태 저장 (job_id → dict) ───────────────────
 _JOBS: dict[str, dict] = {}   # {job_id: {status, logs, paths, script, error}}
 _JOB_QUEUES: dict[str, queue.Queue] = {}   # SSE 이벤트 큐
+_MAX_JOBS = 50   # 대시보드를 오래 켜둔 채(스케줄러+수동 승인 흐름) 계속 써도
+                 # _JOBS/_JOB_QUEUES가 무한히 쌓이지 않도록 오래된 것부터 정리
+
+
+def _evict_old_jobs() -> None:
+    if len(_JOBS) <= _MAX_JOBS:
+        return
+    for old_id in list(_JOBS.keys())[: len(_JOBS) - _MAX_JOBS]:
+        _JOBS.pop(old_id, None)
+        _JOB_QUEUES.pop(old_id, None)
 
 # 생성은 한 번에 하나만 돌린다. 진행 로그를 SSE로 보내려고 sys.stdout을
 # 바꿔치기하는데 stdout은 프로세스 전역이라, 작업이 겹치면 서로의 로그를
@@ -923,7 +934,7 @@ def queue_page():
 
     trs = "".join(
         f"<tr><td style='color:var(--muted);font-size:12px'>#{r['id']}</td>"
-        f"<td style='font-weight:500'>{r['topic']}</td>"
+        f"<td style='font-weight:500'>{escape(r['topic'])}</td>"
         f"<td>{_badge(r['status'])}</td>"
         f"<td style='color:var(--muted);font-size:12px'>{r['scheduled_at'] or '다음 차례'}</td>"
         f"<td><form method='post' action='/queue/skip/{r['id']}' style='margin:0'>"
@@ -1246,6 +1257,7 @@ def queue_prepare_next():
     if not _GENERATION_LOCK.acquire(blocking=False):
         return {"error": "이미 다른 작업이 진행 중입니다. 완료 후 다시 시도해 주세요."}, 409
 
+    _evict_old_jobs()
     job_id = str(uuid.uuid4())[:8]
     q = queue.Queue()
     _JOB_QUEUES[job_id] = q
@@ -1314,6 +1326,7 @@ def queue_approve_publish():
     if not _GENERATION_LOCK.acquire(blocking=False):
         return {"error": "이미 다른 작업이 진행 중입니다. 완료 후 다시 시도해 주세요."}, 409
 
+    _evict_old_jobs()
     job_id = str(uuid.uuid4())[:8]
     q = queue.Queue()
     _JOB_QUEUES[job_id] = q
@@ -2052,6 +2065,7 @@ def generate_start():
                      "완료된 뒤에 다시 시도해 주세요."
         }, 409
 
+    _evict_old_jobs()
     job_id = str(uuid.uuid4())[:8]
     q = queue.Queue()
     _JOB_QUEUES[job_id] = q

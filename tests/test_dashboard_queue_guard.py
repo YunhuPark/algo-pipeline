@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ast
 from pathlib import Path
+from unittest.mock import patch
 
 
 APP_PATH = Path(__file__).parents[1] / "src" / "dashboard" / "app.py"
@@ -48,6 +49,25 @@ def test_gpt_suggestion_routes_never_enqueue_or_call_openai():
 
 def test_verified_news_route_keeps_v2_bulk_ingestion():
     assert "bulk_generate" in _calls("queue_generate")
+
+
+def test_queue_page_escapes_html_in_topic():
+    # A queue topic now comes from live, arbitrary news headlines rather than
+    # a fixed internal list, so a title containing "<"/">" must not be able
+    # to inject markup into the operator's dashboard.
+    from src.dashboard.app import app
+
+    malicious_row = {
+        "id": 1,
+        "topic": "<script>alert(1)</script>",
+        "status": "pending",
+        "scheduled_at": None,
+    }
+    with patch("src.dashboard.app.get_queue", return_value=[malicious_row]):
+        resp = app.test_client().get("/queue")
+
+    assert b"<script>alert(1)</script>" not in resp.data
+    assert b"&lt;script&gt;alert(1)&lt;/script&gt;" in resp.data
 
 
 def test_direct_dashboard_publish_endpoint_fails_closed():
