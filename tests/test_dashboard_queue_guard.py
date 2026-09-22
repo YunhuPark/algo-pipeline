@@ -129,6 +129,30 @@ def test_queue_page_shows_korean_status_labels():
     assert "건너뜀" in text
 
 
+def test_current_job_reports_none_when_nothing_is_running():
+    from src.dashboard.app import app
+
+    resp = app.test_client().get("/queue/current_job")
+    assert resp.get_json() == {"job_id": None}
+
+
+def test_current_job_reports_the_active_queue_job_and_its_logs():
+    import src.dashboard.app as dashboard_app
+
+    dashboard_app._JOBS["job-123"] = {"status": "running", "logs": ["line1", "line2"]}
+    dashboard_app._ACTIVE_QUEUE_JOB = {"job_id": "job-123", "mode": "prepare"}
+    try:
+        resp = dashboard_app.app.test_client().get("/queue/current_job")
+        data = resp.get_json()
+    finally:
+        dashboard_app._ACTIVE_QUEUE_JOB = None
+        dashboard_app._JOBS.pop("job-123", None)
+
+    assert data["job_id"] == "job-123"
+    assert data["mode"] == "prepare"
+    assert data["logs"] == ["line1", "line2"]
+
+
 def test_direct_dashboard_publish_endpoint_fails_closed():
     from src.dashboard.app import app
 
