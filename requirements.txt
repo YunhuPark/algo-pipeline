@@ -43,3 +43,10 @@ python-dotenv>=1.0.0
 pydantic>=2.5.0
 httpx>=0.27.0
 pyngrok>=7.0.0                # Instagram 업로드용 임시 공개 URL
+
+# ── 성과 분석 노트북 (notebooks/) ─────────────────────────
+pandas>=2.0.0
+scipy>=1.10.0
+ipykernel>=6.29.0              # Jupyter/VS Code에서 노트북 실행
+nbformat>=5.10.0
+nbconvert>=7.16.0               # notebook -> html 변환
