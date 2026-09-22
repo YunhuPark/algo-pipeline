@@ -1249,7 +1249,10 @@ def _run_queue_prepare_job(job_id: str) -> None:
     sys.stdout = _StreamCapture()
     try:
         from src.agents.content_queue import publish_next
-        result = publish_next(publish_to_ig=False)
+        # require_human_approval=False는 파이프라인의 auto=True를 켠다 —
+        # 이게 없으면 각도 선택기(angle_selector)가 대화형 input()으로
+        # 떨어져 대시보드의 stdin 없는 백그라운드 스레드에서 EOFError가 난다.
+        result = publish_next(publish_to_ig=False, require_human_approval=False)
         sys.stdout = old_stdout
 
         if result and result.get("paths"):
@@ -1327,7 +1330,13 @@ def _run_queue_publish_job(job_id: str) -> None:
     sys.stdout = _StreamCapture()
     try:
         from src.agents.content_queue import publish_next
-        result = publish_next(publish_to_ig=True)
+        # 사람이 이미 대시보드에서 카드를 직접 보고 승인한 뒤 이 라우트를
+        # 눌렀으므로, 여기서 다시 파이프라인 내부 승인 단계(터미널 input())를
+        # 거칠 필요가 없다 — 그 단계는 stdin이 없는 백그라운드 스레드에서
+        # EOFError만 낸다. 정상 경로는 캐시된 렌더링을 그대로 올리는
+        # _publish_cached_render라 애초에 승인 단계를 타지 않지만, image_dir가
+        # 없어 전체 파이프라인으로 떨어지는 예외 상황까지 대비해 명시한다.
+        result = publish_next(publish_to_ig=True, require_human_approval=False)
         sys.stdout = old_stdout
 
         if result:
