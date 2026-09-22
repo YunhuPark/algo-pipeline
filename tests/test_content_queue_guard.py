@@ -222,6 +222,68 @@ def test_existing_remote_id_is_never_dequeued(queue_db):
         publisher.assert_not_called()
 
 
+def test_generation_only_run_persists_image_dir_and_marks_ready(queue_db, tmp_path):
+    row_id = db.enqueue_v2(metadata(), CollectionMethod.NEWS_COLLECTOR)
+    out_dir = tmp_path / "20260922_rendered"
+    out_dir.mkdir()
+    (out_dir / "card_01_cover.png").write_bytes(b"")
+    generated = PipelineResult(
+        image_paths=[out_dir / "card_01_cover.png"],
+        generation_succeeded=True,
+        publish_requested=False,
+        publish_succeeded=False,
+        ig_post_id=None,
+        permalink=None,
+        failure_stage=None,
+        error_code=None,
+    )
+
+    with patch.object(content_queue, "_run_full_pipeline", return_value=generated):
+        result = content_queue.publish_next(publish_to_ig=False)
+
+    assert result["id"] == row_id
+    with sqlite3.connect(queue_db) as conn:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute("SELECT * FROM queue WHERE id=?", (row_id,)).fetchone()
+    assert row["status"] == "ready"
+    assert row["image_dir"] == str(out_dir)
+
+
+def test_ready_row_is_dequeued_and_published_from_cached_render_without_regenerating(
+    queue_db, tmp_path
+):
+    """A row a human already approved (status='ready', image_dir set) must be
+    published from that exact render on the next publish_to_ig=True call, not
+    regenerated - regenerating could produce different cards than the ones
+    that were reviewed."""
+    row_id = db.enqueue_v2(metadata(), CollectionMethod.NEWS_COLLECTOR)
+    out_dir = tmp_path / "20260922_rendered"
+    out_dir.mkdir()
+    (out_dir / "card_01_cover.png").write_bytes(b"fake-png")
+    (out_dir / "script.json").write_text(
+        '{"hook": "hook text", "hashtags": ["#test"]}', encoding="utf-8"
+    )
+    with sqlite3.connect(queue_db) as conn:
+        conn.execute(
+            "UPDATE queue SET status='ready', image_dir=? WHERE id=?",
+            (str(out_dir), row_id),
+        )
+
+    with patch.object(content_queue, "_run_full_pipeline") as pipeline, patch(
+        "src.agents.publisher.publish", return_value="ig-cached-1"
+    ) as publish:
+        result = content_queue.publish_next(publish_to_ig=True)
+        pipeline.assert_not_called()
+        publish.assert_called_once()
+
+    assert result["id"] == row_id
+    with sqlite3.connect(queue_db) as conn:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute("SELECT * FROM queue WHERE id=?", (row_id,)).fetchone()
+    assert row["status"] == "published"
+    assert row["ig_post_id"] == "ig-cached-1"
+
+
 def test_human_rejection_marks_queue_skipped_without_remote_attempt(queue_db):
     row_id = db.enqueue_v2(metadata(), CollectionMethod.NEWS_COLLECTOR)
     rejected = PipelineResult(
