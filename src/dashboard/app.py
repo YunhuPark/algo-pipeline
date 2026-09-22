@@ -966,7 +966,182 @@ def queue_page():
           </form>
         </div>
       </div>
-    </div>"""
+    </div>
+
+    <div class="panel" style="margin-top:20px">
+      <div class="panel-header">
+        <div class="panel-title">다음 항목 발행 준비</div>
+      </div>
+      <p class="panel-sub" style="margin-bottom:14px">
+        큐 맨 앞 항목을 생성해 미리보기를 보여줍니다. 실제 Instagram 발행은
+        아래에서 직접 승인해야만 진행됩니다 — 자동으로 올라가지 않습니다.
+      </p>
+      <button id="prepareBtn" class="btn btn-secondary">🔍 다음 항목 미리보기 생성</button>
+    </div>
+
+    <div id="qProgressPanel" style="display:none;margin-top:20px">
+      <div class="panel">
+        <div class="panel-header">
+          <div class="panel-title" id="qProgressTitle">준비 중...</div>
+          <span id="qProgressBadge" class="badge badge-pending">실행 중</span>
+        </div>
+        <div class="progress-bar"><div class="progress-fill" style="width:100%"></div></div>
+        <div id="qLogBox" class="logbox"></div>
+      </div>
+    </div>
+
+    <div id="qPreviewPanel" style="display:none;margin-top:20px">
+      <div class="panel">
+        <div class="panel-header">
+          <div class="panel-title" id="qPreviewTitle">미리보기</div>
+          <div style="display:flex;gap:8px">
+            <button id="qApproveBtn" class="btn btn-primary">✅ 승인해서 발행</button>
+            <button id="qRejectBtn" class="btn btn-danger">❌ 거절</button>
+          </div>
+        </div>
+        <div id="qCardGrid" class="card-grid" style="margin-bottom:16px"></div>
+        <div id="qCaptionBox" class="logbox" style="display:none;height:auto;max-height:120px;white-space:pre-wrap"></div>
+      </div>
+    </div>
+
+<script>
+let qJobId = null;
+let qQueueId = null;
+
+document.getElementById('prepareBtn').addEventListener('click', () => {{
+  document.getElementById('qProgressPanel').style.display = 'block';
+  document.getElementById('qPreviewPanel').style.display = 'none';
+  document.getElementById('qLogBox').innerHTML = '';
+  document.getElementById('qProgressTitle').textContent = '다음 항목 준비 중...';
+  document.getElementById('qProgressBadge').textContent = '실행 중';
+  document.getElementById('qProgressBadge').className = 'badge badge-pending';
+  document.getElementById('prepareBtn').disabled = true;
+
+  fetch('/queue/prepare_next', {{method: 'POST'}})
+    .then(r => r.json())
+    .then(data => {{
+      if (!data.job_id) {{
+        qLogErr(data.error || '준비를 시작하지 못했습니다.');
+        document.getElementById('prepareBtn').disabled = false;
+        return;
+      }}
+      qJobId = data.job_id;
+      qListenSSE(qJobId, 'prepare');
+    }});
+}});
+
+document.getElementById('qApproveBtn').addEventListener('click', () => {{
+  if (!confirm('실제 Instagram 계정(@algo__kr)에 지금 바로 게시됩니다. 진행할까요?')) return;
+  document.getElementById('qApproveBtn').disabled = true;
+  document.getElementById('qRejectBtn').disabled = true;
+  document.getElementById('qProgressPanel').style.display = 'block';
+  document.getElementById('qProgressTitle').textContent = '발행 중...';
+  document.getElementById('qProgressBadge').textContent = '실행 중';
+  document.getElementById('qProgressBadge').className = 'badge badge-pending';
+  document.getElementById('qLogBox').innerHTML = '';
+
+  fetch('/queue/approve_publish', {{method: 'POST'}})
+    .then(r => r.json())
+    .then(data => {{
+      if (!data.job_id) {{
+        qLogErr(data.error || '발행을 시작하지 못했습니다.');
+        return;
+      }}
+      qListenSSE(data.job_id, 'publish');
+    }});
+}});
+
+document.getElementById('qRejectBtn').addEventListener('click', () => {{
+  if (!qQueueId) return;
+  if (!confirm('이 항목을 건너뛸까요?')) return;
+  fetch(`/queue/skip/${{qQueueId}}`, {{method: 'POST'}})
+    .then(() => window.location.reload());
+}});
+
+function qLogErr(msg) {{
+  document.getElementById('qProgressBadge').textContent = '오류';
+  document.getElementById('qProgressBadge').className = 'badge badge-skipped';
+  const line = document.createElement('div');
+  line.className = 'log-err';
+  line.textContent = '✕ ' + msg;
+  document.getElementById('qLogBox').appendChild(line);
+}}
+
+function qListenSSE(jobId, mode) {{
+  const evtSource = new EventSource(`/generate/stream/${{jobId}}`);
+  const logBox = document.getElementById('qLogBox');
+
+  evtSource.addEventListener('log', e => {{
+    const line = document.createElement('div');
+    line.textContent = e.data;
+    logBox.appendChild(line);
+    logBox.scrollTop = logBox.scrollHeight;
+  }});
+
+  evtSource.addEventListener('done', e => {{
+    evtSource.close();
+    const info = JSON.parse(e.data);
+    qQueueId = info.queue_id;
+    document.getElementById('qProgressBadge').textContent = '완료';
+    document.getElementById('qProgressBadge').className = 'badge badge-published';
+    document.getElementById('prepareBtn').disabled = false;
+
+    if (mode === 'prepare') {{
+      qShowPreview(info.image_dir, info.topic, info.count, info.filenames);
+    }} else {{
+      document.getElementById('qPreviewPanel').style.display = 'none';
+      const line = document.createElement('div');
+      line.className = 'log-done';
+      line.textContent = `✓ "${{info.topic}}" 실제 Instagram 발행 완료`;
+      logBox.appendChild(line);
+    }}
+  }});
+
+  evtSource.addEventListener('error', e => {{
+    evtSource.close();
+    document.getElementById('prepareBtn').disabled = false;
+    document.getElementById('qApproveBtn').disabled = false;
+    document.getElementById('qRejectBtn').disabled = false;
+    qLogErr(e.data || '서버 연결이 끊겼습니다.');
+  }});
+}}
+
+function qShowPreview(dirName, topic, count, filenames) {{
+  document.getElementById('qPreviewPanel').style.display = 'block';
+  document.getElementById('qPreviewTitle').textContent = `"${{topic}}" — ${{count}}장 (아직 미발행)`;
+  document.getElementById('qApproveBtn').disabled = false;
+  document.getElementById('qRejectBtn').disabled = false;
+  const grid = document.getElementById('qCardGrid');
+  grid.innerHTML = '';
+  const safeFilenames = filenames || [];
+
+  for (let i = 1; i <= count; i++) {{
+    const num = String(i).padStart(2, '0');
+    const fname = safeFilenames.find(f => f.startsWith(`card_${{num}}_`)) || `card_${{num}}.png`;
+    const src = `/output_img/${{dirName}}/${{fname}}`;
+    const isVideo = fname.toLowerCase().endsWith('.mp4');
+    const div = document.createElement('div');
+    div.className = 'card-thumb';
+    if (isVideo) {{
+      div.innerHTML = `<video src="${{src}}" autoplay loop muted playsinline style="width:100%;height:100%;object-fit:cover;border-radius:var(--radius-sm);background:#000;"></video>
+        <div class="num-badge">${{i}}/${{count}}</div>`;
+    }} else {{
+      div.innerHTML = `<img src="${{src}}"><div class="num-badge">${{i}}/${{count}}</div>`;
+    }}
+    grid.appendChild(div);
+  }}
+
+  fetch(`/caption/${{dirName}}`)
+    .then(r => r.text())
+    .then(txt => {{
+      if (txt) {{
+        document.getElementById('qCaptionBox').style.display = 'block';
+        document.getElementById('qCaptionBox').textContent = txt;
+      }}
+    }});
+}}
+</script>
+"""
     return _page("큐 관리", "/queue", body, msg=msg, err=err)
 
 
@@ -1001,6 +1176,158 @@ def queue_generate():
         return redirect(url_for("queue_page", msg=f"{count}개 자동 추가 완료"))
     except Exception as e:
         return redirect(url_for("queue_page", err=str(e)))
+
+
+# ── 큐 다음 항목: 미리보기 생성 → 사람 승인 → 발행 ──────────
+# wait_for_approval()은 터미널 input() 기반이라 웹에서 쓸 수 없다. 그래서
+# "생성"과 "발행"을 두 단계로 쪼갠다: 먼저 publish_to_ig=False로 렌더링만
+# 하고 화면에 보여준 뒤(이때 image_dir가 큐 행에 저장돼 'ready' 상태가
+# 된다), 사람이 승인을 누르면 그제서야 그 렌더링을 그대로 발행한다 —
+# 재생성하지 않으므로 승인한 화면과 실제로 올라가는 카드가 항상 같다.
+
+def _run_queue_prepare_job(job_id: str) -> None:
+    q = _JOB_QUEUES[job_id]
+    job = _JOBS[job_id]
+    job["status"] = "running"
+
+    class _StreamCapture(io.TextIOBase):
+        def write(self, s: str):
+            if s.strip():
+                job["logs"].append(s.rstrip())
+                _emit(q, "log", s.rstrip().replace("\n", " "))
+            return len(s)
+        def flush(self): pass
+
+    old_stdout = sys.stdout
+    sys.stdout = _StreamCapture()
+    try:
+        from src.agents.content_queue import publish_next
+        result = publish_next(publish_to_ig=False)
+        sys.stdout = old_stdout
+
+        if result and result.get("paths"):
+            paths = result["paths"]
+            job["status"] = "done"
+            job["paths"] = [str(p) for p in paths]
+            job["queue_id"] = result["id"]
+            job["topic"] = result["topic"]
+            job["image_dir"] = str(paths[0].parent)
+            cap_path = paths[0].parent / "caption.txt"
+            if cap_path.exists():
+                job["caption"] = cap_path.read_text(encoding="utf-8")
+            _emit(q, "done", json.dumps({
+                "job_id": job_id,
+                "queue_id": result["id"],
+                "topic": result["topic"],
+                "count": len(paths),
+                "image_dir": paths[0].parent.name,
+                "filenames": [p.name for p in paths],
+            }))
+        else:
+            job["status"] = "error"
+            job["error"] = "대기 중인 큐 항목이 없거나 생성에 실패했습니다."
+            _emit(q, "error", job["error"])
+    except Exception as e:
+        sys.stdout = old_stdout
+        tb = traceback.format_exc()
+        job["status"] = "error"
+        job["error"] = str(e)
+        for tb_line in tb.splitlines():
+            _emit(q, "log", f"[TB] {tb_line}")
+        _emit(q, "error", str(e))
+    finally:
+        sys.stdout = old_stdout
+        q.put(None)
+        _GENERATION_LOCK.release()
+
+
+@app.route("/queue/prepare_next", methods=["POST"])
+def queue_prepare_next():
+    if not _GENERATION_LOCK.acquire(blocking=False):
+        return {"error": "이미 다른 작업이 진행 중입니다. 완료 후 다시 시도해 주세요."}, 409
+
+    job_id = str(uuid.uuid4())[:8]
+    q = queue.Queue()
+    _JOB_QUEUES[job_id] = q
+    _JOBS[job_id] = {
+        "status": "pending", "logs": [], "paths": [], "topic": "",
+        "image_dir": "", "caption": "", "error": "", "queue_id": None,
+    }
+    t = threading.Thread(target=_run_queue_prepare_job, args=(job_id,), daemon=True)
+    try:
+        t.start()
+    except BaseException:
+        _GENERATION_LOCK.release()
+        raise
+    return {"job_id": job_id}
+
+
+def _run_queue_publish_job(job_id: str) -> None:
+    q = _JOB_QUEUES[job_id]
+    job = _JOBS[job_id]
+    job["status"] = "running"
+
+    class _StreamCapture(io.TextIOBase):
+        def write(self, s: str):
+            if s.strip():
+                job["logs"].append(s.rstrip())
+                _emit(q, "log", s.rstrip().replace("\n", " "))
+            return len(s)
+        def flush(self): pass
+
+    old_stdout = sys.stdout
+    sys.stdout = _StreamCapture()
+    try:
+        from src.agents.content_queue import publish_next
+        result = publish_next(publish_to_ig=True)
+        sys.stdout = old_stdout
+
+        if result:
+            job["status"] = "done"
+            job["queue_id"] = result["id"]
+            job["topic"] = result["topic"]
+            _emit(q, "done", json.dumps({
+                "job_id": job_id,
+                "queue_id": result["id"],
+                "topic": result["topic"],
+            }))
+        else:
+            job["status"] = "error"
+            job["error"] = "발행에 실패했습니다. [큐] 페이지에서 오류 코드를 확인하세요."
+            _emit(q, "error", job["error"])
+    except Exception as e:
+        sys.stdout = old_stdout
+        tb = traceback.format_exc()
+        job["status"] = "error"
+        job["error"] = str(e)
+        for tb_line in tb.splitlines():
+            _emit(q, "log", f"[TB] {tb_line}")
+        _emit(q, "error", str(e))
+    finally:
+        sys.stdout = old_stdout
+        q.put(None)
+        _GENERATION_LOCK.release()
+
+
+@app.route("/queue/approve_publish", methods=["POST"])
+def queue_approve_publish():
+    if not _GENERATION_LOCK.acquire(blocking=False):
+        return {"error": "이미 다른 작업이 진행 중입니다. 완료 후 다시 시도해 주세요."}, 409
+
+    job_id = str(uuid.uuid4())[:8]
+    q = queue.Queue()
+    _JOB_QUEUES[job_id] = q
+    _JOBS[job_id] = {
+        "status": "pending", "logs": [], "paths": [], "topic": "",
+        "image_dir": "", "caption": "", "error": "", "queue_id": None,
+    }
+    t = threading.Thread(target=_run_queue_publish_job, args=(job_id,), daemon=True)
+    try:
+        t.start()
+    except BaseException:
+        _GENERATION_LOCK.release()
+        raise
+    return {"job_id": job_id}
 
 
 @app.route("/queue/suggest")

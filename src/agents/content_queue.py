@@ -21,7 +21,9 @@ from uuid import uuid4
 from src.db import (
     enqueue_v2,
     dequeue_next,
+    insert_post,
     mark_queue_error,
+    set_queue_image_dir,
     start_publish_attempt,
     store_queue_ig_post_id,
     complete_queue_publish,
@@ -212,14 +214,19 @@ def publish_next(
         res = None
         if image_dir and Path(image_dir).exists():
             print(f"  [ContentQueue] 기존 렌더링 사용: {image_dir}")
-            paths = sorted(Path(image_dir).glob("*.png"))
+            paths = sorted(Path(image_dir).glob("card_*.png"))
             if not paths:
                 print("  [ContentQueue] PNG 없음 — 전체 파이프라인 실행")
                 res = run_full_pipeline()
+            elif publish_to_ig:
+                # 사람이 이미 검토·승인한 바로 그 렌더링을 그대로 올린다 —
+                # 여기서 다시 생성하면 승인한 화면과 실제 게시물이 달라질 수 있다.
+                return _publish_cached_render(
+                    queue_id, image_dir, topic, attempt_id, before_publish, on_remote_id
+                )
             else:
-                # need to implement a manual publish step for cached images,
-                # but to be safe we just fail or we would need to duplicate pipeline.
-                pass
+                print("  [ContentQueue] 이미 준비됨 — 재생성 없이 그대로 반환")
+                return {"id": queue_id, "topic": topic, "paths": paths}
         else:
             res = run_full_pipeline()
 
@@ -248,6 +255,8 @@ def publish_next(
                     return None
             else:
                 # generation only
+                if res.image_paths:
+                    set_queue_image_dir(queue_id, str(res.image_paths[0].parent))
                 mark_queue_status(queue_id, "ready")
                 return {"id": queue_id, "topic": topic, "paths": res.image_paths}
         elif type(res) == list and len(res) > 0: # fallback for paths directly
@@ -263,6 +272,80 @@ def publish_next(
         print(f"  [ContentQueue] 파이프라인 오류 (큐 id={queue_id}): {e}")
         mark_queue_error(queue_id, "UNKNOWN_PIPELINE_EXCEPTION")
         raise
+
+
+def _publish_cached_render(
+    queue_id: int,
+    image_dir: str,
+    topic: str,
+    attempt_id: str | None,
+    before_publish,
+    on_remote_id,
+) -> dict[str, Any] | None:
+    """Upload an already-rendered 'ready' row's cards without regenerating.
+
+    Mirrors the durable-attempt bookkeeping run_full_pipeline()'s own publish
+    step performs (before_publish -> IG upload -> on_remote_id ->
+    complete_queue_publish), but skips generation entirely so the exact cards
+    a human already reviewed are what gets posted.
+    """
+    import json as _json
+    from datetime import datetime, timezone
+    from src.agents import publisher as ig_publisher
+
+    folder = Path(image_dir)
+    paths = sorted(folder.glob("card_*.png"))
+    if not paths:
+        mark_queue_error(queue_id, "CACHED_RENDER_MISSING")
+        print(f"  [ContentQueue] 캐시된 렌더링을 찾을 수 없음 (큐 id={queue_id})")
+        return None
+
+    script_path = folder / "script.json"
+    if not script_path.exists():
+        mark_queue_error(queue_id, "CACHED_SCRIPT_MISSING")
+        print(f"  [ContentQueue] 캐시된 script.json 없음 (큐 id={queue_id})")
+        return None
+    script_data = _json.loads(script_path.read_text(encoding="utf-8"))
+    hook = script_data.get("hook", "")
+    hashtags = script_data.get("hashtags", [])
+
+    if attempt_id and before_publish:
+        try:
+            before_publish(attempt_id)
+        except Exception:
+            mark_queue_error(queue_id, "LOCAL_ATTEMPT_PERSISTENCE_ERROR", preserve_attempt=True)
+            return None
+
+    try:
+        ig_post_id = ig_publisher.publish(image_paths=paths, hook=hook, hashtags=hashtags)
+    except Exception as e:
+        print(f"  [ContentQueue] 캐시 렌더링 발행 실패 (큐 id={queue_id}): {e}")
+        mark_queue_error(queue_id, "REMOTE_PUBLISH_PERSISTENCE_UNCERTAIN")
+        return None
+
+    if not ig_post_id:
+        mark_queue_error(queue_id, "UNCERTAIN_EMPTY_POST_ID")
+        return None
+
+    if attempt_id and on_remote_id:
+        try:
+            on_remote_id(attempt_id, ig_post_id)
+        except Exception:
+            mark_queue_error(queue_id, "REMOTE_PUBLISH_PERSISTENCE_UNCERTAIN")
+            return None
+
+    insert_post(
+        platform="instagram",
+        topic=topic,
+        post_id=ig_post_id,
+        hook=hook,
+        hashtags=hashtags,
+        image_dir=str(folder),
+        posted_at=datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
+    )
+    complete_queue_publish(queue_id, attempt_id, ig_post_id)
+    print(f"  [ContentQueue] 캐시 렌더링 발행 완료: {topic} ({len(paths)}장)")
+    return {"id": queue_id, "topic": topic, "paths": paths}
 
 
 def _run_full_pipeline(

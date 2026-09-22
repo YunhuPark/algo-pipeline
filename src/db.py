@@ -240,11 +240,15 @@ def enqueue_v2(
 
 
 def dequeue_next() -> sqlite3.Row | None:
-    """다음 발행 대기 항목 (scheduled_at 기준, NULL이면 우선)."""
+    """다음 발행 대기 항목 (scheduled_at 기준, NULL이면 우선).
+
+    'ready'(이미 생성만 해둔 항목)도 포함한다 — 안 그러면 사람이 미리보기를
+    승인한 뒤 실제 발행을 시도할 방법이 없어져 그 항목이 영원히 멈춰버린다.
+    """
     with _conn() as conn:
         row = conn.execute(
             """SELECT * FROM queue
-               WHERE status = 'pending'
+               WHERE status IN ('pending', 'ready')
                  AND (
                        publish_error_code IS NULL OR publish_error_code IN (
                            'NETWORK_TIMEOUT_BEFORE_PUBLISH',
@@ -269,6 +273,20 @@ def mark_queue_status(queue_id: int, status: str) -> None:
         conn.execute("UPDATE queue SET status=? WHERE id=?", (status, queue_id))
 
 
+def set_queue_image_dir(queue_id: int, image_dir: str) -> None:
+    """Persist where a generation-only run rendered this row's cards.
+
+    Without this, a row that reaches 'ready' status has nothing recorded
+    telling a later publish attempt which already-approved render to
+    actually upload, forcing (or silently skipping) a full regeneration
+    that could produce different cards than the ones a human reviewed.
+    """
+    with _conn() as conn:
+        conn.execute(
+            "UPDATE queue SET image_dir=? WHERE id=?", (image_dir, queue_id)
+        )
+
+
 def try_mark_queue_skipped(queue_id: int) -> bool:
     """Skip a queue row only while it is still safely skippable.
 
@@ -287,7 +305,7 @@ def try_mark_queue_skipped(queue_id: int) -> bool:
     with _conn() as conn:
         cur = conn.execute(
             """UPDATE queue SET status='skipped'
-               WHERE id=? AND status='pending'
+               WHERE id=? AND status IN ('pending', 'ready')
                  AND publish_attempt_id IS NULL
                  AND publish_attempt_state='NOT_ATTEMPTED'""",
             (queue_id,),
@@ -328,7 +346,7 @@ def start_publish_attempt(queue_id: int, attempt_id: str, started_at: str) -> No
             """UPDATE queue
                SET publish_attempt_id=?, publish_started_at=?,
                    publish_attempt_state='STARTED', publish_error_code='PUBLISH_IN_PROGRESS'
-               WHERE id=? AND status='pending' AND ig_post_id IS NULL
+               WHERE id=? AND status IN ('pending', 'ready') AND ig_post_id IS NULL
                  AND publish_attempt_id IS NULL
                  AND publish_attempt_state='NOT_ATTEMPTED'""",
             (attempt_id, started_at, queue_id),
