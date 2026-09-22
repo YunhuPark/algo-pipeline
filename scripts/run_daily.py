@@ -105,6 +105,13 @@ def main() -> None:
     from src.queue_runtime import prepare_queue_runtime
     prepare_queue_runtime()
 
+    try:
+        from src.agents.analytics import sync_all_insights
+        updated = sync_all_insights()
+        _log(f"Insights 동기화 완료: {updated}건 갱신")
+    except Exception as e:
+        _log(f"Insights 동기화 실패 (무시하고 계속): {e}")
+
     # stale 락파일 정리
     _is_pipeline_running()
 
