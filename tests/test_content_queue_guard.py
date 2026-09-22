@@ -292,6 +292,46 @@ def test_invalid_front_row_does_not_block_a_valid_row_behind_it(queue_db):
     assert good_row["status"] == "published"
 
 
+def test_recover_stuck_processing_rows_reverts_to_ready_or_pending(queue_db, tmp_path):
+    """A row still 'processing' means the thread that claimed it (via a
+    now-restarted/crashed process) never reached its `finally` block to
+    release the claim - nothing in a fresh process can still be working on
+    it, so it must be recovered rather than left stuck forever."""
+    rendered_id = db.enqueue_v2(metadata(), CollectionMethod.NEWS_COLLECTOR)
+    unrendered_id = db.enqueue_v2(
+        QueueMetadataV2(
+            topic="다른 뉴스",
+            source_title="다른 원문",
+            source_url="https://example.com/other",
+            context="다른 충분한 문맥",
+            evidence=[{"title": "다른 원문", "url": "https://example.com/other"}],
+        ),
+        CollectionMethod.NEWS_COLLECTOR,
+    )
+    with sqlite3.connect(queue_db) as conn:
+        conn.execute(
+            "UPDATE queue SET status='processing', image_dir=?, "
+            "publish_attempt_id='stale-attempt', publish_attempt_state='STARTED' WHERE id=?",
+            (str(tmp_path), rendered_id),
+        )
+        conn.execute("UPDATE queue SET status='processing' WHERE id=?", (unrendered_id,))
+
+    recovered = db.recover_stuck_processing_rows()
+
+    assert recovered == 2
+    with sqlite3.connect(queue_db) as conn:
+        conn.row_factory = sqlite3.Row
+        rendered_row = conn.execute(
+            "SELECT * FROM queue WHERE id=?", (rendered_id,)
+        ).fetchone()
+        unrendered_row = conn.execute(
+            "SELECT * FROM queue WHERE id=?", (unrendered_id,)
+        ).fetchone()
+    assert rendered_row["status"] == "ready"
+    assert rendered_row["publish_attempt_id"] is None
+    assert unrendered_row["status"] == "pending"
+
+
 def test_claim_queue_row_is_exclusive(queue_db):
     """Two concurrent callers (a scheduler cron and a dashboard click) must
     not both be able to claim the same row - this is the actual mutex
