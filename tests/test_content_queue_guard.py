@@ -632,6 +632,40 @@ def test_ready_row_is_dequeued_and_published_from_cached_render_without_regenera
     assert row["ig_post_id"] == "ig-cached-1"
 
 
+def test_cached_publish_uploads_video_not_static_fallback_when_both_exist(
+    queue_db, tmp_path
+):
+    """A slide with a composited video renders both card_02_content.mp4 (the
+    video) and card_02_content.png (a static fallback with the same stem).
+    The human-review /preview page already prefers the .mp4 per slide - the
+    actual publish must select the same file, or the video silently never
+    makes it to Instagram even though it was reviewed and approved."""
+    row_id = db.enqueue_v2(metadata(), CollectionMethod.NEWS_COLLECTOR)
+    out_dir = tmp_path / "20260922_rendered"
+    out_dir.mkdir()
+    (out_dir / "card_01_cover.png").write_bytes(b"fake-png")
+    (out_dir / "card_02_content.png").write_bytes(b"fake-png-fallback")
+    (out_dir / "card_02_content.mp4").write_bytes(b"fake-mp4")
+    (out_dir / "script.json").write_text(
+        '{"hook": "hook text", "hashtags": ["#test"]}', encoding="utf-8"
+    )
+    with sqlite3.connect(queue_db) as conn:
+        conn.execute(
+            "UPDATE queue SET status='ready', image_dir=? WHERE id=?",
+            (str(out_dir), row_id),
+        )
+
+    with patch.object(content_queue, "_run_full_pipeline") as pipeline, patch(
+        "src.agents.publisher.publish", return_value="ig-video-1"
+    ) as publish:
+        content_queue.publish_next(publish_to_ig=True)
+        pipeline.assert_not_called()
+
+    uploaded = publish.call_args.kwargs["image_paths"]
+    assert out_dir / "card_02_content.mp4" in uploaded
+    assert out_dir / "card_02_content.png" not in uploaded
+
+
 def test_publish_cached_render_with_no_pngs_becomes_retryable_pending(queue_db, tmp_path):
     """If the cached render's PNGs are gone by the time this actually runs
     (deleted/moved after the row went 'ready'), the row must become
