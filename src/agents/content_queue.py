@@ -6,7 +6,8 @@ ContentQueue — 콘텐츠 큐 관리
 
 공개 API:
   bulk_generate(count, topics, auto_news)   — N개 미리 기획해서 큐에 저장
-  publish_next(publish_to_ig)               — 큐 다음 항목을 전체 파이프라인으로 실행
+  publish_next(publish_to_ig)               — 큐 다음 항목(대기열 순서)을 처리
+  publish_specific(queue_id, publish_to_ig) — 지정한 항목 하나만 정확히 처리
   add_topic(topic, context, scheduled_at)   — 단일 주제 큐 추가
   get_status()                              — 큐 현황 dict 반환
 """
@@ -22,6 +23,7 @@ from src.db import (
     enqueue_v2,
     claim_queue_row,
     dequeue_next,
+    get_queue_row,
     insert_post,
     mark_queue_error,
     set_queue_image_dir,
@@ -234,6 +236,65 @@ def publish_next(
         print("  [ContentQueue] 유효한 큐 항목을 찾지 못했습니다.")
         return None
 
+    return _process_claimed_row(
+        row, metadata, original_status, publish_to_ig, require_human_approval
+    )
+
+
+def publish_specific(
+    queue_id: int,
+    publish_to_ig: bool = True,
+    *,
+    require_human_approval: bool = True,
+) -> dict[str, Any] | None:
+    """Process exactly this queue row - never substitutes a different one.
+
+    publish_next() picks "whatever's next" by dequeue_next()'s queue-order
+    semantics, which is correct for the CLI/scheduler's unattended flow but
+    wrong for the dashboard's supervised-approval flow: a human previews one
+    specific row, and clicking "승인해서 발행" must publish exactly that row,
+    not silently fall through to a different (unreviewed) one just because
+    the previewed row happened to have a stuck non-retryable error or
+    wasn't queue-order-first. That's exactly what happened before this
+    existed - approving a reviewed Siri/iPhone card set instead ran a full,
+    unreviewed regeneration for a completely different queued topic.
+    """
+    if publish_to_ig:
+        _validate_publish_configuration()
+
+    row = get_queue_row(queue_id)
+    if row is None or row["status"] not in ("pending", "ready"):
+        status = row["status"] if row else "없음"
+        print(f"  [ContentQueue] 대상 항목을 처리할 수 없습니다 (큐 id={queue_id}, 상태={status})")
+        return None
+
+    original_status = row["status"]
+    if not claim_queue_row(queue_id):
+        print(f"  [ContentQueue] 다른 작업이 이미 이 항목을 처리 중입니다 (큐 id={queue_id})")
+        return None
+
+    metadata, error = _load_queue_metadata(row)
+    if error:
+        mark_queue_error(queue_id, error, increment_retry=False, preserve_attempt=True)
+        unclaim_queue_row(queue_id, original_status)
+        print(f"  [ContentQueue] 게시 차단: {error} (큐 id={queue_id})")
+        return None
+
+    return _process_claimed_row(
+        row, metadata, original_status, publish_to_ig, require_human_approval
+    )
+
+
+def _process_claimed_row(
+    row: Any,
+    metadata: QueueMetadataV2,
+    original_status: str,
+    publish_to_ig: bool,
+    require_human_approval: bool,
+) -> dict[str, Any] | None:
+    """Run the actual pipeline/cached-render/upload for an already-claimed
+    row (status='processing'). Shared by publish_next() and
+    publish_specific() so both get identical processing and cleanup."""
     queue_id = row["id"]
     topic = row["topic"]
     context = row["context"] or ""

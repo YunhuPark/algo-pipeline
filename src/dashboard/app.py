@@ -1134,6 +1134,10 @@ document.getElementById('prepareBtn').addEventListener('click', () => {{
 }});
 
 document.getElementById('qApproveBtn').addEventListener('click', () => {{
+  if (!qQueueId) {{
+    qLogErr('발행할 항목을 확인하지 못했습니다. 미리보기를 다시 생성해 주세요.');
+    return;
+  }}
   if (!confirm('실제 Instagram 계정(@algo__kr)에 지금 바로 게시됩니다. 진행할까요?')) return;
   document.getElementById('qApproveBtn').disabled = true;
   document.getElementById('qRejectBtn').disabled = true;
@@ -1143,7 +1147,11 @@ document.getElementById('qApproveBtn').addEventListener('click', () => {{
   document.getElementById('qProgressBadge').className = 'badge badge-pending';
   document.getElementById('qLogBox').innerHTML = '';
 
-  fetch('/queue/approve_publish', {{method: 'POST'}})
+  fetch('/queue/approve_publish', {{
+    method: 'POST',
+    headers: {{'Content-Type': 'application/json'}},
+    body: JSON.stringify({{queue_id: qQueueId}}),
+  }})
     .then(r => r.json())
     .then(data => {{
       if (!data.job_id) {{
@@ -1391,7 +1399,7 @@ def queue_prepare_next():
     return {"job_id": job_id}
 
 
-def _run_queue_publish_job(job_id: str) -> None:
+def _run_queue_publish_job(job_id: str, queue_id: int) -> None:
     global _ACTIVE_QUEUE_JOB
     _ACTIVE_QUEUE_JOB = {"job_id": job_id, "mode": "publish"}
     q = _JOB_QUEUES[job_id]
@@ -1409,14 +1417,22 @@ def _run_queue_publish_job(job_id: str) -> None:
     old_stdout = sys.stdout
     sys.stdout = _StreamCapture()
     try:
-        from src.agents.content_queue import publish_next
-        # 사람이 이미 대시보드에서 카드를 직접 보고 승인한 뒤 이 라우트를
-        # 눌렀으므로, 여기서 다시 파이프라인 내부 승인 단계(터미널 input())를
-        # 거칠 필요가 없다 — 그 단계는 stdin이 없는 백그라운드 스레드에서
-        # EOFError만 낸다. 정상 경로는 캐시된 렌더링을 그대로 올리는
-        # _publish_cached_render라 애초에 승인 단계를 타지 않지만, image_dir가
-        # 없어 전체 파이프라인으로 떨어지는 예외 상황까지 대비해 명시한다.
-        result = publish_next(publish_to_ig=True, require_human_approval=False)
+        from src.agents.content_queue import publish_specific
+        # publish_next()가 아니라 publish_specific(queue_id)를 쓴다 —
+        # publish_next()는 "큐에서 다음 차례"를 그냥 대기열 순서대로 꺼내므로,
+        # 사람이 미리보기로 검토한 바로 그 항목이 아니라 완전히 다른(검토
+        # 안 된) 항목을 대신 처리할 수 있다 — 실제로 그런 일이 있었다.
+        #
+        # require_human_approval=False: 사람이 이미 대시보드에서 카드를 직접
+        # 보고 승인한 뒤 이 라우트를 눌렀으므로, 여기서 다시 파이프라인 내부
+        # 승인 단계(터미널 input())를 거칠 필요가 없다 — 그 단계는 stdin이
+        # 없는 백그라운드 스레드에서 EOFError만 낸다. 정상 경로는 캐시된
+        # 렌더링을 그대로 올리는 _publish_cached_render라 애초에 승인
+        # 단계를 타지 않지만, image_dir가 없어 전체 파이프라인으로 떨어지는
+        # 예외 상황까지 대비해 명시한다.
+        result = publish_specific(
+            queue_id, publish_to_ig=True, require_human_approval=False
+        )
         sys.stdout = old_stdout
 
         if result:
@@ -1471,6 +1487,12 @@ def queue_current_job():
 
 @app.route("/queue/approve_publish", methods=["POST"])
 def queue_approve_publish():
+    data = request.get_json(silent=True) or {}
+    try:
+        queue_id = int(data.get("queue_id"))
+    except (TypeError, ValueError):
+        return {"error": "발행할 항목을 확인하지 못했습니다. 미리보기를 다시 생성해 주세요."}, 400
+
     if not _GENERATION_LOCK.acquire(blocking=False):
         return {"error": "이미 다른 작업이 진행 중입니다. 완료 후 다시 시도해 주세요."}, 409
 
@@ -1482,7 +1504,9 @@ def queue_approve_publish():
         "status": "pending", "logs": [], "paths": [], "topic": "",
         "image_dir": "", "caption": "", "error": "", "queue_id": None,
     }
-    t = threading.Thread(target=_run_queue_publish_job, args=(job_id,), daemon=True)
+    t = threading.Thread(
+        target=_run_queue_publish_job, args=(job_id, queue_id), daemon=True
+    )
     try:
         t.start()
     except BaseException:
