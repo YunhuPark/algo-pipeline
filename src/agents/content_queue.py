@@ -38,6 +38,22 @@ from src.db import (
 from src.schemas.queue_schemas import CollectionMethod, PublishAttemptState, QueueMetadataV2
 
 
+def _select_render_media(folder: Path) -> list[Path]:
+    """폴더 안의 카드 미디어를 슬라이드별로 선택해 반환.
+
+    영상이 합성된 슬라이드는 정지 이미지(.png)와 영상(.mp4)이 같은 이름으로
+    함께 남는다. 사람이 검토하는 /preview 페이지는 슬라이드당 영상을 우선
+    선택해서 보여주므로, 실제 업로드도 같은 기준으로 선택해야 사람이 검토한
+    화면과 실제 게시물이 일치한다 (그렇지 않으면 영상이 빠지고 정지 이미지만
+    올라간다).
+    """
+    by_slide: dict[str, Path] = {}
+    for path in sorted(folder.glob("card_*.png")) + sorted(folder.glob("card_*.mp4")):
+        if path.suffix.lower() == ".mp4" or path.stem not in by_slide:
+            by_slide[path.stem] = path
+    return [by_slide[stem] for stem in sorted(by_slide)]
+
+
 RETRYABLE_PRE_PUBLISH_ERRORS = {
     "NETWORK_TIMEOUT_BEFORE_PUBLISH",
     "RATE_LIMITED_BEFORE_PUBLISH",
@@ -339,7 +355,7 @@ def _process_claimed_row(
         res = None
         if image_dir and Path(image_dir).exists():
             print(f"  [ContentQueue] 기존 렌더링 사용: {image_dir}")
-            paths = sorted(Path(image_dir).glob("card_*.png"))
+            paths = _select_render_media(Path(image_dir))
             if not paths:
                 print("  [ContentQueue] PNG 없음 — 전체 파이프라인 실행")
                 res = run_full_pipeline()
@@ -424,7 +440,7 @@ def _publish_cached_render(
     from src.agents import publisher as ig_publisher
 
     folder = Path(image_dir)
-    paths = sorted(folder.glob("card_*.png"))
+    paths = _select_render_media(folder)
     if not paths:
         # 승인된 렌더링 자체가 사라진 것 — 이 항목이 잘못된 게 아니라 재생성이
         # 필요한 상황이므로, 영구 오류로 막는 대신 'pending'으로 되돌려 다음
