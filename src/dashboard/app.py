@@ -1010,12 +1010,13 @@ def queue_page():
             <div class="panel-title">뉴스 자동 수집</div>
           </div>
           <p class="panel-sub" style="margin-bottom:14px">최신 AI 뉴스에서 주제를 자동으로 수집해 큐에 추가합니다. (Tavily 필요)</p>
-          <form method="post" action="/queue/generate">
+          <form method="post" action="/queue/generate" id="autoCollectForm"
+                onsubmit="const b=document.getElementById('autoCollectBtn'); b.disabled=true; b.textContent='⏳ 수집 중... (완료까지 잠시 기다려주세요)';">
             <div class="input-group">
               <label class="input-label">추가할 주제 수</label>
               <input name="count" type="number" value="3" min="1" max="10">
             </div>
-            <button type="submit" class="btn btn-secondary" style="width:100%">자동 수집 시작</button>
+            <button type="submit" id="autoCollectBtn" class="btn btn-secondary" style="width:100%">자동 수집 시작</button>
           </form>
         </div>
       </div>

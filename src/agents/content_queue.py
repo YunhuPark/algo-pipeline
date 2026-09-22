@@ -52,10 +52,35 @@ def _validate_publish_configuration() -> None:
     verify_instagram_account()
 
 
-def _collect_news():
+def _collect_news(exclude_urls: frozenset[str] = frozenset()):
     from src.agents.news_collector import collect_and_select
 
-    return collect_and_select()
+    return collect_and_select(exclude_urls=exclude_urls)
+
+
+def _queued_source_urls() -> set[str]:
+    """Source URLs already sitting in the queue (any status).
+
+    Used so a fresh collection run doesn't just re-pick the same top-scoring
+    article that's already queued - RSS/Tavily results don't meaningfully
+    change within a few minutes, so without this, clicking "자동 수집 시작"
+    repeatedly kept re-adding the exact same story.
+    """
+    import json
+
+    urls: set[str] = set()
+    for row in get_queue():
+        raw = row["metadata_json"] if "metadata_json" in row.keys() else None
+        if not raw:
+            continue
+        try:
+            data = json.loads(raw)
+        except ValueError:
+            continue
+        url = data.get("source_url")
+        if url:
+            urls.add(url)
+    return urls
 
 
 # ── 공개 함수 ──────────────────────────────────────────────
@@ -96,11 +121,16 @@ def _fill_from_news(count: int) -> list[int]:
     """뉴스 수집을 count번 반복해 큐에 저장."""
     ids: list[int] = []
     seen_topics: set[str] = set()
+    # 이미 큐에 있는 기사 + 이번 일괄 수집에서 방금 고른 기사를 계속 누적해
+    # 다음 반복에서 제외한다 — 안 그러면 "자동 수집 시작"을 여러 번 눌러도
+    # RSS/Tavily 결과가 짧은 시간 안에 잘 안 바뀌어 매번 같은 최고점 기사만
+    # 다시 고르게 된다.
+    excluded_urls: set[str] = set(_queued_source_urls())
 
     for i in range(count):
         try:
             print(f"  [ContentQueue] 뉴스 수집 중 ({i+1}/{count})...")
-            news = _collect_news()
+            news = _collect_news(exclude_urls=frozenset(excluded_urls))
 
             # A selected headline without a real source cannot become
             # publication evidence. Keep the queue fail-closed before the
@@ -109,6 +139,8 @@ def _fill_from_news(count: int) -> list[int]:
             if selected_item is None:
                 print("  [ContentQueue] 검증 가능한 뉴스 출처 없음 — 큐 추가 생략")
                 continue
+
+            excluded_urls.add(selected_item.url)
 
             # 중복 주제 회피
             topic = news.topic

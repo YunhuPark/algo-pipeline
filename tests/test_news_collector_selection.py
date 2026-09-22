@@ -46,6 +46,45 @@ def test_auto_selection_keeps_the_exact_selected_article():
     assert result.topic == "GPT-6 Astra 벤치마크 공개"
 
 
+def test_auto_selection_excludes_already_queued_urls():
+    articles = [
+        NewsItem(
+            title="이미 큐에 있는 기사",
+            summary="이미 큐에 있는 기사",
+            source="TechCrunch",
+            url="https://example.com/already-queued",
+        ),
+        NewsItem(
+            title="새로운 AI 스타트업 투자유치",
+            summary="이 스타트업은 시리즈 100억 원 규모의 투자를 유치했으며 이용자는 50만 명으로 늘었다고 밝혔다.",
+            source="TechCrunch",
+            url="https://example.com/fresh",
+        ),
+    ]
+    selection = _SelectedTopic(
+        selected_index=1,
+        topic="새로운 AI 스타트업 투자유치",
+        reason="구체적인 투자 수치가 있다.",
+        context="",
+    )
+
+    with patch(
+        "src.agents.news_collector._parse_rss_feeds",
+        return_value=articles,
+    ), patch(
+        "src.agents.news_collector._fetch_tavily_trends",
+        return_value=[],
+    ), patch(
+        "src.agents.news_collector._select_topic_with_gpt",
+        return_value=selection,
+    ):
+        result = collect_and_select(
+            exclude_urls=frozenset({"https://example.com/already-queued"})
+        )
+
+    assert result.selected_item.url == "https://example.com/fresh"
+
+
 def test_auto_selection_rejects_candidates_without_real_urls():
     invalid = NewsItem(
         title="링크 없는 기사",

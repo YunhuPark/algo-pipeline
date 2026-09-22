@@ -508,10 +508,14 @@ def _quick_video_coverage(article_title: str, topic: str) -> int:
 
 # ── 공개 API ──────────────────────────────────────────────
 
-def collect_and_select() -> NewsSelection:
+def collect_and_select(exclude_urls: frozenset[str] = frozenset()) -> NewsSelection:
     """
     뉴스 수집 → GPT-4o 주제 선택 → NewsSelection 반환.
     pipeline.py에서 topic 대신 이 결과를 주입.
+
+    exclude_urls: 이미 큐에 등록됐거나 이번 일괄 수집에서 이미 고른 기사의
+    URL. 안 걸러내면 RSS/Tavily 결과가 몇 분 안에 잘 안 바뀌는 탓에 "자동
+    수집 시작"을 여러 번 눌러도 매번 똑같은 최고점 기사만 다시 고르게 된다.
     """
     print("\n[NewsCollector] 뉴스 수집 시작...")
 
@@ -523,6 +527,7 @@ def collect_and_select() -> NewsSelection:
         if item.title.strip()
         and item.url.startswith(("http://", "https://"))
         and looks_like_article_url(item.url)
+        and item.url not in exclude_urls
     ]
 
     if not all_items:
