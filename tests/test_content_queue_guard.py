@@ -98,6 +98,41 @@ def test_news_without_evidence_enqueues_nothing(queue_db):
     assert db.queue_count() == 0
 
 
+def test_fill_from_news_excludes_already_queued_and_newly_picked_urls(queue_db):
+    """Repeated collection calls must not just re-pick the same top-scoring
+    article - RSS/Tavily results don't meaningfully change within a few
+    minutes, so without exclusion, clicking "자동 수집 시작" repeatedly kept
+    re-adding the exact same story."""
+    existing_meta = metadata()  # source_url="https://example.com/article"
+    db.enqueue_v2(existing_meta, CollectionMethod.NEWS_COLLECTOR)
+
+    calls = []
+
+    def fake_collect(exclude_urls=frozenset()):
+        calls.append(set(exclude_urls))
+        n = len(calls)
+        return SimpleNamespace(
+            topic=f"주제{n}",
+            selected_item=SimpleNamespace(
+                title=f"기사{n}", url=f"https://example.com/new-{n}", summary="본문"
+            ),
+        )
+
+    with patch.object(content_queue, "_collect_news", side_effect=fake_collect), \
+         patch("src.agents.trend_analyzer.build_locked_source_report"), \
+         patch(
+             "src.services.generation_service.build_queue_metadata",
+             return_value=metadata(),
+         ):
+        content_queue._fill_from_news(2)
+
+    assert len(calls) == 2
+    # 첫 호출: 이미 큐에 있던 기사 URL이 먼저 제외돼야 한다
+    assert "https://example.com/article" in calls[0]
+    # 두 번째 호출: 첫 호출에서 방금 고른 기사도 추가로 제외돼야 한다
+    assert "https://example.com/new-1" in calls[1]
+
+
 def test_publish_configuration_is_checked_before_dequeue(monkeypatch):
     with patch.object(
         content_queue,
