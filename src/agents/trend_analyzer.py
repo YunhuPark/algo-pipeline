@@ -701,6 +701,29 @@ def _pick_best_article(articles: list[TrendResult], topic: str) -> TrendResult:
     except Exception as e:
         print(f"  [TrendAnalyzer] 선택 실패 ({e}), 점수 최고값 사용")
 
+    # GPT의 선택이 실제로 topic과 앵커가 겹치는지 값비싼 크롤링(enrich) 전에
+    # 미리 확인한다 — news_collector.py에서 재현됐던 것과 같은 종류의
+    # topic-원문 드리프트(GPT가 무관한 기사를 고르는 것)를 여기서도 막는다.
+    from src.qa.topic_source_guard import topic_matches_source
+
+    if not topic_matches_source(topic, articles[main_idx].title, articles[main_idx].content):
+        fallback_idx = next(
+            (
+                i for i, a in enumerate(articles[:12])
+                if i != main_idx and topic_matches_source(topic, a.title, a.content)
+            ),
+            None,
+        )
+        if fallback_idx is not None:
+            print(
+                f"  [TrendAnalyzer] 선택 [{main_idx+1}]이 주제 앵커와 겹치지 않음 "
+                f"→ [{fallback_idx+1}] {articles[fallback_idx].title[:60]}로 교체"
+            )
+            main_idx = fallback_idx
+            related_indices = [i for i in related_indices if i != main_idx]
+        else:
+            print("  [TrendAnalyzer] ⚠️ 주제 앵커와 겹치는 대안 없음 — 원래 선택 유지")
+
     # ── 주 기사 크롤링 보강 ─────────────────────────────────
     main = _enrich_article(articles[main_idx])
 
