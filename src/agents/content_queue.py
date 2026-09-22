@@ -314,18 +314,30 @@ def _publish_cached_render(
     folder = Path(image_dir)
     paths = sorted(folder.glob("card_*.png"))
     if not paths:
-        mark_queue_error(queue_id, "CACHED_RENDER_MISSING")
-        print(f"  [ContentQueue] 캐시된 렌더링을 찾을 수 없음 (큐 id={queue_id})")
+        # 승인된 렌더링 자체가 사라진 것 — 이 항목이 잘못된 게 아니라 재생성이
+        # 필요한 상황이므로, 영구 오류로 막는 대신 'pending'으로 되돌려 다음
+        # 생성 시도에서 다시 만들 수 있게 한다.
+        print(f"  [ContentQueue] 캐시된 렌더링을 찾을 수 없음 (큐 id={queue_id}) → 재생성 가능하도록 되돌립니다.")
+        set_queue_image_dir(queue_id, "")
+        mark_queue_status(queue_id, "pending")
         return None
 
     script_path = folder / "script.json"
-    if not script_path.exists():
-        mark_queue_error(queue_id, "CACHED_SCRIPT_MISSING")
-        print(f"  [ContentQueue] 캐시된 script.json 없음 (큐 id={queue_id})")
+    script_data = None
+    if script_path.exists():
+        try:
+            script_data = _json.loads(script_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            script_data = None
+    if not isinstance(script_data, dict):
+        print(f"  [ContentQueue] 캐시된 script.json 없음/손상 (큐 id={queue_id}) → 재생성 가능하도록 되돌립니다.")
+        set_queue_image_dir(queue_id, "")
+        mark_queue_status(queue_id, "pending")
         return None
-    script_data = _json.loads(script_path.read_text(encoding="utf-8"))
-    hook = script_data.get("hook", "")
-    hashtags = script_data.get("hashtags", [])
+
+    hook = script_data.get("hook") or ""
+    raw_hashtags = script_data.get("hashtags") or []
+    hashtags = [str(h) for h in raw_hashtags] if isinstance(raw_hashtags, list) else []
 
     if attempt_id and before_publish:
         try:
