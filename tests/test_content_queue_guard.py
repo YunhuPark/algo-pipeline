@@ -257,6 +257,149 @@ def test_invalid_front_row_does_not_block_a_valid_row_behind_it(queue_db):
     assert good_row["status"] == "published"
 
 
+def test_claim_queue_row_is_exclusive(queue_db):
+    """Two concurrent callers (a scheduler cron and a dashboard click) must
+    not both be able to claim the same row - this is the actual mutex
+    dequeue_next() itself doesn't provide (it's a plain SELECT)."""
+    row_id = db.enqueue_v2(metadata(), CollectionMethod.NEWS_COLLECTOR)
+    assert db.claim_queue_row(row_id) is True
+    assert db.claim_queue_row(row_id) is False  # already 'processing'
+    with sqlite3.connect(queue_db) as conn:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute("SELECT * FROM queue WHERE id=?", (row_id,)).fetchone()
+    assert row["status"] == "processing"
+
+
+def test_unclaim_reverts_only_if_still_processing(queue_db):
+    row_id = db.enqueue_v2(metadata(), CollectionMethod.NEWS_COLLECTOR)
+    db.claim_queue_row(row_id)
+    db.unclaim_queue_row(row_id, "ready")
+    with sqlite3.connect(queue_db) as conn:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute("SELECT * FROM queue WHERE id=?", (row_id,)).fetchone()
+    assert row["status"] == "ready"
+
+    # Something else already resolved the status (e.g. published) in the
+    # meantime - a stray unclaim call must not stomp that.
+    db.mark_queue_status(row_id, "published")
+    db.unclaim_queue_row(row_id, "pending")
+    with sqlite3.connect(queue_db) as conn:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute("SELECT * FROM queue WHERE id=?", (row_id,)).fetchone()
+    assert row["status"] == "published"
+
+
+def test_publish_next_releases_its_claim_on_a_generation_only_run(queue_db, tmp_path):
+    """A concurrent second caller must be able to see this row again (in its
+    new resolved status) once publish_next() returns - the row must not be
+    left stuck at 'processing'."""
+    row_id = db.enqueue_v2(metadata(), CollectionMethod.NEWS_COLLECTOR)
+    out_dir = tmp_path / "20260922_rendered"
+    out_dir.mkdir()
+    (out_dir / "card_01_cover.png").write_bytes(b"")
+    generated = PipelineResult(
+        image_paths=[out_dir / "card_01_cover.png"],
+        generation_succeeded=True,
+        publish_requested=False,
+        publish_succeeded=False,
+        ig_post_id=None,
+        permalink=None,
+        failure_stage=None,
+        error_code=None,
+    )
+    with patch.object(content_queue, "_run_full_pipeline", return_value=generated):
+        content_queue.publish_next(publish_to_ig=False)
+
+    with sqlite3.connect(queue_db) as conn:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute("SELECT * FROM queue WHERE id=?", (row_id,)).fetchone()
+    assert row["status"] == "ready"  # not stuck at 'processing'
+
+
+def test_clear_queue_error_reverts_to_ready_when_a_render_is_cached(queue_db, tmp_path):
+    row_id = db.enqueue_v2(metadata(), CollectionMethod.NEWS_COLLECTOR)
+    out_dir = tmp_path / "20260922_rendered"
+    with sqlite3.connect(queue_db) as conn:
+        conn.execute(
+            """UPDATE queue SET status='ready', image_dir=?,
+                   publish_error_code='REMOTE_PUBLISH_PERSISTENCE_UNCERTAIN',
+                   publish_attempt_id='attempt-1', publish_attempt_state='STARTED'
+               WHERE id=?""",
+            (str(out_dir), row_id),
+        )
+
+    assert db.clear_queue_error(row_id) is True
+
+    with sqlite3.connect(queue_db) as conn:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute("SELECT * FROM queue WHERE id=?", (row_id,)).fetchone()
+    assert row["status"] == "ready"
+    assert row["publish_error_code"] is None
+    assert row["publish_attempt_id"] is None
+    assert row["publish_attempt_state"] == "NOT_ATTEMPTED"
+
+
+def test_clear_queue_error_reverts_to_pending_without_a_cached_render(queue_db):
+    row_id = db.enqueue_v2(metadata(), CollectionMethod.NEWS_COLLECTOR)
+    with sqlite3.connect(queue_db) as conn:
+        conn.execute(
+            "UPDATE queue SET publish_error_code='UNKNOWN_PIPELINE_EXCEPTION' WHERE id=?",
+            (row_id,),
+        )
+
+    assert db.clear_queue_error(row_id) is True
+
+    with sqlite3.connect(queue_db) as conn:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute("SELECT * FROM queue WHERE id=?", (row_id,)).fetchone()
+    assert row["status"] == "pending"
+    assert row["publish_error_code"] is None
+
+
+@pytest.mark.parametrize("blocked_status", ["published", "skipped", "processing"])
+def test_clear_queue_error_refuses_published_skipped_or_in_flight_rows(queue_db, blocked_status):
+    row_id = db.enqueue_v2(metadata(), CollectionMethod.NEWS_COLLECTOR)
+    with sqlite3.connect(queue_db) as conn:
+        conn.execute(
+            "UPDATE queue SET status=?, publish_error_code='SOME_ERROR' WHERE id=?",
+            (blocked_status, row_id),
+        )
+
+    assert db.clear_queue_error(row_id) is False
+
+    with sqlite3.connect(queue_db) as conn:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute("SELECT * FROM queue WHERE id=?", (row_id,)).fetchone()
+    assert row["status"] == blocked_status
+    assert row["publish_error_code"] == "SOME_ERROR"
+
+
+def test_two_concurrent_publish_next_calls_never_both_take_the_same_row(queue_db):
+    """Simulates a scheduler cron and a dashboard click racing to process
+    the same front-of-queue row at the same moment. Only one may proceed;
+    the other must see an empty queue rather than also running the
+    pipeline for that row."""
+    row_id = db.enqueue_v2(metadata(), CollectionMethod.NEWS_COLLECTOR)
+    calls = []
+
+    def simulate(topic, context, angle, publish, attempt_id, before_publish, on_remote_id, source_lineage):
+        calls.append(1)
+        before_publish(attempt_id)
+        on_remote_id(attempt_id, "ig-1")
+        return _result(succeeded=True, post_id="ig-1", state=PublishAttemptState.REMOTE_ID_CONFIRMED)
+
+    # 두 번째 호출자가 먼저 도착한 것처럼: 첫 호출 전에 이미 claim된 상태를
+    # 흉내 낸다 (실제로는 서로 다른 프로세스가 거의 동시에 dequeue_next를
+    # 부르는 상황).
+    assert db.claim_queue_row(row_id) is True
+
+    with patch.object(content_queue, "_run_full_pipeline", side_effect=simulate):
+        result = content_queue.publish_next()
+
+    assert result is None  # claimed by "someone else" -> no other row to try
+    assert calls == []
+
+
 def test_generation_only_run_persists_image_dir_and_marks_ready(queue_db, tmp_path):
     row_id = db.enqueue_v2(metadata(), CollectionMethod.NEWS_COLLECTOR)
     out_dir = tmp_path / "20260922_rendered"

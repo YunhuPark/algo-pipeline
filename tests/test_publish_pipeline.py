@@ -214,6 +214,7 @@ def _attested_row() -> dict:
         "context": metadata.context,
         "angle_hint": "",
         "image_dir": "",
+        "status": "pending",
         "collection_method": CollectionMethod.NEWS_COLLECTOR.value,
         "metadata_schema_version": 2,
         "metadata_json": canonical,
@@ -237,6 +238,8 @@ def test_queue_does_not_mark_failed_as_published():
     """원격 상태가 불확실하면 published 전환 없이 attempt를 보존한다."""
     with patch("src.agents.content_queue._validate_publish_configuration"), \
          patch("src.agents.content_queue.dequeue_next", return_value=_attested_row()), \
+         patch("src.agents.content_queue.claim_queue_row", return_value=True), \
+         patch("src.agents.content_queue.unclaim_queue_row"), \
          patch("src.agents.content_queue._run_full_pipeline") as mock_pipeline, \
          patch("src.agents.content_queue.mark_queue_status") as mock_mark, \
          patch("src.agents.content_queue.mark_queue_error") as mock_error:
@@ -267,6 +270,8 @@ def test_queue_does_not_mark_failed_as_published():
 def test_queue_generation_only_not_published():
     """생성 전용 실행을 게시 성공으로 기록하지 않음"""
     with patch("src.agents.content_queue.dequeue_next", return_value=_attested_row()), \
+         patch("src.agents.content_queue.claim_queue_row", return_value=True), \
+         patch("src.agents.content_queue.unclaim_queue_row"), \
          patch("src.agents.content_queue._run_full_pipeline") as mock_pipeline, \
          patch("src.agents.content_queue.mark_queue_status") as mock_mark:
 

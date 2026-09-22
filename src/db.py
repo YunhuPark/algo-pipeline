@@ -273,6 +273,40 @@ def mark_queue_status(queue_id: int, status: str) -> None:
         conn.execute("UPDATE queue SET status=? WHERE id=?", (status, queue_id))
 
 
+def claim_queue_row(queue_id: int) -> bool:
+    """Atomically move a pending/ready row into a transient 'processing' state.
+
+    dequeue_next() is a plain SELECT with no locking of its own; two
+    concurrent callers (a scheduler cron and a dashboard click racing at the
+    same moment) can otherwise both select the same row and both start
+    generating/reading its render. claim_queue_row() is the actual mutex:
+    dequeue_next()'s WHERE clause already excludes 'processing' rows, so once
+    one caller wins this UPDATE, every other caller's dequeue_next() call
+    stops returning this row until it's unclaimed.
+    """
+    with _conn() as conn:
+        cur = conn.execute(
+            "UPDATE queue SET status='processing' WHERE id=? AND status IN ('pending','ready')",
+            (queue_id,),
+        )
+        return cur.rowcount == 1
+
+
+def unclaim_queue_row(queue_id: int, revert_to: str) -> None:
+    """Return a claimed row to a real status once this attempt is finished.
+
+    Safe to call unconditionally from a `finally` block: the WHERE guard
+    makes it a no-op if something else already resolved the row's status in
+    the meantime (mark_queue_status/complete_queue_publish already moved it
+    to 'ready'/'published'/'skipped').
+    """
+    with _conn() as conn:
+        conn.execute(
+            "UPDATE queue SET status=? WHERE id=? AND status='processing'",
+            (revert_to, queue_id),
+        )
+
+
 def set_queue_image_dir(queue_id: int, image_dir: str) -> None:
     """Persist where a generation-only run rendered this row's cards.
 
@@ -313,6 +347,42 @@ def try_mark_queue_skipped(queue_id: int) -> bool:
         return cur.rowcount == 1
 
 
+def clear_queue_error(queue_id: int) -> bool:
+    """Manually clear a permanent publish error so the row becomes retryable.
+
+    This exists for a human to trigger from the dashboard after they've
+    actually checked whether anything already went out — most of the error
+    codes it clears (REMOTE_PUBLISH_PERSISTENCE_UNCERTAIN,
+    UNCERTAIN_EMPTY_POST_ID, ...) exist specifically because we could not
+    tell whether an Instagram post already succeeded, so retrying without
+    checking risks a duplicate post. Refuses a row that is already
+    published, skipped, or currently claimed/mid-attempt (status='processing'
+    or ig_post_id already set). Reverts to 'ready' (not 'pending') when a
+    cached render is still on disk, so retrying re-uses it instead of
+    needlessly regenerating.
+    """
+    with _conn() as conn:
+        row = conn.execute(
+            "SELECT status, image_dir, ig_post_id FROM queue WHERE id=?",
+            (queue_id,),
+        ).fetchone()
+        if row is None or row["ig_post_id"] or row["status"] in (
+            "published", "skipped", "processing",
+        ):
+            return False
+        revert_status = "ready" if row["image_dir"] else "pending"
+        cur = conn.execute(
+            """UPDATE queue
+               SET status=?, publish_error_code=NULL,
+                   publish_attempt_id=NULL, publish_started_at=NULL,
+                   publish_attempt_state='NOT_ATTEMPTED'
+               WHERE id=? AND status NOT IN ('published', 'skipped', 'processing')
+                 AND ig_post_id IS NULL""",
+            (revert_status, queue_id),
+        )
+        return cur.rowcount == 1
+
+
 def mark_queue_error(
     queue_id: int,
     error_code: str,
@@ -346,7 +416,7 @@ def start_publish_attempt(queue_id: int, attempt_id: str, started_at: str) -> No
             """UPDATE queue
                SET publish_attempt_id=?, publish_started_at=?,
                    publish_attempt_state='STARTED', publish_error_code='PUBLISH_IN_PROGRESS'
-               WHERE id=? AND status IN ('pending', 'ready') AND ig_post_id IS NULL
+               WHERE id=? AND status IN ('pending', 'ready', 'processing') AND ig_post_id IS NULL
                  AND publish_attempt_id IS NULL
                  AND publish_attempt_state='NOT_ATTEMPTED'""",
             (attempt_id, started_at, queue_id),
