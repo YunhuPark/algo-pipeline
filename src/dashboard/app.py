@@ -93,6 +93,14 @@ def _evict_old_jobs() -> None:
         _JOBS.pop(old_id, None)
         _JOB_QUEUES.pop(old_id, None)
 
+
+# 페이지를 떠났다 돌아오면(다른 탭 이동, 새로고침) 브라우저 쪽 JS 상태는
+# 전부 사라지지만 백그라운드 스레드는 계속 돈다 — 그래서 실제로는 작업이
+# 진행 중인데 화면엔 아무 표시가 없어 사용자가 진행 여부를 알 수 없었다.
+# 이 전역 변수 하나로 "지금 큐 관련 작업이 돌고 있다면 그 job_id가 뭔지"를
+# 페이지 로드 시 물어볼 수 있게 한다.
+_ACTIVE_QUEUE_JOB: dict | None = None   # {"job_id": str, "mode": "prepare"|"publish"}
+
 # 생성은 한 번에 하나만 돌린다. 진행 로그를 SSE로 보내려고 sys.stdout을
 # 바꿔치기하는데 stdout은 프로세스 전역이라, 작업이 겹치면 서로의 로그를
 # 가져가고 먼저 끝난 쪽이 stdout을 되돌리면서 남은 작업의 출력이 콘솔로
@@ -1062,6 +1070,34 @@ def queue_page():
 let qJobId = null;
 let qQueueId = null;
 
+// 다른 페이지에 갔다가 돌아오거나 새로고침하면 브라우저 쪽 JS 상태는 다
+// 사라지지만, 백그라운드 스레드는 계속 돌고 있을 수 있다 — 그래서 서버에
+// "지금 진행 중인 작업이 있는지" 물어보고, 있으면 지금까지의 로그를 재생한
+// 뒤 이어서 실시간 업데이트를 받는다.
+fetch('/queue/current_job')
+  .then(r => r.json())
+  .then(data => {{
+    if (!data.job_id) return;
+    qJobId = data.job_id;
+    document.getElementById('prepareBtn').disabled = true;
+    document.getElementById('qProgressPanel').style.display = 'block';
+    document.getElementById('qProgressTitle').textContent =
+      data.mode === 'publish' ? '발행 중... (다른 곳에 있는 동안 계속 진행되고 있었습니다)'
+                               : '다음 항목 준비 중... (다른 곳에 있는 동안 계속 진행되고 있었습니다)';
+    document.getElementById('qProgressBadge').textContent = '실행 중';
+    document.getElementById('qProgressBadge').className = 'badge badge-pending';
+    const logBox = document.getElementById('qLogBox');
+    logBox.innerHTML = '';
+    (data.logs || []).forEach(line => {{
+      const div = document.createElement('div');
+      div.textContent = line;
+      logBox.appendChild(div);
+    }});
+    logBox.scrollTop = logBox.scrollHeight;
+    qListenSSE(qJobId, data.mode);
+  }})
+  .catch(() => {{}});
+
 document.getElementById('prepareBtn').addEventListener('click', () => {{
   document.getElementById('qProgressPanel').style.display = 'block';
   document.getElementById('qPreviewPanel').style.display = 'none';
@@ -1259,6 +1295,8 @@ def queue_generate():
 # 재생성하지 않으므로 승인한 화면과 실제로 올라가는 카드가 항상 같다.
 
 def _run_queue_prepare_job(job_id: str) -> None:
+    global _ACTIVE_QUEUE_JOB
+    _ACTIVE_QUEUE_JOB = {"job_id": job_id, "mode": "prepare"}
     q = _JOB_QUEUES[job_id]
     job = _JOBS[job_id]
     job["status"] = "running"
@@ -1314,6 +1352,7 @@ def _run_queue_prepare_job(job_id: str) -> None:
     finally:
         sys.stdout = old_stdout
         q.put(None)
+        _ACTIVE_QUEUE_JOB = None
         _GENERATION_LOCK.release()
 
 
@@ -1340,6 +1379,8 @@ def queue_prepare_next():
 
 
 def _run_queue_publish_job(job_id: str) -> None:
+    global _ACTIVE_QUEUE_JOB
+    _ACTIVE_QUEUE_JOB = {"job_id": job_id, "mode": "publish"}
     q = _JOB_QUEUES[job_id]
     job = _JOBS[job_id]
     job["status"] = "running"
@@ -1389,7 +1430,30 @@ def _run_queue_publish_job(job_id: str) -> None:
     finally:
         sys.stdout = old_stdout
         q.put(None)
+        _ACTIVE_QUEUE_JOB = None
         _GENERATION_LOCK.release()
+
+
+@app.route("/queue/current_job")
+def queue_current_job():
+    """Lets the /queue page reconnect after a navigation/reload if a
+    prepare/publish job is still actually running in the background -
+    otherwise the page shows nothing and there's no way to tell whether
+    work is still in flight or the earlier 409 ("already running") was
+    about a job the user can no longer see."""
+    from flask import jsonify
+
+    if _ACTIVE_QUEUE_JOB is None:
+        return jsonify(job_id=None)
+    job_id = _ACTIVE_QUEUE_JOB["job_id"]
+    job = _JOBS.get(job_id)
+    if job is None:
+        return jsonify(job_id=None)
+    return jsonify(
+        job_id=job_id,
+        mode=_ACTIVE_QUEUE_JOB["mode"],
+        logs=job.get("logs", []),
+    )
 
 
 @app.route("/queue/approve_publish", methods=["POST"])
