@@ -159,9 +159,33 @@ def publish_next(
     if publish_to_ig:
         _validate_publish_configuration()
 
-    row = dequeue_next()
-    if row is None:
-        print("  [ContentQueue] 대기 중인 큐가 없습니다.")
+    # 맨 앞 항목의 메타데이터가 영구적으로 무효(HASH_MISMATCH 등)면 그 항목만
+    # 차단하고 다음 항목으로 넘어간다 — 안 그러면 오래된 손상 데이터 하나가
+    # 뒤에 있는 멀쩡한 항목까지 전부 막아버린다. mark_queue_error가 매번
+    # publish_error_code를 기록해 같은 항목을 다시 dequeue하지 않으므로,
+    # 큐 길이를 넘는 반복은 나지 않는다 — 그래도 상한을 둬 방어한다.
+    row = None
+    metadata = None
+    for _ in range(50):
+        candidate = dequeue_next()
+        if candidate is None:
+            print("  [ContentQueue] 대기 중인 큐가 없습니다.")
+            return None
+        candidate_metadata, error = _load_queue_metadata(candidate)
+        if error:
+            mark_queue_error(
+                candidate["id"], error, increment_retry=False, preserve_attempt=True
+            )
+            print(
+                f"  [ContentQueue] 게시 차단: {error} (큐 id={candidate['id']}) "
+                "→ 다음 항목 시도"
+            )
+            continue
+        row = candidate
+        metadata = candidate_metadata
+        break
+    else:
+        print("  [ContentQueue] 유효한 큐 항목을 찾지 못했습니다.")
         return None
 
     queue_id = row["id"]
@@ -169,12 +193,6 @@ def publish_next(
     context = row["context"] or ""
     angle_hint = row["angle_hint"] or ""
     image_dir = row["image_dir"] or ""
-
-    metadata, error = _load_queue_metadata(row)
-    if error:
-        mark_queue_error(queue_id, error, increment_retry=False, preserve_attempt=True)
-        print(f"  [ContentQueue] 게시 차단: {error} (큐 id={queue_id})")
-        return None
     assert metadata is not None
     collection_method = CollectionMethod(row["collection_method"])
     source_lineage = metadata.to_source_lineage(collection_method)

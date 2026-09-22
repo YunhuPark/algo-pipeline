@@ -222,6 +222,41 @@ def test_existing_remote_id_is_never_dequeued(queue_db):
         publisher.assert_not_called()
 
 
+def test_invalid_front_row_does_not_block_a_valid_row_behind_it(queue_db):
+    """A stale/corrupted row (e.g. HASH_MISMATCH from a schema-era mismatch)
+    must not permanently block a perfectly valid row queued behind it."""
+    bad_id = db.enqueue_v2(metadata(), CollectionMethod.NEWS_COLLECTOR)
+    with sqlite3.connect(queue_db) as conn:
+        conn.execute(
+            "UPDATE queue SET lineage_hash='corrupted' WHERE id=?", (bad_id,)
+        )
+    good_meta = QueueMetadataV2(
+        topic="다른 검증된 뉴스",
+        source_title="다른 원문",
+        source_url="https://example.com/other-article",
+        context="다른 충분한 문맥",
+        evidence=[{"title": "다른 원문", "url": "https://example.com/other-article"}],
+    )
+    good_id = db.enqueue_v2(good_meta, CollectionMethod.NEWS_COLLECTOR)
+
+    def simulate(topic, context, angle, publish, attempt_id, before_publish, on_remote_id, source_lineage):
+        before_publish(attempt_id)
+        on_remote_id(attempt_id, "ig-good")
+        return _result(succeeded=True, post_id="ig-good", state=PublishAttemptState.REMOTE_ID_CONFIRMED)
+
+    with patch.object(content_queue, "_run_full_pipeline", side_effect=simulate):
+        result = content_queue.publish_next()
+
+    assert result["id"] == good_id
+    with sqlite3.connect(queue_db) as conn:
+        conn.row_factory = sqlite3.Row
+        bad_row = conn.execute("SELECT * FROM queue WHERE id=?", (bad_id,)).fetchone()
+        good_row = conn.execute("SELECT * FROM queue WHERE id=?", (good_id,)).fetchone()
+    assert bad_row["publish_error_code"] == "HASH_MISMATCH"
+    assert bad_row["status"] == "pending"
+    assert good_row["status"] == "published"
+
+
 def test_generation_only_run_persists_image_dir_and_marks_ready(queue_db, tmp_path):
     row_id = db.enqueue_v2(metadata(), CollectionMethod.NEWS_COLLECTOR)
     out_dir = tmp_path / "20260922_rendered"
