@@ -48,6 +48,19 @@ from src.db import (
 
 app = Flask(__name__)
 
+# 개발 서버는 파일이 바뀔 때마다(use_reloader=True) 프로세스를 재시작한다 —
+# 그 순간 생성/발행 작업을 돌리던 스레드는 finally 블록을 거치지 못하고 그냥
+# 사라져, 그 스레드가 claim_queue_row()로 점유해둔 행이 'processing' 상태로
+# 영원히 남는다. 이 프로세스에서는 그 어떤 스레드도 이전 프로세스의 작업을
+# 이어받을 수 없으므로, 시작 시점에 남아있는 'processing' 행은 전부 복구한다.
+try:
+    from src.db import recover_stuck_processing_rows
+    _recovered = recover_stuck_processing_rows()
+    if _recovered:
+        print(f"[Startup] 멈춰있던 큐 항목 {_recovered}개 복구 완료")
+except Exception as _e:
+    print(f"[Startup] 큐 복구 확인 실패 (무시하고 계속): {_e}")
+
 
 def _safe_output_segment(value: str, label: str) -> str:
     """Accept one local output path segment and reject traversal attempts."""

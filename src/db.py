@@ -307,6 +307,31 @@ def unclaim_queue_row(queue_id: int, revert_to: str) -> None:
         )
 
 
+def recover_stuck_processing_rows() -> int:
+    """Reset any row still stuck in the transient 'processing' claim state.
+
+    'processing' only ever means "some in-memory Python thread is actively
+    working on this row right now." That in-memory state can't survive a
+    process restart (the dev server's auto-reloader restarting because a
+    file changed mid-generation, a crash, a manual kill) - the thread that
+    would have called unclaim_queue_row() in its `finally` block is simply
+    gone, and nothing else will ever release that claim. Call this once at
+    process startup, when no thread in *this* process could legitimately
+    still be processing anything left over from a previous process.
+    Reverts to 'ready' when a render is already cached, 'pending' otherwise.
+    Returns the number of rows recovered.
+    """
+    with _conn() as conn:
+        cur = conn.execute(
+            """UPDATE queue
+               SET status = CASE WHEN image_dir != '' THEN 'ready' ELSE 'pending' END,
+                   publish_attempt_id=NULL, publish_started_at=NULL,
+                   publish_attempt_state='NOT_ATTEMPTED'
+               WHERE status='processing'"""
+        )
+        return cur.rowcount
+
+
 def set_queue_image_dir(queue_id: int, image_dir: str) -> None:
     """Persist where a generation-only run rendered this row's cards.
 
