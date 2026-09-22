@@ -248,7 +248,12 @@ def _create_carousel_container(
 
 
 def _wait_for_ready(container_id: str, max_wait: int = 60) -> None:
-    """컨테이너가 FINISHED 상태가 될 때까지 대기"""
+    """컨테이너가 FINISHED 상태가 될 때까지 대기.
+
+    영상 컨테이너는 인스타그램 쪽 트랜스코딩 때문에 정지 이미지보다 훨씬
+    오래 걸린다 — 호출부(publish())가 영상 여부에 따라 max_wait를 늘려서
+    넘긴다. 여기서는 그 값을 그대로 폴링 횟수로 쓴다.
+    """
     for _ in range(max_wait // 3):
         time.sleep(3)
         resp = httpx.get(
@@ -353,7 +358,7 @@ def publish(
             print(f"  [Publisher] 컨테이너 생성 (video={is_video}): {img_path.name}")
         cid = _create_media_container(img_url, is_carousel_item=True, is_video=is_video)
         print(f"    → container_id: {cid}")
-        _wait_for_ready(cid)
+        _wait_for_ready(cid, max_wait=300 if is_video else 60)
         container_ids.append(cid)
 
     # 2. 캐러셀 컨테이너 생성
