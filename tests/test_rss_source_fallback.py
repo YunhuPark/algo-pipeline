@@ -1,10 +1,10 @@
 import json
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from src.agents import news_collector, trend_analyzer
 from src.schemas.card_news import TrendResult
-from src.utils.rss_content import extract_feed_entry_content
+from src.utils.rss_content import extract_feed_entry_content, looks_like_article_url
 
 
 def test_feed_entry_prefers_full_content_over_preview():
@@ -111,6 +111,70 @@ def test_cached_source_never_crosses_to_a_different_url(monkeypatch, tmp_path):
     monkeypatch.setattr(trend_analyzer, "OUTPUT_DIR", tmp_path)
 
     assert trend_analyzer._load_cached_source("https://example.com/article") == ""
+
+
+def test_looks_like_article_url_rejects_bare_domain_and_accepts_a_real_path():
+    # Tavily가 "https://yozm.wishket.com"(경로 없는 매거진 홈페이지) 같은
+    # 결과를 실제 기사로 취급해, 크롤러가 내비게이션·푸터·인기글 위젯을
+    # 본문으로 긁어와 놓고 그 안에서 그럴듯한 숫자를 뽑아내던 실제 버그.
+    assert looks_like_article_url("https://yozm.wishket.com") is False
+    assert looks_like_article_url("https://yozm.wishket.com/") is False
+    assert looks_like_article_url("https://yozm.wishket.com/magazine/detail/3951/") is True
+
+
+def test_collect_and_select_excludes_homepage_only_candidates(monkeypatch):
+    homepage_item = news_collector.NewsItem(
+        title="요즘 사람들의 IT 매거진, 요즘IT",
+        summary="회사 소개 및 인기 콘텐츠 안내.",
+        source="Tavily",
+        url="https://yozm.wishket.com",
+    )
+    real_article = news_collector.NewsItem(
+        title="AI 스타트업 투자유치 발표",
+        summary="이 스타트업은 시리즈 100억 원 규모의 투자를 유치했으며 이용자는 50만 명으로 늘었다고 밝혔다.",
+        source="TechCrunch",
+        url="https://example.com/ai-startup-funding",
+    )
+    selection = news_collector._SelectedTopic(
+        selected_index=1,
+        topic="AI 스타트업 투자유치",
+        reason="구체적인 투자 수치가 있다.",
+        context="",
+    )
+
+    with patch(
+        "src.agents.news_collector._parse_rss_feeds",
+        return_value=[real_article],
+    ), patch(
+        "src.agents.news_collector._fetch_tavily_trends",
+        return_value=[homepage_item],
+    ), patch(
+        "src.agents.news_collector._select_topic_with_gpt",
+        return_value=selection,
+    ):
+        result = news_collector.collect_and_select()
+
+    assert result.selected_item is real_article
+
+
+def test_tavily_news_search_excludes_homepage_results(monkeypatch):
+    monkeypatch.setattr(trend_analyzer, "TAVILY_API_KEY", "test-key")
+    fake_response = {
+        "results": [
+            {"title": "홈페이지", "url": "https://yozm.wishket.com", "content": "..."},
+            {
+                "title": "실제 기사",
+                "url": "https://yozm.wishket.com/magazine/detail/1/",
+                "content": "실제 기사 본문입니다.",
+            },
+        ]
+    }
+    mock_client = MagicMock()
+    mock_client.search.return_value = fake_response
+    with patch("tavily.TavilyClient", return_value=mock_client):
+        results = trend_analyzer._tavily_news_search("테스트 주제")
+
+    assert [r.url for r in results] == ["https://yozm.wishket.com/magazine/detail/1/"]
 
 
 def test_direct_crawler_reads_json_ld_article_body(monkeypatch):

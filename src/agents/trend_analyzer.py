@@ -28,7 +28,7 @@ from pydantic import BaseModel
 
 from src.config import TAVILY_API_KEY, OPENAI_API_KEY, OUTPUT_DIR
 from src.schemas.card_news import TrendReport, TrendResult
-from src.utils.rss_content import extract_feed_entry_content
+from src.utils.rss_content import extract_feed_entry_content, looks_like_article_url
 
 # ── Tier 1: 공식 AI 랩 / 연구기관 블로그 ─────────────────
 RSS_TIER1: list[tuple[str, str]] = [
@@ -347,7 +347,7 @@ def _tavily_social_search(topic: str) -> list[TrendResult]:
         for item in resp.get("results", []):
             title = item.get("title", "")
             url = item.get("url", "")
-            if not title or not url:
+            if not title or not url or not looks_like_article_url(url):
                 continue
             score = _calc_score(title, url, None, float(item.get("score", 0.5)))
             results.append(TrendResult(
@@ -383,14 +383,17 @@ def _tavily_news_search(topic: str, max_results: int = 5) -> list[TrendResult]:
         results: list[TrendResult] = []
         for item in resp.get("results", []):
             title = item.get("title", "")
+            url = item.get("url", "")
+            if not url or not looks_like_article_url(url):
+                continue
             years_in_title = re.findall(r"20\d{2}", title)
             if any(int(y) < year for y in years_in_title):
                 continue
             content = (item.get("raw_content") or item.get("content") or "")[:3000]
-            score = _calc_score(title, item.get("url", ""), None, float(item.get("score", 0.5)))
+            score = _calc_score(title, url, None, float(item.get("score", 0.5)))
             results.append(TrendResult(
                 title=title,
-                url=item.get("url", ""),
+                url=url,
                 content=content,
                 score=score,
             ))

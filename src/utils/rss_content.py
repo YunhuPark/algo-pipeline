@@ -4,6 +4,20 @@ from __future__ import annotations
 from html import unescape
 import re
 from typing import Any
+from urllib.parse import urlparse
+
+
+def looks_like_article_url(url: str) -> bool:
+    """Reject a bare domain/homepage URL masquerading as a news article.
+
+    A search API can return a media outlet's front page itself (e.g.
+    "https://yozm.wishket.com", no path) as a "result". A crawler then
+    scrapes that page's nav menu, footer, and "popular this week" widget as
+    if it were an article body, and an LLM can extract plausible-looking
+    numbers/names from that site chrome even though none of it is actual
+    news. A real article link always has a path beyond the domain root.
+    """
+    return bool(urlparse(url).path.strip("/"))
 
 
 def _field(value: Any, name: str, default: Any = "") -> Any:
