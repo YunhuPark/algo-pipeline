@@ -20,7 +20,7 @@ from pydantic import BaseModel
 from tavily import TavilyClient
 
 from src.config import OPENAI_API_KEY, TAVILY_API_KEY, LLM_MODEL
-from src.utils.rss_content import extract_feed_entry_content
+from src.utils.rss_content import extract_feed_entry_content, looks_like_article_url
 
 # ── RSS 피드 목록 (한국 + 글로벌 주요 뉴스) ───────────────
 RSS_FEEDS = [
@@ -520,7 +520,9 @@ def collect_and_select() -> NewsSelection:
     all_items = [
         item
         for item in rss_items + tavily_items
-        if item.title.strip() and item.url.startswith(("http://", "https://"))
+        if item.title.strip()
+        and item.url.startswith(("http://", "https://"))
+        and looks_like_article_url(item.url)
     ]
 
     if not all_items:
