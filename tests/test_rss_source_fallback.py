@@ -122,6 +122,16 @@ def test_looks_like_article_url_rejects_bare_domain_and_accepts_a_real_path():
     assert looks_like_article_url("https://yozm.wishket.com/magazine/detail/3951/") is True
 
 
+def test_looks_like_article_url_rejects_listing_and_tag_pages():
+    # 홈페이지처럼 경로가 없진 않지만, 여러 기사로 가는 링크 모음일 뿐인
+    # 카테고리/태그 페이지도 같은 이유로 실제 기사가 아니다.
+    assert looks_like_article_url(
+        "https://techcrunch.com/category/artificial-intelligence/"
+    ) is False
+    assert looks_like_article_url("https://example.com/tag/openai/") is False
+    assert looks_like_article_url("https://example.com/magazine/list/new/") is False
+
+
 def test_collect_and_select_excludes_homepage_only_candidates(monkeypatch):
     homepage_item = news_collector.NewsItem(
         title="요즘 사람들의 IT 매거진, 요즘IT",
