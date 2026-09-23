@@ -173,7 +173,7 @@ def insert_analytics(
 def get_analytics(platform: str = "instagram", limit: int = 30) -> list[sqlite3.Row]:
     with _conn() as conn:
         return conn.execute(
-            """SELECT p.topic, p.angle, p.posted_at,
+            """SELECT p.topic, p.angle, p.hook, p.posted_at,
                       a.likes, a.comments, a.saves, a.reach, a.checked_at
                FROM analytics a
                JOIN posts p ON a.post_id = p.post_id AND a.platform = p.platform

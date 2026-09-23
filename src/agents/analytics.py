@@ -355,7 +355,7 @@ def get_performance_hints() -> str:
         lines.append("\n✅ 반응 좋았던 콘텐츠 패턴:")
         for r in top3:
             eng = r["likes"] + r["comments"] * 2 + r["saves"] * 3
-            hook_preview = (r.get("hook") or "")[:40]
+            hook_preview = (r["hook"] or "")[:40]
             lines.append(
                 f"  - 주제: {r['topic']} | 앵글: {r['angle'] or '없음'} | "
                 f"engagement {eng} | 훅: {hook_preview}"
@@ -374,7 +374,7 @@ def get_performance_hints() -> str:
     # 주제별 평균 engagement
     topic_map: dict[str, list[int]] = {}
     for r in rows:
-        t = (r.get("topic") or "")[:20]
+        t = (r["topic"] or "")[:20]
         if t:
             eng = r["likes"] + r["comments"] * 2 + r["saves"] * 3
             topic_map.setdefault(t, []).append(eng)
