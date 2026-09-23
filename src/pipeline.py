@@ -597,7 +597,11 @@ def _run_once(
 
     # ── Phase 4.1: 비디오 슬라이드 병렬 합성 ─────────────────
     if video_infos:
-        from src.agents.youtube_fetcher import download_video_snippet, find_best_start_time
+        from src.agents.youtube_fetcher import (
+            download_video_snippet,
+            find_best_start_time,
+            has_visible_motion,
+        )
         from src.agents.video_renderer import create_video_slide
 
         content_slides = [s for s in script.slides if s.slide_type == "content"]
@@ -648,6 +652,15 @@ def _run_once(
                     duration=15,
                     start_time=best_t,
                 )
+                if snippet_path and not has_visible_motion(snippet_path):
+                    # 자막은 이 구간과 일치했지만 화면 자체는 정지된 타이틀
+                    # 카드 등일 수 있다 - 그런 "멈춘 영상"을 올리느니 이미지로
+                    # 대체하는 게 낫다(파일 4.1의 기존 무영상 처리 원칙과 동일).
+                    print(
+                        f"  ⚠️ 슬라이드 {slide_script.slide_number} 구간이 정지 화면"
+                        "(타이틀 카드 등) → 이미지로 대체"
+                    )
+                    snippet_path = None
                 if snippet_path:
                     out_mp4 = target_path.with_suffix(".mp4")
                     res = create_video_slide(target_path, snippet_path, out_mp4)

@@ -693,6 +693,37 @@ def download_video_snippet(
     return None
 
 
+def has_visible_motion(
+    video_path: Path,
+    sample_times: tuple[float, ...] = (0.5, 5.0, 10.0, 14.0),
+    threshold: float = 8.0,
+) -> bool:
+    """다운로드한 구간이 실제로 움직이는 영상인지 확인.
+
+    자막은 타임스탬프 단위로 대사와 슬라이드 주장을 대조하지만, 화면이
+    실제로 그 순간 움직이는지는 확인하지 않는다. 팟캐스트/인터뷰 영상은
+    챕터 시작 지점이 수 초~수십 초짜리 정지된 타이틀 카드로 채워진 경우가
+    흔한데, 그 구간의 대사만 우연히 슬라이드와 일치하면 자막 검증은 통과하고
+    화면은 처음부터 끝까지 멈춰있는 "가짜 영상"이 카드뉴스에 그대로 올라간다.
+    몇 프레임을 샘플링해 픽셀 차이가 전부 미미하면 정지 화면으로 판단한다.
+    """
+    from moviepy import VideoFileClip
+    import numpy as np
+
+    try:
+        with VideoFileClip(str(video_path)) as clip:
+            valid_times = [t for t in sample_times if t < clip.duration]
+            if len(valid_times) < 2:
+                return True  # 클립이 너무 짧아 판단 불가 - 통과시킨다
+            frames = [clip.get_frame(t).astype("int16") for t in valid_times]
+    except Exception:
+        return True  # 확인 자체가 실패하면 기존 동작(통과)을 유지한다
+
+    return any(
+        np.abs(frames[i] - frames[i + 1]).mean() >= threshold
+        for i in range(len(frames) - 1)
+    )
+
 
 def _get_creator_name(video_id: str) -> str:
     """YouTube oembed API로 채널명 가져오기"""
