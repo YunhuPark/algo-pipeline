@@ -1226,13 +1226,20 @@ function qShowPreview(dirName, topic, count, filenames) {{
   grid.innerHTML = '';
   const safeFilenames = filenames || [];
 
+  const allSrcs = [];
   for (let i = 1; i <= count; i++) {{
     const num = String(i).padStart(2, '0');
     const fname = safeFilenames.find(f => f.startsWith(`card_${{num}}_`)) || `card_${{num}}.png`;
-    const src = `/output_img/${{dirName}}/${{fname}}`;
-    const isVideo = fname.toLowerCase().endsWith('.mp4');
+    allSrcs.push(`/output_img/${{dirName}}/${{fname}}`);
+  }}
+
+  for (let i = 1; i <= count; i++) {{
+    const src = allSrcs[i - 1];
+    const isVideo = src.toLowerCase().endsWith('.mp4');
     const div = document.createElement('div');
     div.className = 'card-thumb';
+    div.style.cursor = 'zoom-in';
+    div.onclick = () => openLightbox(src, allSrcs, i - 1, []);
     if (isVideo) {{
       div.innerHTML = `<video src="${{src}}" autoplay loop muted playsinline style="width:100%;height:100%;object-fit:cover;border-radius:var(--radius-sm);background:#000;"></video>
         <div class="num-badge">${{i}}/${{count}}</div>`;
