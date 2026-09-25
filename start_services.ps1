@@ -31,24 +31,34 @@ function Start-CheckedService {
         return
     }
 
-    Write-Host "[Services] Starting $Name..."
     $stdout = Join-Path $ProjectRoot "logs\$LogName.log"
     $stderr = Join-Path $ProjectRoot "logs\${LogName}_err.log"
     # Start-Process flattens ArgumentList; quote absolute script paths because
     # the project directory may contain spaces or Korean characters.
     $scriptArgument = '"' + $Script + '"'
-    Start-Process -FilePath $script:Python `
-        -ArgumentList @($scriptArgument) `
-        -WorkingDirectory $ProjectRoot `
-        -RedirectStandardOutput $stdout `
-        -RedirectStandardError $stderr `
-        -WindowStyle Hidden | Out-Null
 
-    for ($attempt = 0; $attempt -lt 20; $attempt++) {
-        Start-Sleep -Milliseconds 500
-        if (Test-ListeningPort $Port) {
-            Write-Host "[Services] $Name ready on :$Port"
-            return
+    # 로그인 직후 한동안은 Windows 애플리케이션 제어 정책이 아직 준비 중이라
+    # 정상 서명된 네이티브 DLL(tiktoken 등)까지 일시적으로 차단해 첫 시도가
+    # 실패할 수 있다 - 그래서 실패해도 곧바로 포기하지 않고 한 번 더 시도한다.
+    for ($try = 1; $try -le 2; $try++) {
+        Write-Host "[Services] Starting $Name (시도 $try/2)..."
+        Start-Process -FilePath $script:Python `
+            -ArgumentList @($scriptArgument) `
+            -WorkingDirectory $ProjectRoot `
+            -RedirectStandardOutput $stdout `
+            -RedirectStandardError $stderr `
+            -WindowStyle Hidden | Out-Null
+
+        for ($attempt = 0; $attempt -lt 20; $attempt++) {
+            Start-Sleep -Milliseconds 500
+            if (Test-ListeningPort $Port) {
+                Write-Host "[Services] $Name ready on :$Port"
+                return
+            }
+        }
+        if ($try -lt 2) {
+            Write-Host "[Services] $Name 시작 실패, 30초 후 재시도..."
+            Start-Sleep -Seconds 30
         }
     }
     $tail = if (Test-Path $stderr) { (Get-Content $stderr -Tail 12) -join "`n" } else { "오류 로그 없음" }
