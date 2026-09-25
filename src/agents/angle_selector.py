@@ -79,9 +79,9 @@ _SYSTEM = """
    - hook 예: "이 프롬프트 하나로 보고서 끝" / "ChatGPT에게 이렇게 물어봐"
 
 4. 몰랐던사실 (조회율 1위)
-   - "90%가 모르는", "아직 모르는 사람 많은" 독점 정보 느낌
+   - "놓치기 쉬운", "아직 잘 알려지지 않은" 정보의 맥락을 설명
    - FOMO("나만 뒤처지면 안 돼") 자극
-   - cover_title 예: "GPT 유저 90%가 모르는 기능" / "아직도 모르면 손해인 AI"
+   - cover_title 예: "GPT에서 놓친 새 기능" / "잘 알려지지 않은 AI 변화"
    - hook 예: "이거 알면 주변에 자랑하게 됨" / "찾아봐도 잘 안 나오는 기능"
 
 5. 공포 (클릭률 높음)
@@ -116,8 +116,8 @@ _SYSTEM = """
 - 취업·돈 관련 → 이익/공포 우선
 
 규칙:
-- cover_title: 최대 20자, 한국어, 반드시 숫자 또는 고유명사 포함
-- hook: 최대 30자, 캡션 첫 줄용. 숫자 또는 고유명사로 시작
+- cover_title: 최대 20자, 한국어. 숫자는 원문에 명시된 경우에만 사용
+- hook: 최대 30자, 캡션 첫 줄용. 원문보다 강한 단정·과장 금지
 - 브랜드 '{brand_name}'({handle})의 MZ 뉴스 큐레이터 톤 유지
 """
 
@@ -126,7 +126,7 @@ _HUMAN = """
 
 트렌드 요약:
 {trend_summary}
-
+{performance_block}
 위 주제로 5가지 앵글 커버 카피를 만들어주세요.
 이 주제에서 인스타그램 저장률이 가장 높을 앵글을 best_index로 알려주세요.
 """
@@ -138,8 +138,14 @@ def generate_angles(
     topic: str,
     trend_summary: str,
     persona: Persona | None = None,
+    performance_hints: str = "",
 ) -> tuple[list[_AngleVariant], int, str]:
-    """앵글 5개 생성 + best 추천 인덱스 반환"""
+    """앵글 5개 생성 + best 추천 인덱스 반환
+
+    performance_hints: 이 계정의 실제 과거 게시물 성과(좋아요/저장/댓글)에서
+    뽑은 요약 — 위 _SYSTEM의 일반론적인 앵글 순위 대신, 실제로 이 계정에서
+    먹혔던 앵글/주제를 우선하도록 유도한다. 없으면(초기·데이터 부족) 생략.
+    """
     p = persona or load_persona()
     llm = ChatOpenAI(model=LLM_MODEL, temperature=0.8, api_key=OPENAI_API_KEY)
     structured = llm.with_structured_output(_AngleVariants)
@@ -148,11 +154,16 @@ def generate_angles(
         ("human",  _HUMAN),
     ])
     chain = prompt | structured
+    performance_block = (
+        f"\n이 계정의 실제 성과 데이터 (일반론보다 이걸 우선하세요):\n{performance_hints}\n"
+        if performance_hints else ""
+    )
     result = chain.invoke({
         "brand_name":    p.brand_name,
         "handle":        p.handle,
         "topic":         topic,
         "trend_summary": trend_summary[:500] if trend_summary else "트렌드 데이터 없음",
+        "performance_block": performance_block,
     })
     best_idx = max(0, min(result.best_index - 1, len(result.variants) - 1))
     return result.variants, best_idx, result.best_reason
@@ -179,13 +190,16 @@ def select_angle(
     trend_summary: str,
     persona: Persona | None = None,
     auto: bool = False,
+    performance_hints: str = "",
 ) -> SelectedAngle:
     """
     5가지 앵글 생성 → 터미널에 출력 → 사용자 선택.
     auto=True 이면 저장률 가장 높을 앵글 자동 선택 (이전: 항상 1번).
     """
     print("\n  [AngleSelector] 5가지 마케팅 앵글 생성 중...")
-    variants, best_idx, best_reason = generate_angles(topic, trend_summary, persona)
+    variants, best_idx, best_reason = generate_angles(
+        topic, trend_summary, persona, performance_hints=performance_hints
+    )
 
     if auto:
         v = variants[best_idx]

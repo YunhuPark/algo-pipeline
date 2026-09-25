@@ -78,6 +78,24 @@ def refine_topic(topic: str) -> tuple[str, str, str]:
             print(f"  [TopicRefiner] 검색 결과 없음 → 원본 주제 유지")
             return topic, "검색 결과 없음", ""
 
+        # news_collector.py의 후보 압축과 동일한 이유로, 총정리·동향분석형과
+        # 발언/의견 중심 기사는 GPT가 애초에 후보로 보지 못하게 거른다 —
+        # 그래야 "총정리 기사를 고르고 그 안의 세부 사례로 주제를 짓는" 실제
+        # 재현된 버그가 이 검색 경로에서도 반복되지 않는다.
+        from src.agents.news_collector import (
+            _is_opinion_statement_title,
+            _is_roundup_title,
+        )
+
+        filtered_items = [
+            item
+            for item in items
+            if not _is_roundup_title(item.get("title", ""))
+            and not _is_opinion_statement_title(item.get("title", ""))
+        ]
+        if filtered_items:
+            items = filtered_items
+
         # 검색 결과 텍스트화
         arts_text = "\n".join(
             f"[{i+1}] 제목: {r.get('title','')}\n    요약: {r.get('content','')[:200]}"
@@ -121,6 +139,22 @@ def refine_topic(topic: str) -> tuple[str, str, str]:
             sel_title = sel.get("title", "")[:60]
             sel_content = sel.get("content", "")
             sel_url = sel.get("url", "")
+
+            # GPT가 고른 기사와 정제된 topic이 실제로 같은 사건을 가리키는지
+            # 확인한다 — news_collector.py에서 재현됐던 것과 같은 종류의
+            # 드리프트(총정리·나열형 결과에서 스쳐가는 세부 사례로 topic을
+            # 짓는 것)를 여기서도 막는다. 이후 Phase 1(trend_analyzer.run)이
+            # 이 topic으로 다시 검색하므로, 근거 없이 지어진 topic으로
+            # 그 검색 전체가 헛수고가 되는 것을 미리 막을 수 있다.
+            from src.qa.topic_source_guard import topic_matches_source
+
+            if not topic_matches_source(refined, sel_title, sel_content):
+                print(
+                    f"  [TopicRefiner] 정제된 주제 '{refined}'가 선택 기사 "
+                    f"'{sel_title}'와 핵심 앵커가 겹치지 않음 → 원본 주제 유지"
+                )
+                return topic, "정제 주제-원문 불일치", ""
+
             print(f"  [TopicRefiner] 선택 기사: [{selected_idx+1}] '{sel_title}'")
             # Tavily extract로 전문 가져오기 시도
             try:

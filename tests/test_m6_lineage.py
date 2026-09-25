@@ -198,3 +198,39 @@ def test_pipeline_quality_gate_failure(mock_db, pipeline_seams):
         assert res.error_code == "QG_ERROR"
         assert res.publish_succeeded is False
         assert res.failure_stage == "QUALITY_GATE"
+
+
+def test_pipeline_quality_gate_failure_actually_retries_before_giving_up(
+    mock_db, pipeline_seams
+):
+    """QualityGateError가 나면 바로 실패 리턴하는 대신 재시도 루프를 태워야 한다.
+
+    예전 코드는 (생성 중) QualityGateError를 곧장 PipelineResult로 리턴해
+    run_pipeline()의 "기사 교체 없이 재시도" 분기가 하드코드상 도달 불가능
+    했다 — 남은 재시도 예산을 전혀 못 쓰고 1회 시도만에 실패했다. 이 테스트는
+    validate_publish_quality가 여러 번 호출됨(=재시도가 실제로 돌았음)을
+    검증해 그 회귀를 막는다. 첫 assert만 보면 신·구 코드 모두 통과하므로
+    (둘 다 결국 같은 error_code로 실패), 횟수 검증이 핵심이다.
+    """
+    from src.pipeline import run_pipeline, MAX_RETRY
+    from src.qa.deterministic_verifier import QualityGateError
+
+    with patch("src.pipeline.ig_publisher.publish") as mock_publish, \
+         patch(
+             "src.qa.publish_quality_gate.validate_publish_quality",
+             side_effect=QualityGateError("QG_ERROR", "QG Error"),
+         ) as mock_validate:
+        res = run_pipeline(
+            topic="Input",
+            publish=True,
+            source_lineage=_lineage("Input"),
+            auto=True,
+        )
+
+        mock_publish.assert_not_called()
+        assert res.failure_stage == "QUALITY_GATE"
+        assert res.error_code == "QG_ERROR"
+        # 재시도 루프가 실제로 돌았다면 MAX_RETRY(6)회 모두 소진했어야 한다.
+        # 예전 버그는 이 값이 1로 고정됐다.
+        assert mock_validate.call_count == MAX_RETRY
+        assert res.retry_count == MAX_RETRY

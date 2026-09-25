@@ -13,33 +13,113 @@
 from __future__ import annotations
 
 import io
+import html
 import json
 import os
 import queue
+import re
 import sys
 import threading
 import time
 import traceback
 import uuid
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 # 프로젝트 루트를 sys.path에 추가
-ROOT = Path(__file__).parent.parent.parent
+ROOT = Path(__file__).resolve().parents[2]
+OUTPUT_ROOT = (ROOT / "output").resolve()
 sys.path.insert(0, str(ROOT))
 
+from dotenv import load_dotenv
+
+# The dashboard is normally launched as a fresh child process. Load the
+# repository environment before importing the database layer, which validates
+# ALGO_ENV as soon as the application initializes.
+load_dotenv(ROOT / ".env", override=False)
+
 from flask import Flask, request, redirect, url_for, send_file, Response, stream_with_context
+from markupsafe import escape
 
 from src.db import (
     get_posts, get_analytics, get_queue,
-    mark_queue_status, queue_count,
+    queue_count, try_mark_queue_skipped,
 )
 
 app = Flask(__name__)
 
+# 개발 서버는 파일이 바뀔 때마다(use_reloader=True) 프로세스를 재시작한다 —
+# 그 순간 생성/발행 작업을 돌리던 스레드는 finally 블록을 거치지 못하고 그냥
+# 사라져, 그 스레드가 claim_queue_row()로 점유해둔 행이 'processing' 상태로
+# 영원히 남는다. 이 프로세스에서는 그 어떤 스레드도 이전 프로세스의 작업을
+# 이어받을 수 없으므로, 시작 시점에 남아있는 'processing' 행은 전부 복구한다.
+try:
+    from src.db import recover_stuck_processing_rows
+    _recovered = recover_stuck_processing_rows()
+    if _recovered:
+        print(f"[Startup] 멈춰있던 큐 항목 {_recovered}개 복구 완료")
+except Exception as _e:
+    print(f"[Startup] 큐 복구 확인 실패 (무시하고 계속): {_e}")
+
+
+def _safe_output_segment(value: str, label: str) -> str:
+    """Accept one local output path segment and reject traversal attempts."""
+    segment = str(value or "").strip()
+    if (
+        not segment
+        or segment in {".", ".."}
+        or "/" in segment
+        or "\\" in segment
+        or "\x00" in segment
+    ):
+        raise ValueError(f"유효하지 않은 {label}입니다.")
+    return segment
+
+
+def _resolve_output_dir(dir_name: str) -> Path:
+    segment = _safe_output_segment(dir_name, "출력 폴더")
+    candidate = (OUTPUT_ROOT / segment).resolve()
+    if candidate.parent != OUTPUT_ROOT:
+        raise ValueError("출력 폴더 범위를 벗어난 경로입니다.")
+    return candidate
+
+
+def _resolve_output_file(dir_name: str, filename: str) -> Path:
+    directory = _resolve_output_dir(dir_name)
+    file_segment = _safe_output_segment(filename, "파일명")
+    candidate = (directory / file_segment).resolve()
+    if candidate.parent != directory:
+        raise ValueError("출력 폴더 범위를 벗어난 파일입니다.")
+    return candidate
+
 # ── 생성 작업 상태 저장 (job_id → dict) ───────────────────
 _JOBS: dict[str, dict] = {}   # {job_id: {status, logs, paths, script, error}}
 _JOB_QUEUES: dict[str, queue.Queue] = {}   # SSE 이벤트 큐
+_MAX_JOBS = 50   # 대시보드를 오래 켜둔 채(스케줄러+수동 승인 흐름) 계속 써도
+                 # _JOBS/_JOB_QUEUES가 무한히 쌓이지 않도록 오래된 것부터 정리
+
+
+def _evict_old_jobs() -> None:
+    if len(_JOBS) <= _MAX_JOBS:
+        return
+    for old_id in list(_JOBS.keys())[: len(_JOBS) - _MAX_JOBS]:
+        _JOBS.pop(old_id, None)
+        _JOB_QUEUES.pop(old_id, None)
+
+
+# 페이지를 떠났다 돌아오면(다른 탭 이동, 새로고침) 브라우저 쪽 JS 상태는
+# 전부 사라지지만 백그라운드 스레드는 계속 돈다 — 그래서 실제로는 작업이
+# 진행 중인데 화면엔 아무 표시가 없어 사용자가 진행 여부를 알 수 없었다.
+# 이 전역 변수 하나로 "지금 큐 관련 작업이 돌고 있다면 그 job_id가 뭔지"를
+# 페이지 로드 시 물어볼 수 있게 한다.
+_ACTIVE_QUEUE_JOB: dict | None = None   # {"job_id": str, "mode": "prepare"|"publish"}
+
+# 생성은 한 번에 하나만 돌린다. 진행 로그를 SSE로 보내려고 sys.stdout을
+# 바꿔치기하는데 stdout은 프로세스 전역이라, 작업이 겹치면 서로의 로그를
+# 가져가고 먼저 끝난 쪽이 stdout을 되돌리면서 남은 작업의 출력이 콘솔로
+# 새어나간다. 실제로 그 경로에서 cp949 인코딩 오류로 생성이 통째로 죽었다.
+# (한 번 실행에 수 분과 API 비용이 드는 작업이라 중복 실행 자체도 낭비다.)
+_GENERATION_LOCK = threading.Lock()
 
 # ── 공통 CSS / 레이아웃 ──────────────────────────────────
 _CSS = """
@@ -604,6 +684,7 @@ def _nav(active: str) -> str:
         ("/generate",  "✨", "생성"),
         ("/queue",     "📋", "큐"),
         ("/analytics", "📊", "분석"),
+        ("/quality-review", "🧪", "품질 회고"),
         ("/settings",  "⚙️",  "설정"),
     ]
     links = "".join(
@@ -866,28 +947,70 @@ def api_stats():
 def queue_page():
     msg = request.args.get("msg", "")
     err = request.args.get("err", "")
-    rows = get_queue()
+    show_all = request.args.get("show_all") == "1"
+    all_rows = get_queue()
+    _DONE_STATUSES = {"published", "skipped"}
+    hidden_count = sum(1 for r in all_rows if r["status"] in _DONE_STATUSES)
+    rows = all_rows if show_all else [r for r in all_rows if r["status"] not in _DONE_STATUSES]
+
+    _STATUS_LABELS = {
+        "pending": "대기 중",
+        "ready": "준비됨",
+        "published": "발행완료",
+        "skipped": "건너뜀",
+        "processing": "처리 중",
+    }
 
     def _badge(s):
         cls = {"pending": "pending", "published": "published", "skipped": "skipped"}.get(s, "pending")
-        return f'<span class="badge badge-{cls}">{s}</span>'
+        label = _STATUS_LABELS.get(s, s)
+        return f'<span class="badge badge-{cls}">{escape(label)}</span>'
+
+    def _error_cell(r):
+        code = r["publish_error_code"] if "publish_error_code" in r.keys() else None
+        if not code or code == "PUBLISH_IN_PROGRESS":
+            return ""
+        retry_btn = ""
+        if r["status"] not in ("published", "skipped", "processing"):
+            retry_btn = (
+                f"<form method='post' action='/queue/retry/{r['id']}' style='display:inline;margin-left:6px' "
+                "onsubmit=\"return confirm('실제 Instagram에 이미 게시됐을 수도 있습니다 — 계정을 먼저 확인한 "
+                "뒤에도 다시 시도하시겠습니까?')\">"
+                "<button class='btn btn-secondary' style='padding:2px 8px;font-size:11px'>재시도</button></form>"
+            )
+        return (
+            f"<div style='color:var(--danger,#f87171);font-size:11px;margin-top:2px'>"
+            f"{escape(code)}{retry_btn}</div>"
+        )
 
     trs = "".join(
         f"<tr><td style='color:var(--muted);font-size:12px'>#{r['id']}</td>"
-        f"<td style='font-weight:500'>{r['topic']}</td>"
+        f"<td style='font-weight:500'>{escape(r['topic'])}{_error_cell(r)}</td>"
         f"<td>{_badge(r['status'])}</td>"
         f"<td style='color:var(--muted);font-size:12px'>{r['scheduled_at'] or '다음 차례'}</td>"
         f"<td><form method='post' action='/queue/skip/{r['id']}' style='margin:0'>"
         f"<button class='btn btn-danger' style='padding:5px 12px;font-size:12px'>건너뜀</button></form></td></tr>"
         for r in rows
-    ) or "<tr><td colspan='5' class='empty' style='padding:30px'><div class='empty-icon'>📭</div><p>큐가 비어있습니다</p></td></tr>"
+    ) or (
+        f"<tr><td colspan='5' class='empty' style='padding:30px'><div class='empty-icon'>📭</div>"
+        f"<p>{'큐가 비어있습니다' if show_all or not hidden_count else '대기 중인 항목이 없습니다 (완료된 항목은 숨김)'}</p></td></tr>"
+    )
+
+    toggle_link = (
+        f"<a href='/queue?show_all=0' class='btn btn-secondary' style='padding:5px 12px;font-size:12px'>완료 항목 숨기기</a>"
+        if show_all else
+        f"<a href='/queue?show_all=1' class='btn btn-secondary' style='padding:5px 12px;font-size:12px'>전체 보기 ({hidden_count}개 완료 숨김)</a>"
+    ) if (show_all or hidden_count) else ""
 
     body = f"""
     <div style="display:grid;grid-template-columns:1fr 320px;gap:20px;align-items:start">
       <div class="panel">
         <div class="panel-header">
           <div class="panel-title">예약 목록</div>
-          <span class="badge badge-pending">{len(rows)}개 대기</span>
+          <div style="display:flex;gap:8px;align-items:center">
+            {toggle_link}
+            <span class="badge badge-pending">{len(rows)}개 표시</span>
+          </div>
         </div>
         <div class="table-wrap">
           <table>
@@ -908,16 +1031,235 @@ def queue_page():
             <div class="panel-title">뉴스 자동 수집</div>
           </div>
           <p class="panel-sub" style="margin-bottom:14px">최신 AI 뉴스에서 주제를 자동으로 수집해 큐에 추가합니다. (Tavily 필요)</p>
-          <form method="post" action="/queue/generate">
+          <form method="post" action="/queue/generate" id="autoCollectForm"
+                onsubmit="const b=document.getElementById('autoCollectBtn'); b.disabled=true; b.textContent='⏳ 수집 중... (완료까지 잠시 기다려주세요)';">
             <div class="input-group">
               <label class="input-label">추가할 주제 수</label>
               <input name="count" type="number" value="3" min="1" max="10">
             </div>
-            <button type="submit" class="btn btn-secondary" style="width:100%">자동 수집 시작</button>
+            <button type="submit" id="autoCollectBtn" class="btn btn-secondary" style="width:100%">자동 수집 시작</button>
           </form>
         </div>
       </div>
-    </div>"""
+    </div>
+
+    <div class="panel" style="margin-top:20px">
+      <div class="panel-header">
+        <div class="panel-title">다음 항목 발행 준비</div>
+      </div>
+      <p class="panel-sub" style="margin-bottom:14px">
+        큐 맨 앞 항목을 생성해 미리보기를 보여줍니다. 실제 Instagram 발행은
+        아래에서 직접 승인해야만 진행됩니다 — 자동으로 올라가지 않습니다.
+      </p>
+      <button id="prepareBtn" class="btn btn-secondary">🔍 다음 항목 미리보기 생성</button>
+    </div>
+
+    <div id="qProgressPanel" style="display:none;margin-top:20px">
+      <div class="panel">
+        <div class="panel-header">
+          <div class="panel-title" id="qProgressTitle">준비 중...</div>
+          <span id="qProgressBadge" class="badge badge-pending">실행 중</span>
+        </div>
+        <div class="progress-bar"><div class="progress-fill" style="width:100%"></div></div>
+        <div id="qLogBox" class="logbox"></div>
+      </div>
+    </div>
+
+    <div id="qPreviewPanel" style="display:none;margin-top:20px">
+      <div class="panel">
+        <div class="panel-header">
+          <div class="panel-title" id="qPreviewTitle">미리보기</div>
+          <div style="display:flex;gap:8px">
+            <button id="qApproveBtn" class="btn btn-primary">✅ 승인해서 발행</button>
+            <button id="qRejectBtn" class="btn btn-danger">❌ 거절</button>
+          </div>
+        </div>
+        <div id="qCardGrid" class="card-grid" style="margin-bottom:16px"></div>
+        <div id="qCaptionBox" class="logbox" style="display:none;height:auto;max-height:120px;white-space:pre-wrap"></div>
+      </div>
+    </div>
+
+<script>
+let qJobId = null;
+let qQueueId = null;
+
+// 다른 페이지에 갔다가 돌아오거나 새로고침하면 브라우저 쪽 JS 상태는 다
+// 사라지지만, 백그라운드 스레드는 계속 돌고 있을 수 있다 — 그래서 서버에
+// "지금 진행 중인 작업이 있는지" 물어보고, 있으면 지금까지의 로그를 재생한
+// 뒤 이어서 실시간 업데이트를 받는다.
+fetch('/queue/current_job')
+  .then(r => r.json())
+  .then(data => {{
+    if (!data.job_id) return;
+    qJobId = data.job_id;
+    document.getElementById('prepareBtn').disabled = true;
+    document.getElementById('qProgressPanel').style.display = 'block';
+    document.getElementById('qProgressTitle').textContent =
+      data.mode === 'publish' ? '발행 중... (다른 곳에 있는 동안 계속 진행되고 있었습니다)'
+                               : '다음 항목 준비 중... (다른 곳에 있는 동안 계속 진행되고 있었습니다)';
+    document.getElementById('qProgressBadge').textContent = '실행 중';
+    document.getElementById('qProgressBadge').className = 'badge badge-pending';
+    const logBox = document.getElementById('qLogBox');
+    logBox.innerHTML = '';
+    (data.logs || []).forEach(line => {{
+      const div = document.createElement('div');
+      div.textContent = line;
+      logBox.appendChild(div);
+    }});
+    logBox.scrollTop = logBox.scrollHeight;
+    qListenSSE(qJobId, data.mode);
+  }})
+  .catch(() => {{}});
+
+document.getElementById('prepareBtn').addEventListener('click', () => {{
+  document.getElementById('qProgressPanel').style.display = 'block';
+  document.getElementById('qPreviewPanel').style.display = 'none';
+  document.getElementById('qLogBox').innerHTML = '';
+  document.getElementById('qProgressTitle').textContent = '다음 항목 준비 중...';
+  document.getElementById('qProgressBadge').textContent = '실행 중';
+  document.getElementById('qProgressBadge').className = 'badge badge-pending';
+  document.getElementById('prepareBtn').disabled = true;
+
+  fetch('/queue/prepare_next', {{method: 'POST'}})
+    .then(r => r.json())
+    .then(data => {{
+      if (!data.job_id) {{
+        qLogErr(data.error || '준비를 시작하지 못했습니다.');
+        document.getElementById('prepareBtn').disabled = false;
+        return;
+      }}
+      qJobId = data.job_id;
+      qListenSSE(qJobId, 'prepare');
+    }});
+}});
+
+document.getElementById('qApproveBtn').addEventListener('click', () => {{
+  if (!qQueueId) {{
+    qLogErr('발행할 항목을 확인하지 못했습니다. 미리보기를 다시 생성해 주세요.');
+    return;
+  }}
+  if (!confirm('실제 Instagram 계정(@algo__kr)에 지금 바로 게시됩니다. 진행할까요?')) return;
+  document.getElementById('qApproveBtn').disabled = true;
+  document.getElementById('qRejectBtn').disabled = true;
+  document.getElementById('qProgressPanel').style.display = 'block';
+  document.getElementById('qProgressTitle').textContent = '발행 중...';
+  document.getElementById('qProgressBadge').textContent = '실행 중';
+  document.getElementById('qProgressBadge').className = 'badge badge-pending';
+  document.getElementById('qLogBox').innerHTML = '';
+
+  fetch('/queue/approve_publish', {{
+    method: 'POST',
+    headers: {{'Content-Type': 'application/json'}},
+    body: JSON.stringify({{queue_id: qQueueId}}),
+  }})
+    .then(r => r.json())
+    .then(data => {{
+      if (!data.job_id) {{
+        qLogErr(data.error || '발행을 시작하지 못했습니다.');
+        return;
+      }}
+      qListenSSE(data.job_id, 'publish');
+    }});
+}});
+
+document.getElementById('qRejectBtn').addEventListener('click', () => {{
+  if (!qQueueId) return;
+  if (!confirm('이 항목을 건너뛸까요?')) return;
+  fetch(`/queue/skip/${{qQueueId}}`, {{method: 'POST'}})
+    .then(() => window.location.reload());
+}});
+
+function qLogErr(msg) {{
+  document.getElementById('qProgressBadge').textContent = '오류';
+  document.getElementById('qProgressBadge').className = 'badge badge-skipped';
+  const line = document.createElement('div');
+  line.className = 'log-err';
+  line.textContent = '✕ ' + msg;
+  document.getElementById('qLogBox').appendChild(line);
+}}
+
+function qListenSSE(jobId, mode) {{
+  const evtSource = new EventSource(`/generate/stream/${{jobId}}`);
+  const logBox = document.getElementById('qLogBox');
+
+  evtSource.addEventListener('log', e => {{
+    const line = document.createElement('div');
+    line.textContent = e.data;
+    logBox.appendChild(line);
+    logBox.scrollTop = logBox.scrollHeight;
+  }});
+
+  evtSource.addEventListener('done', e => {{
+    evtSource.close();
+    const info = JSON.parse(e.data);
+    qQueueId = info.queue_id;
+    document.getElementById('qProgressBadge').textContent = '완료';
+    document.getElementById('qProgressBadge').className = 'badge badge-published';
+    document.getElementById('prepareBtn').disabled = false;
+
+    if (mode === 'prepare') {{
+      qShowPreview(info.image_dir, info.topic, info.count, info.filenames);
+    }} else {{
+      document.getElementById('qPreviewPanel').style.display = 'none';
+      const line = document.createElement('div');
+      line.className = 'log-done';
+      line.textContent = `✓ "${{info.topic}}" 실제 Instagram 발행 완료`;
+      logBox.appendChild(line);
+    }}
+  }});
+
+  evtSource.addEventListener('error', e => {{
+    evtSource.close();
+    document.getElementById('prepareBtn').disabled = false;
+    document.getElementById('qApproveBtn').disabled = false;
+    document.getElementById('qRejectBtn').disabled = false;
+    qLogErr(e.data || '서버 연결이 끊겼습니다.');
+  }});
+}}
+
+function qShowPreview(dirName, topic, count, filenames) {{
+  document.getElementById('qPreviewPanel').style.display = 'block';
+  document.getElementById('qPreviewTitle').textContent = `"${{topic}}" — ${{count}}장 (아직 미발행)`;
+  document.getElementById('qApproveBtn').disabled = false;
+  document.getElementById('qRejectBtn').disabled = false;
+  const grid = document.getElementById('qCardGrid');
+  grid.innerHTML = '';
+  const safeFilenames = filenames || [];
+
+  const allSrcs = [];
+  for (let i = 1; i <= count; i++) {{
+    const num = String(i).padStart(2, '0');
+    const fname = safeFilenames.find(f => f.startsWith(`card_${{num}}_`)) || `card_${{num}}.png`;
+    allSrcs.push(`/output_img/${{dirName}}/${{fname}}`);
+  }}
+
+  for (let i = 1; i <= count; i++) {{
+    const src = allSrcs[i - 1];
+    const isVideo = src.toLowerCase().endsWith('.mp4');
+    const div = document.createElement('div');
+    div.className = 'card-thumb';
+    div.style.cursor = 'zoom-in';
+    div.onclick = () => openLightbox(src, allSrcs, i - 1, []);
+    if (isVideo) {{
+      div.innerHTML = `<video src="${{src}}" autoplay loop muted playsinline style="width:100%;height:100%;object-fit:cover;border-radius:var(--radius-sm);background:#000;"></video>
+        <div class="num-badge">${{i}}/${{count}}</div>`;
+    }} else {{
+      div.innerHTML = `<img src="${{src}}"><div class="num-badge">${{i}}/${{count}}</div>`;
+    }}
+    grid.appendChild(div);
+  }}
+
+  fetch(`/caption/${{dirName}}`)
+    .then(r => r.text())
+    .then(txt => {{
+      if (txt) {{
+        document.getElementById('qCaptionBox').style.display = 'block';
+        document.getElementById('qCaptionBox').textContent = txt;
+      }}
+    }});
+}}
+</script>
+"""
     return _page("큐 관리", "/queue", body, msg=msg, err=err)
 
 
@@ -931,8 +1273,35 @@ def queue_add():
 
 @app.route("/queue/skip/<int:qid>", methods=["POST"])
 def queue_skip(qid: int):
-    mark_queue_status(qid, "skipped")
-    return redirect(url_for("queue_page", msg=f"#{qid} 건너뜀"))
+    # 큐 워커(스케줄러/자동 수집)가 이미 이 항목을 발행 시도 중일 수 있다 —
+    # 그 경우 조건부 UPDATE라 아무것도 안 바뀌고, 이미 시작된 실제 인스타
+    # 발행은 이 시점엔 막을 방법이 없다. 조용히 "건너뜀"이라고 속이지 않고
+    # 정확한 상태를 알려준다.
+    if try_mark_queue_skipped(qid):
+        return redirect(url_for("queue_page", msg=f"#{qid} 건너뜀"))
+    return redirect(url_for(
+        "queue_page",
+        err=f"#{qid}는 이미 발행이 진행 중이라 건너뛸 수 없습니다.",
+    ))
+
+
+@app.route("/queue/retry/<int:qid>", methods=["POST"])
+def queue_retry(qid: int):
+    """Manually clear a permanent publish error so the row is retryable.
+
+    Meant to be clicked only after the operator has actually checked whether
+    the Instagram post already went out for an uncertain-remote-publish
+    error — clear_queue_error() itself has no way to know that, it only
+    enforces that it can't touch a row that's already published, skipped,
+    or mid-attempt.
+    """
+    from src.db import clear_queue_error
+    if clear_queue_error(qid):
+        return redirect(url_for("queue_page", msg=f"#{qid} 오류 지움 — 재시도 가능"))
+    return redirect(url_for(
+        "queue_page",
+        err=f"#{qid}는 이미 발행됐거나 처리 중이라 재시도할 수 없습니다.",
+    ))
 
 
 @app.route("/queue/generate", methods=["POST"])
@@ -944,6 +1313,213 @@ def queue_generate():
         return redirect(url_for("queue_page", msg=f"{count}개 자동 추가 완료"))
     except Exception as e:
         return redirect(url_for("queue_page", err=str(e)))
+
+
+# ── 큐 다음 항목: 미리보기 생성 → 사람 승인 → 발행 ──────────
+# wait_for_approval()은 터미널 input() 기반이라 웹에서 쓸 수 없다. 그래서
+# "생성"과 "발행"을 두 단계로 쪼갠다: 먼저 publish_to_ig=False로 렌더링만
+# 하고 화면에 보여준 뒤(이때 image_dir가 큐 행에 저장돼 'ready' 상태가
+# 된다), 사람이 승인을 누르면 그제서야 그 렌더링을 그대로 발행한다 —
+# 재생성하지 않으므로 승인한 화면과 실제로 올라가는 카드가 항상 같다.
+
+def _run_queue_prepare_job(job_id: str) -> None:
+    global _ACTIVE_QUEUE_JOB
+    _ACTIVE_QUEUE_JOB = {"job_id": job_id, "mode": "prepare"}
+    q = _JOB_QUEUES[job_id]
+    job = _JOBS[job_id]
+    job["status"] = "running"
+
+    class _StreamCapture(io.TextIOBase):
+        def write(self, s: str):
+            if s.strip():
+                job["logs"].append(s.rstrip())
+                _emit(q, "log", s.rstrip().replace("\n", " "))
+            return len(s)
+        def flush(self): pass
+
+    old_stdout = sys.stdout
+    sys.stdout = _StreamCapture()
+    try:
+        from src.agents.content_queue import publish_next
+        # require_human_approval=False는 파이프라인의 auto=True를 켠다 —
+        # 이게 없으면 각도 선택기(angle_selector)가 대화형 input()으로
+        # 떨어져 대시보드의 stdin 없는 백그라운드 스레드에서 EOFError가 난다.
+        result = publish_next(publish_to_ig=False, require_human_approval=False)
+        sys.stdout = old_stdout
+
+        if result and result.get("paths"):
+            paths = result["paths"]
+            job["status"] = "done"
+            job["paths"] = [str(p) for p in paths]
+            job["queue_id"] = result["id"]
+            job["topic"] = result["topic"]
+            job["image_dir"] = str(paths[0].parent)
+            cap_path = paths[0].parent / "caption.txt"
+            if cap_path.exists():
+                job["caption"] = cap_path.read_text(encoding="utf-8")
+            _emit(q, "done", json.dumps({
+                "job_id": job_id,
+                "queue_id": result["id"],
+                "topic": result["topic"],
+                "count": len(paths),
+                "image_dir": paths[0].parent.name,
+                "filenames": [p.name for p in paths],
+            }))
+        else:
+            job["status"] = "error"
+            job["error"] = "대기 중인 큐 항목이 없거나 생성에 실패했습니다."
+            _emit(q, "error", job["error"])
+    except Exception as e:
+        sys.stdout = old_stdout
+        tb = traceback.format_exc()
+        job["status"] = "error"
+        job["error"] = str(e)
+        for tb_line in tb.splitlines():
+            _emit(q, "log", f"[TB] {tb_line}")
+        _emit(q, "error", str(e))
+    finally:
+        sys.stdout = old_stdout
+        q.put(None)
+        _ACTIVE_QUEUE_JOB = None
+        _GENERATION_LOCK.release()
+
+
+@app.route("/queue/prepare_next", methods=["POST"])
+def queue_prepare_next():
+    if not _GENERATION_LOCK.acquire(blocking=False):
+        return {"error": "이미 다른 작업이 진행 중입니다. 완료 후 다시 시도해 주세요."}, 409
+
+    _evict_old_jobs()
+    job_id = str(uuid.uuid4())[:8]
+    q = queue.Queue()
+    _JOB_QUEUES[job_id] = q
+    _JOBS[job_id] = {
+        "status": "pending", "logs": [], "paths": [], "topic": "",
+        "image_dir": "", "caption": "", "error": "", "queue_id": None,
+    }
+    t = threading.Thread(target=_run_queue_prepare_job, args=(job_id,), daemon=True)
+    try:
+        t.start()
+    except BaseException:
+        _GENERATION_LOCK.release()
+        raise
+    return {"job_id": job_id}
+
+
+def _run_queue_publish_job(job_id: str, queue_id: int) -> None:
+    global _ACTIVE_QUEUE_JOB
+    _ACTIVE_QUEUE_JOB = {"job_id": job_id, "mode": "publish"}
+    q = _JOB_QUEUES[job_id]
+    job = _JOBS[job_id]
+    job["status"] = "running"
+
+    class _StreamCapture(io.TextIOBase):
+        def write(self, s: str):
+            if s.strip():
+                job["logs"].append(s.rstrip())
+                _emit(q, "log", s.rstrip().replace("\n", " "))
+            return len(s)
+        def flush(self): pass
+
+    old_stdout = sys.stdout
+    sys.stdout = _StreamCapture()
+    try:
+        from src.agents.content_queue import publish_specific
+        # publish_next()가 아니라 publish_specific(queue_id)를 쓴다 —
+        # publish_next()는 "큐에서 다음 차례"를 그냥 대기열 순서대로 꺼내므로,
+        # 사람이 미리보기로 검토한 바로 그 항목이 아니라 완전히 다른(검토
+        # 안 된) 항목을 대신 처리할 수 있다 — 실제로 그런 일이 있었다.
+        #
+        # require_human_approval=False: 사람이 이미 대시보드에서 카드를 직접
+        # 보고 승인한 뒤 이 라우트를 눌렀으므로, 여기서 다시 파이프라인 내부
+        # 승인 단계(터미널 input())를 거칠 필요가 없다 — 그 단계는 stdin이
+        # 없는 백그라운드 스레드에서 EOFError만 낸다. 정상 경로는 캐시된
+        # 렌더링을 그대로 올리는 _publish_cached_render라 애초에 승인
+        # 단계를 타지 않지만, image_dir가 없어 전체 파이프라인으로 떨어지는
+        # 예외 상황까지 대비해 명시한다.
+        result = publish_specific(
+            queue_id, publish_to_ig=True, require_human_approval=False
+        )
+        sys.stdout = old_stdout
+
+        if result:
+            job["status"] = "done"
+            job["queue_id"] = result["id"]
+            job["topic"] = result["topic"]
+            _emit(q, "done", json.dumps({
+                "job_id": job_id,
+                "queue_id": result["id"],
+                "topic": result["topic"],
+            }))
+        else:
+            job["status"] = "error"
+            job["error"] = "발행에 실패했습니다. [큐] 페이지에서 오류 코드를 확인하세요."
+            _emit(q, "error", job["error"])
+    except Exception as e:
+        sys.stdout = old_stdout
+        tb = traceback.format_exc()
+        job["status"] = "error"
+        job["error"] = str(e)
+        for tb_line in tb.splitlines():
+            _emit(q, "log", f"[TB] {tb_line}")
+        _emit(q, "error", str(e))
+    finally:
+        sys.stdout = old_stdout
+        q.put(None)
+        _ACTIVE_QUEUE_JOB = None
+        _GENERATION_LOCK.release()
+
+
+@app.route("/queue/current_job")
+def queue_current_job():
+    """Lets the /queue page reconnect after a navigation/reload if a
+    prepare/publish job is still actually running in the background -
+    otherwise the page shows nothing and there's no way to tell whether
+    work is still in flight or the earlier 409 ("already running") was
+    about a job the user can no longer see."""
+    from flask import jsonify
+
+    if _ACTIVE_QUEUE_JOB is None:
+        return jsonify(job_id=None)
+    job_id = _ACTIVE_QUEUE_JOB["job_id"]
+    job = _JOBS.get(job_id)
+    if job is None:
+        return jsonify(job_id=None)
+    return jsonify(
+        job_id=job_id,
+        mode=_ACTIVE_QUEUE_JOB["mode"],
+        logs=job.get("logs", []),
+    )
+
+
+@app.route("/queue/approve_publish", methods=["POST"])
+def queue_approve_publish():
+    data = request.get_json(silent=True) or {}
+    try:
+        queue_id = int(data.get("queue_id"))
+    except (TypeError, ValueError):
+        return {"error": "발행할 항목을 확인하지 못했습니다. 미리보기를 다시 생성해 주세요."}, 400
+
+    if not _GENERATION_LOCK.acquire(blocking=False):
+        return {"error": "이미 다른 작업이 진행 중입니다. 완료 후 다시 시도해 주세요."}, 409
+
+    _evict_old_jobs()
+    job_id = str(uuid.uuid4())[:8]
+    q = queue.Queue()
+    _JOB_QUEUES[job_id] = q
+    _JOBS[job_id] = {
+        "status": "pending", "logs": [], "paths": [], "topic": "",
+        "image_dir": "", "caption": "", "error": "", "queue_id": None,
+    }
+    t = threading.Thread(
+        target=_run_queue_publish_job, args=(job_id, queue_id), daemon=True
+    )
+    try:
+        t.start()
+    except BaseException:
+        _GENERATION_LOCK.release()
+        raise
+    return {"job_id": job_id}
 
 
 @app.route("/queue/suggest")
@@ -1061,6 +1637,96 @@ def analytics_chart():
     return "차트 없음", 404
 
 
+# ── /quality-review 주간 품질 회고 ───────────────────────
+
+@app.route("/quality-review")
+def quality_review_page():
+    from src.analytics.weekly_review import get_latest_weekly_quality_review
+
+    msg = request.args.get("msg", "")
+    err = request.args.get("err", "")
+    report = get_latest_weekly_quality_review()
+    if report is None:
+        status = "INSUFFICIENT_DATA"
+        metrics = {}
+        issues = []
+        proposal = None
+        period = "아직 실행된 회고가 없습니다."
+    else:
+        status = report["status"]
+        metrics = report.get("metrics", {})
+        issues = report.get("top_issues", [])
+        proposal = report.get("experiment_proposal")
+        period = f"{report['week_start'][:10]} ~ {report['week_end'][:10]}"
+
+    metric_cards = "".join(
+        f'<div class="stat-card"><div class="val">{html.escape(str(value))}</div>'
+        f'<div class="lbl">{html.escape(label)}</div></div>'
+        for label, value in (
+            ("실제 실행", metrics.get("real_run_count", 0)),
+            ("생성 성공률", f"{metrics.get('generation_success_rate', 0) * 100:.1f}%"),
+            ("평균 수정률", f"{metrics.get('avg_text_edit_ratio', 0) * 100:.1f}%"),
+            ("평균 검토 시간", f"{metrics.get('avg_review_duration_sec', 0):.1f}초"),
+            ("저장률", f"{metrics.get('save_rate', 0) * 100:.2f}%"),
+            ("근거 주장 비율", f"{metrics.get('avg_grounded_claim_rate', 0) * 100:.1f}%"),
+        )
+    )
+    issue_rows = "".join(
+        f"<tr><td>{html.escape(str(item['code']))}</td><td>{int(item['count'])}</td></tr>"
+        for item in issues
+    ) or "<tr><td colspan='2' style='color:var(--muted)'>기록된 이슈 없음</td></tr>"
+
+    if proposal:
+        proposal_html = f"""
+        <div class="panel-title">승인 대기 실험 초안</div>
+        <p style="margin-top:12px"><strong>가설</strong> · {html.escape(proposal['hypothesis'])}</p>
+        <p><strong>변경안</strong> · {html.escape(proposal['change'])}</p>
+        <p><strong>주 지표</strong> · {html.escape(proposal['primary_metric'])}</p>
+        <div class="alert alert-ok" style="margin-top:14px">자동 적용 없음 · 사람이 승인해야 실험으로 전환됩니다.</div>
+        """
+    else:
+        proposal_html = (
+            "<div class='panel-title'>INSUFFICIENT_DATA</div>"
+            "<p class='panel-sub' style='margin-top:10px'>실제 실행 3건과 편집 피드백 1건이 쌓이면 "
+            "개선 실험 초안 1건을 제안합니다.</p>"
+        )
+
+    body = f"""
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:20px">
+      <div><div style="font-size:13px;color:var(--muted)">{period}</div>
+      <div style="font-size:16px;font-weight:700;margin-top:4px">상태: {status}</div></div>
+      <form method="post" action="/quality-review/run">
+        <button class="btn btn-primary">주간 회고 실행</button>
+      </form>
+    </div>
+    <div class="stat-grid">{metric_cards}</div>
+    <div style="display:grid;grid-template-columns:1fr 1.4fr;gap:20px">
+      <div class="panel"><div class="panel-title">반복 이슈 Top 3</div>
+        <div class="table-wrap" style="margin-top:14px"><table>
+          <thead><tr><th>이슈</th><th>횟수</th></tr></thead><tbody>{issue_rows}</tbody>
+        </table></div>
+      </div>
+      <div class="panel">{proposal_html}</div>
+    </div>
+    <div class="panel-sub" style="margin-top:16px">이 기능은 통계와 초안만 저장합니다. 게시, 정책 변경, 실험 활성화는 수행하지 않습니다.</div>
+    """
+    return _page("주간 카드뉴스 품질 회고", "/quality-review", body, msg=msg, err=err)
+
+
+@app.route("/quality-review/run", methods=["POST"])
+def quality_review_run():
+    try:
+        from src.analytics.weekly_review import run_weekly_quality_review
+
+        report = run_weekly_quality_review()
+        return redirect(url_for(
+            "quality_review_page",
+            msg=f"회고 완료: {report['status']}",
+        ))
+    except Exception as exc:
+        return redirect(url_for("quality_review_page", err=str(exc)))
+
+
 # ── /settings 설정 ────────────────────────────────────────
 
 @app.route("/settings")
@@ -1072,10 +1738,9 @@ def settings_page():
     persona_raw = persona_path.read_text(encoding="utf-8") if persona_path.exists() else "{}"
 
     # .env 키 현황
-    from dotenv import load_dotenv
     load_dotenv(ROOT / ".env")
     keys = [
-        "OPENAI_API_KEY", "TAVILY_API_KEY", "PEXELS_API_KEY",
+        "OPENAI_API_KEY", "TAVILY_API_KEY", "PEXELS_API_KEY", "YOUTUBE_API_KEY",
         "IG_ACCESS_TOKEN", "IG_USER_ID",
         "THREADS_ACCESS_TOKEN", "THREADS_USER_ID",
         "TISTORY_ACCESS_TOKEN",
@@ -1162,17 +1827,20 @@ def _run_pipeline_job(job_id: str, topic: str, auto: bool, make_reels: bool) -> 
     sys.stdout = _StreamCapture()
 
     try:
+        selected_item = None
         if auto:
             from src.agents.news_collector import collect_and_select
             sel = collect_and_select()
             _emit(q, "topic", sel.topic)
             actual_topic = sel.topic
-            trend_ctx = sel.context
+            selected_item = sel.selected_item
         else:
             actual_topic = topic
-            trend_ctx = ""
 
-        from src.pipeline import run_pipeline
+        from src.services.generation_service import (
+            collect_verified_lineage,
+            execute_generation,
+        )
         from src.persona import load_persona, resolve_persona
         from src.agents.topic_refiner import refine_topic
 
@@ -1181,7 +1849,7 @@ def _run_pipeline_job(job_id: str, topic: str, auto: bool, make_reels: bool) -> 
         #   → TrendAnalyzer가 반드시 실행돼야 기사 전문과 영상 후보를 제대로 가져옴.
         #   → 정제는 주제 문자열만 바꾸고, topic_refined=True를 pipeline에 전달해 2번 정제를 막음.
         topic_was_refined = False
-        if not trend_ctx:
+        if not auto:
             try:
                 refined_topic, _rfr, _article_content = refine_topic(actual_topic)
                 if refined_topic != actual_topic:
@@ -1199,22 +1867,30 @@ def _run_pipeline_job(job_id: str, topic: str, auto: bool, make_reels: bool) -> 
             "name": _resolved_p.topic_category,
             "color": _resolved_p.primary_color,
         }))
-        paths = run_pipeline(
+        _emit(q, "log", "🔎 원문과 보조 출처를 수집해 검증 가능한 근거를 구성합니다.")
+        if auto and selected_item is None:
+            raise RuntimeError("AUTO_SELECTED_SOURCE_MISSING")
+        source_lineage = collect_verified_lineage(
+            actual_topic,
+            selected_title=selected_item.title if selected_item else "",
+            selected_url=selected_item.url if selected_item else "",
+            selected_content=selected_item.summary if selected_item else "",
+        )
+        result = execute_generation(
             topic=actual_topic,
-            trend_context=trend_ctx,
+            source_lineage=source_lineage,
             make_reels=make_reels,
-            fact_check=True,
-            auto=True,   # 대시보드에서는 사용자 입력 없이 자동 선택
-            topic_refined=topic_was_refined,  # 2번 정제 방지
         )
 
         sys.stdout = old_stdout
 
-        if paths:
+        if result.generation_succeeded and result.image_paths:
+            paths = result.image_paths
             job["status"] = "done"
             job["paths"] = [str(p) for p in paths]
             job["topic"] = actual_topic
             job["image_dir"] = str(paths[0].parent)
+            job["run_id"] = result.run_id
 
             # caption.txt 읽기
             caption_path = paths[0].parent / "caption.txt"
@@ -1230,7 +1906,10 @@ def _run_pipeline_job(job_id: str, topic: str, auto: bool, make_reels: bool) -> 
             }))
         else:
             job["status"] = "error"
-            job["error"] = "파이프라인이 빈 결과를 반환했습니다."
+            job["error"] = (
+                f"{result.failure_stage or 'pipeline'}: "
+                f"{result.error_code or 'EMPTY_PIPELINE_RESULT'}"
+            )
             _emit(q, "error", job["error"])
 
     except Exception as e:
@@ -1246,6 +1925,8 @@ def _run_pipeline_job(job_id: str, topic: str, auto: bool, make_reels: bool) -> 
     finally:
         sys.stdout = old_stdout
         q.put(None)  # SSE 스트림 종료 신호
+        # 락은 /generate/start(요청 스레드)에서 잡고 여기서 푼다.
+        _GENERATION_LOCK.release()
 
 
 @app.route("/generate", methods=["GET"])
@@ -1397,6 +2078,15 @@ function startJob(topic, auto, reels) {{
   }})
   .then(r => r.json())
   .then(data => {{
+    if (!data.job_id) {{
+      document.getElementById('progressBadge').textContent = '대기';
+      document.getElementById('progressBadge').className = 'badge badge-skipped';
+      const line = document.createElement('div');
+      line.className = 'log-err';
+      line.textContent = '✕ ' + (data.error || '생성을 시작하지 못했습니다.');
+      document.getElementById('logBox').appendChild(line);
+      return;
+    }}
     currentJobId = data.job_id;
     listenSSE(currentJobId);
   }});
@@ -1454,7 +2144,12 @@ function listenSSE(jobId) {{
     document.getElementById('progressBadge').className = 'badge badge-skipped';
     const line = document.createElement('div');
     line.className = 'log-err';
-    line.textContent = '✕ 오류: ' + e.data;
+    // 서버가 보낸 error 이벤트에만 data가 있다. 브라우저가 연결 실패(서버 재시작,
+    // 네트워크 끊김)로 발생시키는 네이티브 error 이벤트에는 data가 없으므로,
+    // 그대로 출력하면 "undefined"가 찍힌다.
+    line.textContent = e.data
+      ? '✕ 오류: ' + e.data
+      : '✕ 서버 연결이 끊겨 진행 상황을 더 받지 못했습니다 (서버 재시작 등). 생성이 중단됐을 수 있습니다.';
     logBox.appendChild(line);
   }});
 }}
@@ -1538,6 +2233,18 @@ def generate_start():
     auto = data.get("auto", False)
     make_reels = data.get("reels", False)
 
+    if not _GENERATION_LOCK.acquire(blocking=False):
+        running = next(
+            (j.get("topic") or "제목 없음"
+             for j in _JOBS.values() if j.get("status") == "running"),
+            "",
+        )
+        return {
+            "error": f"이미 생성이 진행 중입니다{f' ({running})' if running else ''}. "
+                     "완료된 뒤에 다시 시도해 주세요."
+        }, 409
+
+    _evict_old_jobs()
     job_id = str(uuid.uuid4())[:8]
     q = queue.Queue()
     _JOB_QUEUES[job_id] = q
@@ -1556,7 +2263,12 @@ def generate_start():
         args=(job_id, topic, auto, make_reels),
         daemon=True,
     )
-    t.start()
+    try:
+        t.start()
+    except BaseException:
+        # 작업 스레드가 뜨지 못하면 락을 풀어 줄 주체가 없어진다.
+        _GENERATION_LOCK.release()
+        raise
     return {"job_id": job_id}
 
 
@@ -1591,10 +2303,13 @@ def generate_stream(job_id: str):
 
 @app.route("/output_img/<dir_name>/<filename>")
 def output_img(dir_name: str, filename: str):
-    img_path = ROOT / "output" / dir_name / filename
+    try:
+        img_path = _resolve_output_file(dir_name, filename)
+    except ValueError as exc:
+        return str(exc), 400
     if not img_path.exists():
         # 파일명 패턴 탐색
-        parent = ROOT / "output" / dir_name
+        parent = img_path.parent
         candidates = list(parent.glob(filename.rsplit("_", 1)[0] + "*.*"))
         cans = [c for c in candidates if c.suffix.lower() in [".png", ".mp4"]]
         if cans:
@@ -1608,7 +2323,10 @@ def output_img(dir_name: str, filename: str):
 
 @app.route("/caption/<dir_name>")
 def caption(dir_name: str):
-    p = ROOT / "output" / dir_name / "caption.txt"
+    try:
+        p = _resolve_output_file(dir_name, "caption.txt")
+    except ValueError as exc:
+        return str(exc), 400
     if p.exists():
         return p.read_text(encoding="utf-8")
     return ""
@@ -1618,11 +2336,21 @@ def caption(dir_name: str):
 
 @app.route("/preview/<dir_name>")
 def preview_page(dir_name: str):
-    d = ROOT / "output" / dir_name
+    try:
+        d = _resolve_output_dir(dir_name)
+    except ValueError as exc:
+        return str(exc), 400
     if not d.exists():
         return "폴더 없음", 404
 
-    media_files = sorted(list(d.glob("card_*.png")) + list(d.glob("card_*.mp4")))
+    # 영상이 합성된 슬라이드는 정지 이미지와 mp4가 같은 이름으로 함께 남는다.
+    # 둘 다 실으면 같은 카드가 두 번 보이고, 슬라이드 번호를 목록 위치로 세는
+    # 아래 로직까지 밀려 영상 시작 시각이 엉뚱한 카드에 붙는다. 영상만 남긴다.
+    by_slide: dict[str, Path] = {}
+    for path in sorted(d.glob("card_*.png")) + sorted(d.glob("card_*.mp4")):
+        if path.suffix.lower() == ".mp4" or path.stem not in by_slide:
+            by_slide[path.stem] = path
+    media_files = [by_slide[stem] for stem in sorted(by_slide)]
     topic = dir_name[16:].replace("_", " ").strip()
 
     # 슬라이드별 수정 UI (script.json 있을 때만)
@@ -1741,6 +2469,17 @@ def preview_page(dir_name: str):
 {caption_html}
 {reels_html}
 
+<div class="panel" style="margin-top:20px">
+  <div class="panel-header"><div><div class="panel-title">사람 검토 결과</div>
+  <div class="panel-sub">승인·반려 기록은 주간 품질 회고에 반영되며 게시를 실행하지 않습니다.</div></div></div>
+  <div style="display:flex;gap:8px;align-items:center">
+    <input id="reviewReason" class="input" placeholder="검토 메모 (선택)" style="flex:1">
+    <button class="btn btn-primary" onclick="submitReview('APPROVED')">검토 승인</button>
+    <button class="btn btn-danger" onclick="submitReview('REJECTED')">반려</button>
+  </div>
+  <div id="reviewStatus" class="panel-sub" style="margin-top:10px"></div>
+</div>
+
 <!-- 슬라이드 수정 모달 -->
 <div id="editModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:1000;align-items:center;justify-content:center">
   <div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:28px;width:480px;max-width:90vw">
@@ -1748,7 +2487,7 @@ def preview_page(dir_name: str):
     <div style="font-size:12px;color:var(--muted);margin-bottom:16px">수정할 내용을 자연어로 입력하면 AI가 해당 슬라이드만 다시 씁니다.</div>
     <div class="input-group">
       <label class="input-label">수정 요청</label>
-      <textarea id="editInstruction" rows="3" placeholder="예: 더 충격적인 수치로 바꿔줘 / 더 쉬운 말로 / 실사용 예시 추가해줘"></textarea>
+      <textarea id="editInstruction" rows="3" placeholder="예: 원문 범위 안에서 더 쉽게 설명해줘 / 문장을 짧게 다듬어줘"></textarea>
     </div>
     <div style="display:flex;gap:8px;margin-top:12px">
       <button id="editSubmitBtn" class="btn btn-primary" onclick="submitEdit()">AI 수정 적용</button>
@@ -1761,9 +2500,12 @@ def preview_page(dir_name: str):
 <script>
 const DIR_NAME = {dir_name_js};
 let editSlideIndex = -1;
+let reviewStartedAt = Date.now();
+let editStartedAt = 0;
 
 function openEditModal(idx, btn) {{
   editSlideIndex = idx;
+  editStartedAt = Date.now();
   document.getElementById('editSlideNum').textContent = idx + 1;
   document.getElementById('editInstruction').value = '';
   document.getElementById('editStatus').textContent = '';
@@ -1782,7 +2524,12 @@ function submitEdit() {{
   fetch('/generate/edit_slide', {{
     method: 'POST',
     headers: {{'Content-Type': 'application/json'}},
-    body: JSON.stringify({{dir_name: DIR_NAME, slide_index: editSlideIndex, instruction}})
+    body: JSON.stringify({{
+      dir_name: DIR_NAME,
+      slide_index: editSlideIndex,
+      instruction,
+      review_duration_sec: Math.max(0, (Date.now() - editStartedAt) / 1000)
+    }})
   }})
   .then(r => r.json())
   .then(data => {{
@@ -1816,6 +2563,24 @@ function regenerateCaption() {{
       if (el && txt) el.textContent = txt;
     }});
 }}
+
+function submitReview(decision) {{
+  const reason = document.getElementById('reviewReason').value.trim();
+  fetch('/generate/review', {{
+    method: 'POST',
+    headers: {{'Content-Type': 'application/json'}},
+    body: JSON.stringify({{
+      dir_name: DIR_NAME,
+      decision,
+      reason,
+      review_duration_sec: Math.max(0, (Date.now() - reviewStartedAt) / 1000)
+    }})
+  }}).then(r => r.json()).then(data => {{
+    document.getElementById('reviewStatus').textContent = data.success
+      ? '✓ 검토 기록 완료 (게시되지 않음)'
+      : '✕ ' + data.error;
+  }});
+}}
 </script>
 """
     return _page(topic, "/generate", body)
@@ -1828,6 +2593,14 @@ def subtitle(video_id: str):
     _TRANSCRIPT_DIR = ROOT / "data" / "yt_cache" / "transcripts"
     _KO_DIR = _TRANSCRIPT_DIR / "ko"
     _KO_DIR.mkdir(parents=True, exist_ok=True)
+
+    # Flask의 <video_id> 컨버터는 "/"만 막고 "\\"는 안 막는다 — 다른
+    # output 라우트처럼 별도로 검증해야 한다. 검증 안 하면 Windows에서
+    # "\\" 경로 구분자를 타고 yt_cache/transcripts 밖의 파일을 읽고 쓸 수 있다.
+    try:
+        video_id = _safe_output_segment(video_id, "video_id")
+    except ValueError as exc:
+        return str(exc), 400
 
     # 1) 한국어 번역 캐시 확인
     ko_path = _KO_DIR / f"{video_id}.vtt"
@@ -1895,7 +2668,10 @@ def subtitle(video_id: str):
 
 @app.route("/output_video/<dir_name>/<filename>")
 def output_video(dir_name: str, filename: str):
-    p = ROOT / "output" / dir_name / filename
+    try:
+        p = _resolve_output_file(dir_name, filename)
+    except ValueError as exc:
+        return str(exc), 400
     if not p.exists():
         return "not found", 404
     return send_file(str(p), mimetype="video/mp4")
@@ -1906,34 +2682,56 @@ def output_video(dir_name: str, filename: str):
 @app.route("/generate/edit_slide", methods=["POST"])
 def edit_slide():
     """특정 슬라이드 1장만 GPT로 수정 후 재렌더링"""
-    data = request.get_json()
+    data = request.get_json(silent=True) or {}
     dir_name = data.get("dir_name", "")
     slide_index = int(data.get("slide_index", 0))   # 0-based
     instruction = data.get("instruction", "").strip()
+    review_duration_sec = max(0.0, float(data.get("review_duration_sec", 0) or 0))
 
     if not dir_name or not instruction:
         return {"success": False, "error": "dir_name / instruction 필수"}
 
-    d = ROOT / "output" / dir_name
+    try:
+        d = _resolve_output_dir(dir_name)
+    except ValueError as exc:
+        return {"success": False, "error": str(exc)}, 400
     script_path = d / "script.json"
     if not script_path.exists():
         return {"success": False, "error": "script.json 없음 (이전 버전 생성물)"}
+    meta_path = d / "meta.json"
+    lineage_path = d / "source_lineage.json"
+    if not meta_path.exists() or not lineage_path.exists():
+        return {
+            "success": False,
+            "error": "검증 가능한 run_id 또는 source lineage가 없어 수정을 차단합니다.",
+        }, 409
 
     try:
         import json as _json
+        from src.schemas.card_news import SourceLineage
+
         script_data = _json.loads(script_path.read_text(encoding="utf-8"))
+        meta = _json.loads(meta_path.read_text(encoding="utf-8"))
+        source_lineage = SourceLineage.model_validate_json(
+            lineage_path.read_text(encoding="utf-8")
+        )
         slides = script_data["slides"]
 
         if slide_index < 0 or slide_index >= len(slides):
             return {"success": False, "error": f"슬라이드 인덱스 범위 초과 (0~{len(slides)-1})"}
 
         slide = slides[slide_index]
+        original_text = f"{slide.get('title', '')}\n{slide.get('body', '')}".strip()
 
         # GPT로 해당 슬라이드만 재작성
         from langchain_openai import ChatOpenAI
         from src.config import OPENAI_API_KEY
 
-        llm = ChatOpenAI(model="gpt-4o", temperature=0.5, api_key=OPENAI_API_KEY)
+        llm = ChatOpenAI(model="gpt-4o", temperature=0.2, api_key=OPENAI_API_KEY)
+        evidence_text = "\n\n".join(
+            f"[{item.evidence_id}] {item.text[:4000]}"
+            for item in source_lineage.evidence_passages[:3]
+        )
         prompt = (
             f"인스타그램 카드뉴스 슬라이드를 수정해주세요.\n\n"
             f"주제: {script_data['topic']}\n"
@@ -1941,11 +2739,13 @@ def edit_slide():
             f"현재 제목: {slide['title']}\n"
             f"현재 내용: {slide['body']}\n\n"
             f"수정 요청: {instruction}\n\n"
+            f"허용된 원문 근거:\n{evidence_text}\n\n"
             f"규칙:\n"
             f"- 슬라이드 타입({slide['slide_type']})은 유지\n"
             f"- 제목: 15자 이내, 핵심 한 문장\n"
-            f"- 내용: 3~5줄, 각 줄 30자 이내, 구체적 수치 포함\n"
-            f"- 모호한 표현('~전망', '~예상') 금지\n\n"
+            f"- 내용: 3~5줄, 각 줄 30자 이내\n"
+            f"- 원문에 없는 수치·날짜·인명·회사명·인과관계를 추가하지 말 것\n"
+            f"- 원문보다 강한 단정이나 과장 표현을 쓰지 말 것\n\n"
             f"JSON으로만 출력:\n"
             f'{{ "title": "...", "body": "줄1\\n줄2\\n줄3" }}'
         )
@@ -1954,12 +2754,25 @@ def edit_slide():
         # JSON 파싱 (코드블록 제거)
         raw = re.sub(r"```[a-z]*\n?", "", raw).strip().strip("`")
         new_data = _json.loads(raw)
+        if not isinstance(new_data, dict) or not all(
+            isinstance(new_data.get(key), str) and new_data[key].strip()
+            for key in ("title", "body")
+        ):
+            raise ValueError("수정 응답에 title/body 문자열이 없습니다.")
 
-        # script.json 업데이트
+        from src.qa.editorial_verifier import validate_edited_slide
+
+        validate_edited_slide(
+            title=new_data["title"],
+            body=new_data["body"],
+            slide_type=slide["slide_type"],
+            source_lineage=source_lineage,
+        )
+
+        # 검증이 끝난 수정안만 메모리의 script에 반영합니다.
         slides[slide_index]["title"] = new_data["title"]
         slides[slide_index]["body"] = new_data["body"]
         script_data["slides"] = slides
-        script_path.write_text(_json.dumps(script_data, ensure_ascii=False, indent=2), encoding="utf-8")
 
         # 해당 슬라이드 재렌더링
         from src.schemas.card_news import CardNewsScript, Slide
@@ -1973,6 +2786,11 @@ def edit_slide():
                 slide_type=s["slide_type"],
                 title=s["title"],
                 body=s["body"],
+                emoji=s.get("emoji", ""),
+                accent=s.get("accent", ""),
+                visual_type=s.get("visual_type", "auto"),
+                visual_values=s.get("visual_values", []),
+                visual_labels=s.get("visual_labels", []),
             )
             for s in slides
         ]
@@ -2037,6 +2855,40 @@ def edit_slide():
         from src.agents.design_renderer import _generate_caption
         new_caption = _generate_caption(updated_script, persona.handle)
         (d / "caption.txt").write_text(new_caption, encoding="utf-8")
+        script_json = _json.dumps(script_data, ensure_ascii=False, indent=2)
+        script_path.write_text(script_json, encoding="utf-8")
+
+        import hashlib
+
+        meta["content_revision"] = int(meta.get("content_revision", 0) or 0) + 1
+        meta["editorial_validation_status"] = "EDIT_VERIFIED"
+        meta["script_sha256"] = hashlib.sha256(script_json.encode("utf-8")).hexdigest()
+        meta["last_edited_at"] = datetime.now(timezone.utc).isoformat()
+        meta_path.write_text(
+            _json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+
+        # Edit history is observational data only.  It never changes policy or
+        # triggers publication.
+        run_id = str(meta.get("run_id") or "")
+        if run_id:
+            from src.db_tracking import log_user_edit
+            from src.analytics.feedback import log_editorial_feedback
+            import difflib
+
+            final_text = f"{new_data['title']}\n{new_data['body']}".strip()
+            ratio = 1.0 - difflib.SequenceMatcher(None, original_text, final_text).ratio()
+            log_user_edit(run_id, slide_index, original_text, final_text)
+            log_editorial_feedback(
+                content_id=dir_name,
+                run_id=run_id,
+                editor_id="dashboard_user",
+                approval_decision="EDITED",
+                edit_reason_category="slide_revision",
+                text_edit_ratio=ratio,
+                review_duration_sec=review_duration_sec,
+                idempotency_key=f"edit:{dir_name}:{slide_index}:{time.time_ns()}",
+            )
 
         return {
             "success": True,
@@ -2046,15 +2898,71 @@ def edit_slide():
         }
 
     except Exception as e:
-        import traceback
-        return {"success": False, "error": str(e), "detail": traceback.format_exc()}
+        traceback.print_exc()
+        return {"success": False, "error": str(e)}, 400
+
+
+@app.route("/generate/review", methods=["POST"])
+def record_generation_review():
+    """Record HITL approval/rejection without publishing or activating policy."""
+    data = request.get_json() or {}
+    dir_name = str(data.get("dir_name") or "").strip()
+    decision = str(data.get("decision") or "").strip().upper()
+    reason = str(data.get("reason") or "").strip()
+    duration = max(0.0, float(data.get("review_duration_sec", 0) or 0))
+    if decision not in {"APPROVED", "REJECTED"}:
+        return {"success": False, "error": "decision은 APPROVED 또는 REJECTED여야 합니다."}, 400
+
+    try:
+        meta_path = _resolve_output_file(dir_name, "meta.json")
+    except ValueError as exc:
+        return {"success": False, "error": str(exc)}, 400
+    if not meta_path.exists():
+        return {"success": False, "error": "추적 가능한 meta.json이 없습니다."}, 409
+    try:
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        run_id = str(meta.get("run_id") or "")
+        if not run_id:
+            return {"success": False, "error": "run_id가 없는 이전 생성물입니다."}, 409
+        validation_status = str(meta.get("editorial_validation_status") or "")
+        if decision == "APPROVED" and validation_status not in {
+            "ORIGINAL_VERIFIED",
+            "EDIT_VERIFIED",
+        }:
+            return {
+                "success": False,
+                "error": "근거 검증 상태를 확인할 수 없어 승인을 차단합니다.",
+            }, 409
+        from src.analytics.feedback import log_editorial_feedback
+
+        log_editorial_feedback(
+            content_id=dir_name,
+            run_id=run_id,
+            editor_id="dashboard_user",
+            approval_decision=decision,
+            edit_reason_category="review_rejection" if decision == "REJECTED" else "",
+            review_duration_sec=duration,
+            idempotency_key=f"review:{dir_name}:{decision}",
+        )
+        meta["review_decision"] = decision
+        meta["review_reason"] = reason
+        meta["reviewed_at"] = datetime.now(timezone.utc).isoformat()
+        meta_path.write_text(
+            json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        return {"success": True, "published": False, "policy_changed": False}
+    except Exception as exc:
+        return {"success": False, "error": str(exc)}, 400
 
 
 # ── Instagram 발행 페이지 ─────────────────────────────────
 
 @app.route("/publish_page/<dir_name>")
 def publish_page(dir_name: str):
-    d = ROOT / "output" / dir_name
+    try:
+        d = _resolve_output_dir(dir_name)
+    except ValueError as exc:
+        return str(exc), 400
     pngs = sorted(d.glob("card_*.png"))
     mp4s = sorted(d.glob("card_*.mp4"))
     # MP4와 동일 번호의 PNG가 있으면 중복 → 업로드는 PNG만
@@ -2144,8 +3052,20 @@ def publish_now():
 # ── 실행 ─────────────────────────────────────────────────
 
 if __name__ == "__main__":
+    # 진행 로그에는 ✗·⚠ 같은 기호와 이모지가 섞여 있는데 Windows 콘솔 기본
+    # 인코딩(cp949)으로는 표현할 수 없어 print가 UnicodeEncodeError를 낸다.
+    # 로그 한 줄 때문에 생성이 죽지 않도록 표현 못 하는 문자는 대체한다.
+    for _stream in (sys.stdout, sys.stderr):
+        try:
+            _stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, ValueError):
+            pass
+
     from src.queue_runtime import prepare_queue_runtime
     prepare_queue_runtime()
     port = int(os.environ.get("PORT", 5001))
     print(f"알고 대시보드: http://localhost:{port}")
-    app.run(host="0.0.0.0", port=port, debug=False, threaded=True)
+    # use_reloader=True: 소스 변경 시 자동 재시작 (수동 kill/재시작 불필요).
+    # debug=False 유지: 0.0.0.0 + ngrok 터널로 외부 노출되므로 인터랙티브
+    # 디버거 콘솔(RCE 위험)은 절대 켜지 않는다. 리로더는 debug와 독립적으로 동작한다.
+    app.run(host="0.0.0.0", port=port, debug=False, use_reloader=True, threaded=True)

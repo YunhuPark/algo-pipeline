@@ -6,7 +6,8 @@ ContentQueue — 콘텐츠 큐 관리
 
 공개 API:
   bulk_generate(count, topics, auto_news)   — N개 미리 기획해서 큐에 저장
-  publish_next(publish_to_ig)               — 큐 다음 항목을 전체 파이프라인으로 실행
+  publish_next(publish_to_ig)               — 큐 다음 항목(대기열 순서)을 처리
+  publish_specific(queue_id, publish_to_ig) — 지정한 항목 하나만 정확히 처리
   add_topic(topic, context, scheduled_at)   — 단일 주제 큐 추가
   get_status()                              — 큐 현황 dict 반환
 """
@@ -20,16 +21,37 @@ from uuid import uuid4
 
 from src.db import (
     enqueue_v2,
+    claim_queue_row,
     dequeue_next,
+    get_queue_row,
+    insert_post,
     mark_queue_error,
+    set_queue_image_dir,
     start_publish_attempt,
     store_queue_ig_post_id,
     complete_queue_publish,
     mark_queue_status,
+    unclaim_queue_row,
     queue_count,
     get_queue,
 )
 from src.schemas.queue_schemas import CollectionMethod, PublishAttemptState, QueueMetadataV2
+
+
+def _select_render_media(folder: Path) -> list[Path]:
+    """폴더 안의 카드 미디어를 슬라이드별로 선택해 반환.
+
+    영상이 합성된 슬라이드는 정지 이미지(.png)와 영상(.mp4)이 같은 이름으로
+    함께 남는다. 사람이 검토하는 /preview 페이지는 슬라이드당 영상을 우선
+    선택해서 보여주므로, 실제 업로드도 같은 기준으로 선택해야 사람이 검토한
+    화면과 실제 게시물이 일치한다 (그렇지 않으면 영상이 빠지고 정지 이미지만
+    올라간다).
+    """
+    by_slide: dict[str, Path] = {}
+    for path in sorted(folder.glob("card_*.png")) + sorted(folder.glob("card_*.mp4")):
+        if path.suffix.lower() == ".mp4" or path.stem not in by_slide:
+            by_slide[path.stem] = path
+    return [by_slide[stem] for stem in sorted(by_slide)]
 
 
 RETRYABLE_PRE_PUBLISH_ERRORS = {
@@ -48,10 +70,35 @@ def _validate_publish_configuration() -> None:
     verify_instagram_account()
 
 
-def _collect_news():
+def _collect_news(exclude_urls: frozenset[str] = frozenset()):
     from src.agents.news_collector import collect_and_select
 
-    return collect_and_select()
+    return collect_and_select(exclude_urls=exclude_urls)
+
+
+def _queued_source_urls() -> set[str]:
+    """Source URLs already sitting in the queue (any status).
+
+    Used so a fresh collection run doesn't just re-pick the same top-scoring
+    article that's already queued - RSS/Tavily results don't meaningfully
+    change within a few minutes, so without this, clicking "자동 수집 시작"
+    repeatedly kept re-adding the exact same story.
+    """
+    import json
+
+    urls: set[str] = set()
+    for row in get_queue():
+        raw = row["metadata_json"] if "metadata_json" in row.keys() else None
+        if not raw:
+            continue
+        try:
+            data = json.loads(raw)
+        except ValueError:
+            continue
+        url = data.get("source_url")
+        if url:
+            urls.add(url)
+    return urls
 
 
 # ── 공개 함수 ──────────────────────────────────────────────
@@ -92,11 +139,26 @@ def _fill_from_news(count: int) -> list[int]:
     """뉴스 수집을 count번 반복해 큐에 저장."""
     ids: list[int] = []
     seen_topics: set[str] = set()
+    # 이미 큐에 있는 기사 + 이번 일괄 수집에서 방금 고른 기사를 계속 누적해
+    # 다음 반복에서 제외한다 — 안 그러면 "자동 수집 시작"을 여러 번 눌러도
+    # RSS/Tavily 결과가 짧은 시간 안에 잘 안 바뀌어 매번 같은 최고점 기사만
+    # 다시 고르게 된다.
+    excluded_urls: set[str] = set(_queued_source_urls())
 
     for i in range(count):
         try:
             print(f"  [ContentQueue] 뉴스 수집 중 ({i+1}/{count})...")
-            news = _collect_news()
+            news = _collect_news(exclude_urls=frozenset(excluded_urls))
+
+            # A selected headline without a real source cannot become
+            # publication evidence. Keep the queue fail-closed before the
+            # follow-up article fetch.
+            selected_item = getattr(news, "selected_item", None)
+            if selected_item is None:
+                print("  [ContentQueue] 검증 가능한 뉴스 출처 없음 — 큐 추가 생략")
+                continue
+
+            excluded_urls.add(selected_item.url)
 
             # 중복 주제 회피
             topic = news.topic
@@ -104,25 +166,18 @@ def _fill_from_news(count: int) -> list[int]:
                 topic = f"{topic} (심화)"
             seen_topics.add(topic)
 
-            evidence = [
-                {
-                    "title": item.title,
-                    "url": item.url,
-                    "source": item.source,
-                    "summary": item.summary,
-                }
-                for item in news.source_items
-                if item.title.strip() and item.url.strip()
-            ]
-            if not evidence:
-                raise ValueError("뉴스 출처 evidence가 없어 enqueue를 차단합니다.")
-            metadata = QueueMetadataV2(
-                topic=topic,
-                source_title=evidence[0]["title"],
-                source_url=evidence[0]["url"],
-                context=news.context,
-                evidence=evidence,
+            # Keep the editor-selected article URL as the primary evidence.
+            # Re-searching a generated topic here can silently switch events.
+            from src.agents import trend_analyzer
+            from src.services.generation_service import build_queue_metadata
+
+            report = trend_analyzer.build_locked_source_report(
+                topic,
+                title=selected_item.title,
+                url=selected_item.url,
+                content=selected_item.summary,
             )
+            metadata = build_queue_metadata(topic, report)
             row_id = enqueue_v2(
                 metadata,
                 CollectionMethod.NEWS_COLLECTOR,
@@ -135,7 +190,11 @@ def _fill_from_news(count: int) -> list[int]:
     return ids
 
 
-def publish_next(publish_to_ig: bool = True) -> dict[str, Any] | None:
+def publish_next(
+    publish_to_ig: bool = True,
+    *,
+    require_human_approval: bool = True,
+) -> dict[str, Any] | None:
     """
     큐에서 다음 항목을 꺼내 전체 파이프라인을 실행합니다.
 
@@ -152,22 +211,111 @@ def publish_next(publish_to_ig: bool = True) -> dict[str, Any] | None:
     if publish_to_ig:
         _validate_publish_configuration()
 
-    row = dequeue_next()
-    if row is None:
-        print("  [ContentQueue] 대기 중인 큐가 없습니다.")
+    # 맨 앞 항목의 메타데이터가 영구적으로 무효(HASH_MISMATCH 등)면 그 항목만
+    # 차단하고 다음 항목으로 넘어간다 — 안 그러면 오래된 손상 데이터 하나가
+    # 뒤에 있는 멀쩡한 항목까지 전부 막아버린다. mark_queue_error가 매번
+    # publish_error_code를 기록해 같은 항목을 다시 dequeue하지 않으므로,
+    # 큐 길이를 넘는 반복은 나지 않는다 — 그래도 상한을 둬 방어한다.
+    #
+    # dequeue_next()는 그냥 SELECT라 잠금이 없다 — 스케줄러(cron)와 대시보드
+    # 클릭이 같은 순간에 같은 행을 집을 수 있다. claim_queue_row()가 실제
+    # 상호배제를 담당한다: 이걸 통과한 호출만 이 행을 실제로 처리하고, 나머지
+    # 호출은 dequeue_next()가 (status가 'processing'으로 바뀌어) 그 행을 더
+    # 이상 돌려주지 않으므로 자연히 다음 행으로 넘어간다.
+    row = None
+    metadata = None
+    original_status = None
+    for _ in range(50):
+        candidate = dequeue_next()
+        if candidate is None:
+            print("  [ContentQueue] 대기 중인 큐가 없습니다.")
+            return None
+        if not claim_queue_row(candidate["id"]):
+            # 다른 프로세스가 그 사이 먼저 가져감 — 다음 후보 시도
+            continue
+        candidate_metadata, error = _load_queue_metadata(candidate)
+        if error:
+            mark_queue_error(
+                candidate["id"], error, increment_retry=False, preserve_attempt=True
+            )
+            unclaim_queue_row(candidate["id"], candidate["status"])
+            print(
+                f"  [ContentQueue] 게시 차단: {error} (큐 id={candidate['id']}) "
+                "→ 다음 항목 시도"
+            )
+            continue
+        row = candidate
+        metadata = candidate_metadata
+        original_status = candidate["status"]
+        break
+    else:
+        print("  [ContentQueue] 유효한 큐 항목을 찾지 못했습니다.")
         return None
 
+    return _process_claimed_row(
+        row, metadata, original_status, publish_to_ig, require_human_approval
+    )
+
+
+def publish_specific(
+    queue_id: int,
+    publish_to_ig: bool = True,
+    *,
+    require_human_approval: bool = True,
+) -> dict[str, Any] | None:
+    """Process exactly this queue row - never substitutes a different one.
+
+    publish_next() picks "whatever's next" by dequeue_next()'s queue-order
+    semantics, which is correct for the CLI/scheduler's unattended flow but
+    wrong for the dashboard's supervised-approval flow: a human previews one
+    specific row, and clicking "승인해서 발행" must publish exactly that row,
+    not silently fall through to a different (unreviewed) one just because
+    the previewed row happened to have a stuck non-retryable error or
+    wasn't queue-order-first. That's exactly what happened before this
+    existed - approving a reviewed Siri/iPhone card set instead ran a full,
+    unreviewed regeneration for a completely different queued topic.
+    """
+    if publish_to_ig:
+        _validate_publish_configuration()
+
+    row = get_queue_row(queue_id)
+    if row is None or row["status"] not in ("pending", "ready"):
+        status = row["status"] if row else "없음"
+        print(f"  [ContentQueue] 대상 항목을 처리할 수 없습니다 (큐 id={queue_id}, 상태={status})")
+        return None
+
+    original_status = row["status"]
+    if not claim_queue_row(queue_id):
+        print(f"  [ContentQueue] 다른 작업이 이미 이 항목을 처리 중입니다 (큐 id={queue_id})")
+        return None
+
+    metadata, error = _load_queue_metadata(row)
+    if error:
+        mark_queue_error(queue_id, error, increment_retry=False, preserve_attempt=True)
+        unclaim_queue_row(queue_id, original_status)
+        print(f"  [ContentQueue] 게시 차단: {error} (큐 id={queue_id})")
+        return None
+
+    return _process_claimed_row(
+        row, metadata, original_status, publish_to_ig, require_human_approval
+    )
+
+
+def _process_claimed_row(
+    row: Any,
+    metadata: QueueMetadataV2,
+    original_status: str,
+    publish_to_ig: bool,
+    require_human_approval: bool,
+) -> dict[str, Any] | None:
+    """Run the actual pipeline/cached-render/upload for an already-claimed
+    row (status='processing'). Shared by publish_next() and
+    publish_specific() so both get identical processing and cleanup."""
     queue_id = row["id"]
     topic = row["topic"]
     context = row["context"] or ""
     angle_hint = row["angle_hint"] or ""
     image_dir = row["image_dir"] or ""
-
-    metadata, error = _load_queue_metadata(row)
-    if error:
-        mark_queue_error(queue_id, error, increment_retry=False, preserve_attempt=True)
-        print(f"  [ContentQueue] 게시 차단: {error} (큐 id={queue_id})")
-        return None
     assert metadata is not None
     collection_method = CollectionMethod(row["collection_method"])
     source_lineage = metadata.to_source_lineage(collection_method)
@@ -184,6 +332,21 @@ def publish_next(publish_to_ig: bool = True) -> dict[str, Any] | None:
     def on_remote_id(value: str, post_id: str) -> None:
         store_queue_ig_post_id(queue_id, value, post_id)
 
+    def run_full_pipeline():
+        args = (
+            topic,
+            context,
+            angle_hint,
+            publish_to_ig,
+            attempt_id,
+            before_publish,
+            on_remote_id,
+            source_lineage,
+        )
+        if require_human_approval:
+            return _run_full_pipeline(*args)
+        return _run_full_pipeline(*args, require_human_approval=False)
+
     print(f"\n  [ContentQueue] 발행 시작: '{topic}' (큐 id={queue_id})")
 
     try:
@@ -192,24 +355,27 @@ def publish_next(publish_to_ig: bool = True) -> dict[str, Any] | None:
         res = None
         if image_dir and Path(image_dir).exists():
             print(f"  [ContentQueue] 기존 렌더링 사용: {image_dir}")
-            paths = sorted(Path(image_dir).glob("*.png"))
+            paths = _select_render_media(Path(image_dir))
             if not paths:
                 print("  [ContentQueue] PNG 없음 — 전체 파이프라인 실행")
-                res = _run_full_pipeline(
-                    topic, context, angle_hint, publish_to_ig,
-                    attempt_id, before_publish, on_remote_id, source_lineage,
+                res = run_full_pipeline()
+            elif publish_to_ig:
+                # 사람이 이미 검토·승인한 바로 그 렌더링을 그대로 올린다 —
+                # 여기서 다시 생성하면 승인한 화면과 실제 게시물이 달라질 수 있다.
+                return _publish_cached_render(
+                    queue_id, image_dir, topic, attempt_id, before_publish, on_remote_id
                 )
             else:
-                # need to implement a manual publish step for cached images,
-                # but to be safe we just fail or we would need to duplicate pipeline.
-                pass
+                print("  [ContentQueue] 이미 준비됨 — 재생성 없이 그대로 반환")
+                return {"id": queue_id, "topic": topic, "paths": paths}
         else:
-            res = _run_full_pipeline(
-                topic, context, angle_hint, publish_to_ig,
-                attempt_id, before_publish, on_remote_id, source_lineage,
-            )
+            res = run_full_pipeline()
 
         if res and hasattr(res, 'image_paths') and res.image_paths:
+            if res.approval_decision == "REJECTED":
+                mark_queue_status(queue_id, "skipped")
+                print(f"  [ContentQueue] 사람 검토에서 게시 반려 (큐 id={queue_id})")
+                return None
             if res.publish_requested:
                 if res.publish_succeeded and res.ig_post_id:
                     complete_queue_publish(queue_id, attempt_id, res.ig_post_id)
@@ -230,6 +396,8 @@ def publish_next(publish_to_ig: bool = True) -> dict[str, Any] | None:
                     return None
             else:
                 # generation only
+                if res.image_paths:
+                    set_queue_image_dir(queue_id, str(res.image_paths[0].parent))
                 mark_queue_status(queue_id, "ready")
                 return {"id": queue_id, "topic": topic, "paths": res.image_paths}
         elif type(res) == list and len(res) > 0: # fallback for paths directly
@@ -245,6 +413,97 @@ def publish_next(publish_to_ig: bool = True) -> dict[str, Any] | None:
         print(f"  [ContentQueue] 파이프라인 오류 (큐 id={queue_id}): {e}")
         mark_queue_error(queue_id, "UNKNOWN_PIPELINE_EXCEPTION")
         raise
+    finally:
+        # 다른 경로(mark_queue_status/complete_queue_publish)가 이미 최종
+        # 상태로 바꿔놨다면 이건 조용히 아무 일도 하지 않는다 — 그래야 위의
+        # 모든 반환 지점을 일일이 손대지 않고 한 곳에서 안전하게 반납할 수 있다.
+        unclaim_queue_row(queue_id, original_status)
+
+
+def _publish_cached_render(
+    queue_id: int,
+    image_dir: str,
+    topic: str,
+    attempt_id: str | None,
+    before_publish,
+    on_remote_id,
+) -> dict[str, Any] | None:
+    """Upload an already-rendered 'ready' row's cards without regenerating.
+
+    Mirrors the durable-attempt bookkeeping run_full_pipeline()'s own publish
+    step performs (before_publish -> IG upload -> on_remote_id ->
+    complete_queue_publish), but skips generation entirely so the exact cards
+    a human already reviewed are what gets posted.
+    """
+    import json as _json
+    from datetime import datetime, timezone
+    from src.agents import publisher as ig_publisher
+
+    folder = Path(image_dir)
+    paths = _select_render_media(folder)
+    if not paths:
+        # 승인된 렌더링 자체가 사라진 것 — 이 항목이 잘못된 게 아니라 재생성이
+        # 필요한 상황이므로, 영구 오류로 막는 대신 'pending'으로 되돌려 다음
+        # 생성 시도에서 다시 만들 수 있게 한다.
+        print(f"  [ContentQueue] 캐시된 렌더링을 찾을 수 없음 (큐 id={queue_id}) → 재생성 가능하도록 되돌립니다.")
+        set_queue_image_dir(queue_id, "")
+        mark_queue_status(queue_id, "pending")
+        return None
+
+    script_path = folder / "script.json"
+    script_data = None
+    if script_path.exists():
+        try:
+            script_data = _json.loads(script_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            script_data = None
+    if not isinstance(script_data, dict):
+        print(f"  [ContentQueue] 캐시된 script.json 없음/손상 (큐 id={queue_id}) → 재생성 가능하도록 되돌립니다.")
+        set_queue_image_dir(queue_id, "")
+        mark_queue_status(queue_id, "pending")
+        return None
+
+    hook = script_data.get("hook") or ""
+    raw_hashtags = script_data.get("hashtags") or []
+    hashtags = [str(h) for h in raw_hashtags] if isinstance(raw_hashtags, list) else []
+
+    if attempt_id and before_publish:
+        try:
+            before_publish(attempt_id)
+        except Exception:
+            mark_queue_error(queue_id, "LOCAL_ATTEMPT_PERSISTENCE_ERROR", preserve_attempt=True)
+            return None
+
+    try:
+        ig_post_id = ig_publisher.publish(image_paths=paths, hook=hook, hashtags=hashtags)
+    except Exception as e:
+        print(f"  [ContentQueue] 캐시 렌더링 발행 실패 (큐 id={queue_id}): {e}")
+        mark_queue_error(queue_id, "REMOTE_PUBLISH_PERSISTENCE_UNCERTAIN")
+        return None
+
+    if not ig_post_id:
+        mark_queue_error(queue_id, "UNCERTAIN_EMPTY_POST_ID")
+        return None
+
+    if attempt_id and on_remote_id:
+        try:
+            on_remote_id(attempt_id, ig_post_id)
+        except Exception:
+            mark_queue_error(queue_id, "REMOTE_PUBLISH_PERSISTENCE_UNCERTAIN")
+            return None
+
+    insert_post(
+        platform="instagram",
+        topic=topic,
+        post_id=ig_post_id,
+        hook=hook,
+        hashtags=hashtags,
+        image_dir=str(folder),
+        posted_at=datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
+    )
+    complete_queue_publish(queue_id, attempt_id, ig_post_id)
+    print(f"  [ContentQueue] 캐시 렌더링 발행 완료: {topic} ({len(paths)}장)")
+    return {"id": queue_id, "topic": topic, "paths": paths}
 
 
 def _run_full_pipeline(
@@ -256,28 +515,22 @@ def _run_full_pipeline(
     before_publish=None,
     on_remote_id=None,
     source_lineage=None,
+    require_human_approval: bool = True,
 ):
-    """파이프라인 실행 헬퍼."""
-    from src import pipeline
-    from src.persona import load_persona
+    """Canonical pipeline helper shared with the dashboard."""
+    from src.services.generation_service import execute_generation
 
-    persona = load_persona()
-    trend_context = context
-    if angle_hint:
-        trend_context = f"{context}\n[앵글 힌트] {angle_hint}".strip()
-
-    res = pipeline.run_pipeline(
+    return execute_generation(
         topic=topic,
-        persona=persona,
-        trend_context=trend_context,
-        publish=publish,
-        auto=True,
         source_lineage=source_lineage,
+        publish=publish,
+        angle_hint=angle_hint,
         publish_attempt_id=publish_attempt_id,
         before_publish=before_publish,
         on_remote_id=on_remote_id,
+        human_approval=bool(publish and require_human_approval),
+        auto=not require_human_approval,
     )
-    return res
 
 
 def add_topic(

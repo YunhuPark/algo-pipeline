@@ -26,6 +26,9 @@ The FastAPI control surface exposes:
 - `GET /api/experiments`
 - `POST /api/experiments/{experiment_id}/transitions`
 - `GET /api/experiments/{experiment_id}/metrics`
+- `GET /api/quality-reviews`
+- `GET /api/quality-reviews/latest`
+- `POST /api/quality-reviews/run`
 
 State-changing requests require a server-side `ADMIN_TOKEN` and a localhost Origin or Referer. The request body cannot choose `actor_type`; the backend derives it. Missing or invalid tokens return 401, missing or invalid origins return 403, invalid transitions and optimistic concurrency conflicts return 409, and unknown request fields return 422.
 
@@ -44,7 +47,11 @@ Benchmark input includes only `real_pipeline` runs whose status is `SUCCESS`. Sy
 
 Performance snapshots are imported with an idempotency key and provenance fields. A snapshot is provisional before 48 hours or when reach is unavailable. Negative metrics and timestamps before publication are rejected.
 
+`sync_all_insights()` writes a successful Instagram Graph API response to both the legacy dashboard analytics table and the V2 `performance_snapshots` table. Failed requests are skipped instead of being recorded as zero engagement. The current metric definition records likes, comments, saves, shares, reach, and views (mirrored to the legacy impressions column), with an hourly idempotency bucket.
+
 Recommendation generation creates a `DRAFT` only when an adequately sampled candidate has lower average editorial effort than the baseline. Approval and rejection require a non-empty human review reason. Approval records evidence but does not call `activate_policy`, alter allocation, publish content, or contact an external service.
+
+The weekly quality review aggregates only `real_pipeline` runs. Mature performance snapshots count only when `run_publications` links the Instagram publication ID to one of those runs. It needs at least three real runs and one explicit approval/rejection decision; edit-only events do not satisfy that threshold. Below it, the review persists `INSUFFICIENT_DATA` and produces no experiment proposal. A ready review produces exactly one `DRAFT` proposal and never activates it.
 
 ## Agent lifecycle
 

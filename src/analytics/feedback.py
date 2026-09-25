@@ -24,6 +24,7 @@ def log_editorial_feedback(
     text_edit_ratio: float = 0.0,
     claim_correction_count: int = 0,
     editorial_effort_score: float | None = None,
+    review_duration_sec: float = 0.0,
     experiment_id: str | None = None,
     variant_id: str | None = None,
     idempotency_key: str | None = None,
@@ -36,6 +37,8 @@ def log_editorial_feedback(
         raise ValueError("text_edit_ratio must be between 0 and 1")
     if claim_correction_count < 0:
         raise ValueError("claim_correction_count cannot be negative")
+    if review_duration_sec < 0:
+        raise ValueError("review_duration_sec cannot be negative")
     effort = (
         float(editorial_effort_score)
         if editorial_effort_score is not None
@@ -52,8 +55,9 @@ def log_editorial_feedback(
                     content_id, run_id, editor_id, approval_decision,
                     edit_reason_category, text_edit_ratio,
                     claim_correction_count, editorial_effort_score,
-                    experiment_id, variant_id, idempotency_key
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    review_duration_sec, experiment_id, variant_id,
+                    idempotency_key
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     content_id.strip(),
@@ -64,6 +68,7 @@ def log_editorial_feedback(
                     text_edit_ratio,
                     claim_correction_count,
                     effort,
+                    review_duration_sec,
                     experiment_id,
                     variant_id,
                     idempotency_key,
