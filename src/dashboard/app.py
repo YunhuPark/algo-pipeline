@@ -983,12 +983,21 @@ def queue_page():
             f"{escape(code)}{retry_btn}</div>"
         )
 
+    def _prepare_btn(r):
+        if r["status"] not in ("pending", "ready"):
+            return ""
+        return (
+            f"<button type='button' class='btn btn-secondary' "
+            f"style='padding:5px 12px;font-size:12px;margin-right:6px' "
+            f"onclick=\"qPrepareSpecific({r['id']})\">🔍 미리보기</button>"
+        )
+
     trs = "".join(
         f"<tr><td style='color:var(--muted);font-size:12px'>#{r['id']}</td>"
         f"<td style='font-weight:500'>{escape(r['topic'])}{_error_cell(r)}</td>"
         f"<td>{_badge(r['status'])}</td>"
         f"<td style='color:var(--muted);font-size:12px'>{r['scheduled_at'] or '다음 차례'}</td>"
-        f"<td><form method='post' action='/queue/skip/{r['id']}' style='margin:0'>"
+        f"<td>{_prepare_btn(r)}<form method='post' action='/queue/skip/{r['id']}' style='margin:0;display:inline'>"
         f"<button class='btn btn-danger' style='padding:5px 12px;font-size:12px'>건너뜀</button></form></td></tr>"
         for r in rows
     ) or (
@@ -1111,16 +1120,21 @@ fetch('/queue/current_job')
   }})
   .catch(() => {{}});
 
-document.getElementById('prepareBtn').addEventListener('click', () => {{
+function qStartPrepare(queueId) {{
   document.getElementById('qProgressPanel').style.display = 'block';
   document.getElementById('qPreviewPanel').style.display = 'none';
   document.getElementById('qLogBox').innerHTML = '';
-  document.getElementById('qProgressTitle').textContent = '다음 항목 준비 중...';
+  document.getElementById('qProgressTitle').textContent =
+    queueId ? `#${{queueId}} 미리보기 생성 중...` : '다음 항목 준비 중...';
   document.getElementById('qProgressBadge').textContent = '실행 중';
   document.getElementById('qProgressBadge').className = 'badge badge-pending';
   document.getElementById('prepareBtn').disabled = true;
 
-  fetch('/queue/prepare_next', {{method: 'POST'}})
+  fetch('/queue/prepare_next', {{
+    method: 'POST',
+    headers: {{'Content-Type': 'application/json'}},
+    body: JSON.stringify(queueId ? {{queue_id: queueId}} : {{}}),
+  }})
     .then(r => r.json())
     .then(data => {{
       if (!data.job_id) {{
@@ -1131,7 +1145,13 @@ document.getElementById('prepareBtn').addEventListener('click', () => {{
       qJobId = data.job_id;
       qListenSSE(qJobId, 'prepare');
     }});
-}});
+}}
+
+function qPrepareSpecific(queueId) {{
+  qStartPrepare(queueId);
+}}
+
+document.getElementById('prepareBtn').addEventListener('click', () => qStartPrepare(null));
 
 document.getElementById('qApproveBtn').addEventListener('click', () => {{
   if (!qQueueId) {{
@@ -1322,7 +1342,7 @@ def queue_generate():
 # 된다), 사람이 승인을 누르면 그제서야 그 렌더링을 그대로 발행한다 —
 # 재생성하지 않으므로 승인한 화면과 실제로 올라가는 카드가 항상 같다.
 
-def _run_queue_prepare_job(job_id: str) -> None:
+def _run_queue_prepare_job(job_id: str, queue_id: int | None = None) -> None:
     global _ACTIVE_QUEUE_JOB
     _ACTIVE_QUEUE_JOB = {"job_id": job_id, "mode": "prepare"}
     q = _JOB_QUEUES[job_id]
@@ -1340,11 +1360,17 @@ def _run_queue_prepare_job(job_id: str) -> None:
     old_stdout = sys.stdout
     sys.stdout = _StreamCapture()
     try:
-        from src.agents.content_queue import publish_next
         # require_human_approval=False는 파이프라인의 auto=True를 켠다 —
         # 이게 없으면 각도 선택기(angle_selector)가 대화형 input()으로
         # 떨어져 대시보드의 stdin 없는 백그라운드 스레드에서 EOFError가 난다.
-        result = publish_next(publish_to_ig=False, require_human_approval=False)
+        if queue_id is not None:
+            from src.agents.content_queue import publish_specific
+            result = publish_specific(
+                queue_id, publish_to_ig=False, require_human_approval=False
+            )
+        else:
+            from src.agents.content_queue import publish_next
+            result = publish_next(publish_to_ig=False, require_human_approval=False)
         sys.stdout = old_stdout
 
         if result and result.get("paths"):
@@ -1389,6 +1415,16 @@ def queue_prepare_next():
     if not _GENERATION_LOCK.acquire(blocking=False):
         return {"error": "이미 다른 작업이 진행 중입니다. 완료 후 다시 시도해 주세요."}, 409
 
+    data = request.get_json(silent=True) or {}
+    raw_queue_id = data.get("queue_id")
+    queue_id = None
+    if raw_queue_id is not None:
+        try:
+            queue_id = int(raw_queue_id)
+        except (TypeError, ValueError):
+            _GENERATION_LOCK.release()
+            return {"error": "queue_id가 올바르지 않습니다."}, 400
+
     _evict_old_jobs()
     job_id = str(uuid.uuid4())[:8]
     q = queue.Queue()
@@ -1397,7 +1433,9 @@ def queue_prepare_next():
         "status": "pending", "logs": [], "paths": [], "topic": "",
         "image_dir": "", "caption": "", "error": "", "queue_id": None,
     }
-    t = threading.Thread(target=_run_queue_prepare_job, args=(job_id,), daemon=True)
+    t = threading.Thread(
+        target=_run_queue_prepare_job, args=(job_id, queue_id), daemon=True
+    )
     try:
         t.start()
     except BaseException:
