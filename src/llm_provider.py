@@ -8,6 +8,8 @@ Quality-Gate errors are never swallowed by this layer.
 from __future__ import annotations
 
 import os
+import threading
+import time
 from pathlib import Path
 
 import langchain_openai
@@ -48,6 +50,36 @@ PROVIDER_FALLBACK_EXCEPTIONS = (
 
 _FALSE_VALUES = {"0", "false", "no", "off", "disabled"}
 _PATCH_INSTALLED = False
+
+# A single pipeline run makes dozens of small LLM calls (topic selection,
+# script generation, editorial/factual critics, per-slide video matching,
+# ...). When OpenAI is out of quota, every one of those calls otherwise pays
+# a full network round trip failing against OpenAI before falling back to
+# Gemini - across a whole generation that adds minutes of pure waiting for
+# a failure we already know is coming. Once we've actually seen OpenAI
+# reject a call, remember that for a short cooldown and skip straight to
+# the fallback; a real recovery (credits added, transient outage clearing)
+# is picked up again as soon as the cooldown expires.
+_PRIMARY_OUTAGE_COOLDOWN_SECONDS = 120.0
+_primary_outage_until = 0.0
+_primary_outage_lock = threading.Lock()
+
+
+def _primary_likely_down() -> bool:
+    with _primary_outage_lock:
+        return time.monotonic() < _primary_outage_until
+
+
+def _mark_primary_down() -> None:
+    global _primary_outage_until
+    with _primary_outage_lock:
+        _primary_outage_until = time.monotonic() + _PRIMARY_OUTAGE_COOLDOWN_SECONDS
+
+
+def _clear_primary_outage() -> None:
+    global _primary_outage_until
+    with _primary_outage_lock:
+        _primary_outage_until = 0.0
 
 
 def _project_env_values() -> dict[str, str | None]:
@@ -203,16 +235,33 @@ class ProviderAwareChatOpenAI(_OriginalChatOpenAI):
         raise fallback_error
 
     def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+        if _primary_likely_down():
+            fallback = self._fallback_model()
+            if fallback is not None:
+                print(
+                    "[LLMProvider] OpenAI 최근 실패 이력 있음 → 재시도 없이 바로 "
+                    f"{fallback.model_name} fallback 사용"
+                )
+                try:
+                    result = fallback._generate(
+                        messages, stop=stop, run_manager=run_manager, **kwargs
+                    )
+                except Exception as fallback_error:
+                    self._raise_fallback_error(fallback, fallback_error)
+                return result
         try:
-            return super()._generate(
+            result = super()._generate(
                 messages,
                 stop=stop,
                 run_manager=run_manager,
                 **kwargs,
             )
+            _clear_primary_outage()
+            return result
         except Exception as primary_error:
             if not _is_provider_failure(primary_error):
                 raise
+            _mark_primary_down()
             fallback = self._fallback_model()
             if fallback is None:
                 print(
@@ -236,16 +285,33 @@ class ProviderAwareChatOpenAI(_OriginalChatOpenAI):
                 self._raise_fallback_error(fallback, fallback_error)
 
     async def _agenerate(self, messages, stop=None, run_manager=None, **kwargs):
+        if _primary_likely_down():
+            fallback = self._fallback_model()
+            if fallback is not None:
+                print(
+                    "[LLMProvider] OpenAI 최근 실패 이력 있음 → 재시도 없이 바로 "
+                    f"{fallback.model_name} fallback 사용"
+                )
+                try:
+                    result = await fallback._agenerate(
+                        messages, stop=stop, run_manager=run_manager, **kwargs
+                    )
+                except Exception as fallback_error:
+                    self._raise_fallback_error(fallback, fallback_error)
+                return result
         try:
-            return await super()._agenerate(
+            result = await super()._agenerate(
                 messages,
                 stop=stop,
                 run_manager=run_manager,
                 **kwargs,
             )
+            _clear_primary_outage()
+            return result
         except Exception as primary_error:
             if not _is_provider_failure(primary_error):
                 raise
+            _mark_primary_down()
             fallback = self._fallback_model()
             if fallback is None:
                 print(

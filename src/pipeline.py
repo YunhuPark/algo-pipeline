@@ -74,7 +74,13 @@ def run_pipeline(
     notes_state: dict = {"last": ""}  # 팩트체크 실패 이유 (재시도 간 전달용)
     ignored_titles: set = set()       # 영상 매칭 불가 시 기사 탈락 목록
     fact_check_retries: int = 0       # 팩트체크 실패로 인한 재시도 횟수
-    MAX_FACT_RETRIES = 2              # 같은 기사에 팩트체크를 최대 2번만 재시도
+    # source_lineage/trend_context가 고정된 경우(큐 기반 발행은 항상 이 경우다)
+    # "기사 교체" 경로 자체가 없어서, MAX_RETRY(6)의 예산 전부가 사실상 같은
+    # 기사에 대한 팩트체크/편집 재시도 몫이다. 예전엔 이 값이 2였는데, 같은
+    # 원문으로 5번을 더 시도할 수 있는데도 2번만에 포기해 버려서 점수가
+    # 근소하게(예: 6.5/7.0) 부족한 것도 재시도해보지 못하고 버려지고 있었다.
+    # MAX_RETRY와 거의 같은 값을 줘서 그 여유를 실제로 쓰게 한다.
+    MAX_FACT_RETRIES = MAX_RETRY - 1
 
     for retry in range(MAX_RETRY):
         prev_ignored = set(ignored_titles)  # 기사 교체 감지용
