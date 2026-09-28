@@ -88,6 +88,27 @@ _TOPIC_ALIASES: dict[str, tuple[str, ...]] = {
 _TOKEN_RE = re.compile(r"[A-Za-z][A-Za-z0-9+._-]{1,}|[가-힣]{2,}|20\d{2}")
 _ASCII_WORD_RE_TEMPLATE = r"(?<![a-z0-9]){token}(?![a-z0-9])"
 
+# Large amounts/quantities (fines, prices, counts) tend to survive Korean/English
+# translation as the same magnitude even when every surrounding descriptor word is
+# translated away. Used as a fail-closed fallback anchor only when the topic has no
+# ASCII/alias anchor at all, so ordinary translated-but-numberless topics are unaffected.
+_NUMBER_RE = re.compile(
+    r"\$?\s*(?P<num>\d[\d,]*(?:\.\d+)?)\s*(?P<unit>천|만|억|조|thousand|million|billion|trillion)?",
+    re.IGNORECASE,
+)
+_NUMBER_MAGNITUDE = {
+    "천": 1e3,
+    "만": 1e4,
+    "억": 1e8,
+    "조": 1e12,
+    "thousand": 1e3,
+    "million": 1e6,
+    "billion": 1e9,
+    "trillion": 1e12,
+}
+_NUMBER_ANCHOR_MIN = 1000
+_NUMBER_ANCHOR_RELATIVE_TOLERANCE = 0.02
+
 
 def _normalize(text: str) -> str:
     return unicodedata.normalize("NFKC", text or "").casefold()
@@ -130,6 +151,39 @@ def _contains_variant(haystack: str, variant: str) -> bool:
     return variant in haystack
 
 
+def _numeric_anchors(text: str) -> list[float]:
+    """Extract large, translation-stable numeric magnitudes from ``text``.
+
+    Bare 4-digit years (2026, 2025, ...) are excluded so they don't collide
+    with the year exclusion already applied to lexical anchors. Small counts
+    are excluded via ``_NUMBER_ANCHOR_MIN`` since they are common noise
+    (page counts, list sizes) rather than reliable topical anchors.
+    """
+
+    values: list[float] = []
+    for match in _NUMBER_RE.finditer(text or ""):
+        raw = match.group("num")
+        unit = (match.group("unit") or "").lower()
+        try:
+            value = float(raw.replace(",", ""))
+        except ValueError:
+            continue
+
+        multiplier = _NUMBER_MAGNITUDE.get(unit, 1)
+        if multiplier == 1 and "." not in raw and re.fullmatch(r"(19|20)\d{2}", raw):
+            continue
+
+        value *= multiplier
+        if value >= _NUMBER_ANCHOR_MIN:
+            values.append(value)
+
+    return values
+
+
+def _numbers_close(a: float, b: float) -> bool:
+    return abs(a - b) <= max(a, b) * _NUMBER_ANCHOR_RELATIVE_TOLERANCE
+
+
 def topic_matches_source(topic: str, source_title: str, evidence_text: str) -> bool:
     """Return whether source text contains enough meaningful topic anchors.
 
@@ -138,21 +192,36 @@ def topic_matches_source(topic: str, source_title: str, evidence_text: str) -> b
     or more strong anchors require at least two. This keeps ``Apple WWDC`` from
     accepting a generic Apple article while avoiding false rejection from weak
     descriptor words such as a translated category or editorial phrase.
+
+    When the topic has no ASCII/alias anchor at all, a large translation-stable
+    number (a fine, a price, a headcount) is used as a fallback anchor instead
+    of unconditionally passing: purely descriptive Korean topics without any
+    such number keep the prior permissive behavior.
     """
 
     anchors = _topic_anchor_groups(topic)
     strong_anchors = [group for group in anchors if _is_strong_anchor_group(group)]
-    if not strong_anchors:
+
+    if strong_anchors:
+        haystack = _normalize(f"{source_title}\n{evidence_text}")
+        matched = sum(
+            1
+            for variants in strong_anchors
+            if any(_contains_variant(haystack, variant) for variant in variants)
+        )
+        required = 1 if len(strong_anchors) == 1 else 2
+        return matched >= required
+
+    topic_numbers = _numeric_anchors(topic)
+    if not topic_numbers:
         return True
 
-    haystack = _normalize(f"{source_title}\n{evidence_text}")
-    matched = sum(
-        1
-        for variants in strong_anchors
-        if any(_contains_variant(haystack, variant) for variant in variants)
+    source_numbers = _numeric_anchors(f"{source_title}\n{evidence_text}")
+    return any(
+        _numbers_close(topic_value, source_value)
+        for topic_value in topic_numbers
+        for source_value in source_numbers
     )
-    required = 1 if len(strong_anchors) == 1 else 2
-    return matched >= required
 
 
 def assert_source_lineage_matches_topic(lineage: SourceLineage) -> None:
