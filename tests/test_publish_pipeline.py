@@ -267,8 +267,16 @@ def test_queue_does_not_mark_failed_as_published():
             preserve_attempt=True,
         )
 
-def test_queue_generation_only_not_published():
+def test_queue_generation_only_not_published(monkeypatch, tmp_path):
     """생성 전용 실행을 게시 성공으로 기록하지 않음"""
+    # set_queue_image_dir()/mark_queue_error()는 실제 DB에 쓴다 (mark_queue_status만
+    # 목이다). CI는 ALGO_DB_PATH를 스크래치 경로로 주므로, 이 테스트가 로컬 dev DB의
+    # 기존 스키마에 우연히 얹혀가지 않도록 격리된 DB를 직접 초기화한다.
+    monkeypatch.setenv("ALGO_ENV", "test")
+    monkeypatch.setenv("ALGO_DB_PATH", str(tmp_path / "pipeline.db"))
+    from src.db import init_db
+    init_db()
+
     with patch("src.agents.content_queue.dequeue_next", return_value=_attested_row()), \
          patch("src.agents.content_queue.claim_queue_row", return_value=True), \
          patch("src.agents.content_queue.unclaim_queue_row"), \
