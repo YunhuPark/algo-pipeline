@@ -7,6 +7,7 @@ NewsCollector — 최신 뉴스 자동 수집 + GPT-4o 주제 선택
 """
 from __future__ import annotations
 
+import re
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
@@ -19,6 +20,7 @@ from pydantic import BaseModel
 from tavily import TavilyClient
 
 from src.config import OPENAI_API_KEY, TAVILY_API_KEY, LLM_MODEL
+from src.utils.rss_content import extract_feed_entry_content
 
 # ── RSS 피드 목록 (한국 + 글로벌 주요 뉴스) ───────────────
 RSS_FEEDS = [
@@ -55,14 +57,63 @@ class NewsSelection:
     reason: str         # 선택 이유
     context: str        # 배경 정보 (content_creator에 주입)
     source_items: list[NewsItem] = field(default_factory=list)
+    selected_item: NewsItem | None = None
 
 
 # ── Pydantic 스키마 (structured output) ──────────────────
 
 class _SelectedTopic(BaseModel):
+    selected_index: int
     topic: str
     reason: str
     context: str
+
+
+_SOURCE_ANCHOR_STOPWORDS = {
+    "about",
+    "after",
+    "ai",
+    "amid",
+    "and",
+    "are",
+    "but",
+    "for",
+    "from",
+    "how",
+    "into",
+    "new",
+    "says",
+    "the",
+    "this",
+    "what",
+    "when",
+    "why",
+    "with",
+}
+
+
+def _source_anchor(source_title: str) -> str:
+    """Return the first likely proper-name anchor from an English headline."""
+
+    for token in re.findall(r"[A-Za-z][A-Za-z0-9.+-]*", source_title or ""):
+        if len(token) < 2 or token.lower() in _SOURCE_ANCHOR_STOPWORDS:
+            continue
+        if token[0].isupper() or any(char.isupper() or char.isdigit() for char in token[1:]):
+            return token
+    return ""
+
+
+def _ensure_source_locked_topic(topic: str, source_title: str) -> str:
+    """Keep the selected article's proper name in an otherwise generic topic."""
+
+    clean_topic = (topic or "").strip()
+    anchor = _source_anchor(source_title)
+    if not anchor:
+        return clean_topic
+    pattern = rf"(?<![A-Za-z0-9]){re.escape(anchor)}(?![A-Za-z0-9])"
+    if re.search(pattern, clean_topic, flags=re.IGNORECASE):
+        return clean_topic
+    return f"{anchor} {clean_topic}".strip()
 
 
 # ── RSS 수집 ──────────────────────────────────────────────
@@ -88,7 +139,9 @@ def _parse_rss_feeds(limit_hours: int = HOURS_LIMIT) -> list[NewsItem]:
                     continue
 
                 title   = getattr(entry, "title",   "").strip()
-                summary = getattr(entry, "summary",  "").strip()[:300]
+                # content:encoded가 있으면 전문을 보존한다. 300자 preview만
+                # 저장하면 Tavily extract가 실패하는 순간 근거가 사라진다.
+                summary = extract_feed_entry_content(entry)
                 link    = getattr(entry, "link",     "")
 
                 if not title:
@@ -140,7 +193,11 @@ _SYSTEM = """
 - 설명할 내용이 충분히 있어서 6장 카드뉴스를 채울 수 있는 주제
 - AI, IT, 비즈니스, 사회 이슈 중 파급력이 큰 것
 - 지나치게 특정 정치적 편향이 없는 것
+- 원문 출처와 사건이 명확하고, 서로 다른 핵심 사실을 4개 이상 뽑을 수 있는 기사
+- 선택한 한 기사의 고유명사·제품명·핵심 수치를 topic에 그대로 유지할 것
+- "AI 필수 용어", "알아야 할 것", "최신 트렌드" 같은 포괄적 주제로 바꾸지 말 것
 
+selected_index: 선택한 헤드라인의 번호 (1부터 시작)
 topic: 카드뉴스 제목으로 쓸 간결한 주제명 (예: "애플 AI 전략 대전환")
 reason: 왜 이 주제를 선택했는지 한 줄
 context: 카드뉴스 작성에 필요한 핵심 배경 정보 3~5문장
@@ -184,22 +241,39 @@ def collect_and_select() -> NewsSelection:
 
     rss_items = _parse_rss_feeds()
     tavily_items = _fetch_tavily_trends()
-    all_items = rss_items + tavily_items
+    all_items = [
+        item
+        for item in rss_items + tavily_items
+        if item.title.strip() and item.url.startswith(("http://", "https://"))
+    ]
 
     if not all_items:
         raise RuntimeError("수집된 뉴스가 없습니다. 네트워크 연결을 확인하세요.")
 
     print(f"  [NewsCollector] 총 {len(all_items)}개 기사 → GPT-4o 주제 선택 중...")
     selected = _select_topic_with_gpt(all_items)
+    selected_index = max(1, min(selected.selected_index, min(len(all_items), 40)))
+    selected_item = all_items[selected_index - 1]
+    source_locked_topic = _ensure_source_locked_topic(
+        selected.topic,
+        selected_item.title,
+    )
 
-    print(f"  [NewsCollector] 선택된 주제: {selected.topic}")
+    if source_locked_topic != selected.topic.strip():
+        print(
+            "  [NewsCollector] 원문 고유명사 복원: "
+            f"'{selected.topic}' → '{source_locked_topic}'"
+        )
+    print(f"  [NewsCollector] 선택된 주제: {source_locked_topic}")
+    print(f"  [NewsCollector] 고정 원문: {selected_item.title}")
     print(f"  [NewsCollector] 이유: {selected.reason}")
 
     return NewsSelection(
-        topic=selected.topic,
+        topic=source_locked_topic,
         reason=selected.reason,
         context=selected.context,
         source_items=all_items[:10],
+        selected_item=selected_item,
     )
 
 

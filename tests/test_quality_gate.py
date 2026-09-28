@@ -1,7 +1,12 @@
 import pytest
 from decimal import Decimal
-from src.qa.deterministic_verifier import DeterministicVerifier, QualityGateError
+from src.qa.deterministic_verifier import (
+    DeterministicVerifier,
+    QualityGateError,
+    repair_source_backed_numeric_localizations,
+)
 from src.qa.semantic_critic import SemanticCritic, SemanticCriticResult, run_semantic_critic
+from src.qa.editorial_verifier import validate_edited_slide
 from src.schemas.card_news import SourceLineage, EvidencePassage, Claim, NormalizedNumber, NormalizedDate
 from src.qa.script_assembler import ScriptAssembler
 from langchain_core.runnables import RunnableLambda
@@ -163,6 +168,316 @@ def test_number_1_5_vs_15(mock_lineage):
         DeterministicVerifier.verify_claims([claim], mock_lineage)
     assert exc.value.error_code == "NUMBER_UNSUPPORTED"
 
+
+def test_korean_man_matches_equivalent_english_million(mock_lineage):
+    evidence = EvidencePassage(
+        evidence_id="e-scale",
+        article_id="a1",
+        text="The model processes 1.05 million tokens in this benchmark.",
+        source_url="http://test.com",
+        content_hash="scale-hash",
+    )
+    lineage = mock_lineage.model_copy(update={"evidence_passages": [evidence]})
+    claim = Claim(
+        claim_id="c-scale",
+        claim_text="이 벤치마크에서 105만 개의 토큰을 처리했다.",
+        claim_type="numerical",
+        numbers=[
+            NormalizedNumber(
+                raw_text="105만 개",
+                normalized_value=Decimal("105"),
+                unit="개",
+            )
+        ],
+        evidence_ids=["e-scale"],
+    )
+
+    DeterministicVerifier.verify_claims([claim], lineage)
+
+    assert claim.verification_status == "verified"
+
+
+@pytest.mark.parametrize(
+    "raw_text",
+    ["hundreds of millions", "수억 달러"],
+)
+def test_approximate_hundreds_of_millions_remains_source_grounded(
+    mock_lineage,
+    raw_text,
+):
+    evidence = EvidencePassage(
+        evidence_id="e-approx",
+        article_id="a1",
+        text=(
+            "Cognition leases an Nvidia server cluster that costs hundreds "
+            "of millions of dollars annually."
+        ),
+        source_url="http://test.com",
+        content_hash="approx-hash",
+    )
+    lineage = mock_lineage.model_copy(update={"evidence_passages": [evidence]})
+    claim = Claim(
+        claim_id="c-approx",
+        claim_text="Cognition은 서버 클러스터에 매년 수억 달러를 지출한다.",
+        claim_type="numerical",
+        entities=["Cognition"],
+        numbers=[
+            NormalizedNumber(
+                raw_text=raw_text,
+                normalized_value=Decimal("100000000"),
+                unit="dollars",
+            )
+        ],
+        evidence_ids=["e-approx"],
+    )
+
+    DeterministicVerifier.verify_claims([claim], lineage)
+
+    assert claim.verification_status == "verified"
+
+
+def test_approximate_magnitude_mismatch_still_fails_closed(mock_lineage):
+    evidence = EvidencePassage(
+        evidence_id="e-approx",
+        article_id="a1",
+        text="The cluster costs hundreds of millions of dollars annually.",
+        source_url="http://test.com",
+        content_hash="approx-hash",
+    )
+    lineage = mock_lineage.model_copy(update={"evidence_passages": [evidence]})
+    claim = Claim(
+        claim_id="c-approx",
+        claim_text="이 클러스터에는 매년 수십억 달러가 든다.",
+        claim_type="numerical",
+        numbers=[
+            NormalizedNumber(
+                raw_text="수십억 달러",
+                normalized_value=Decimal("1000000000"),
+                unit="달러",
+            )
+        ],
+        evidence_ids=["e-approx"],
+    )
+
+    with pytest.raises(QualityGateError) as exc:
+        DeterministicVerifier.verify_claims([claim], lineage)
+
+    assert exc.value.error_code == "NUMBER_UNSUPPORTED"
+
+
+def test_exact_english_scaled_number_does_not_become_approximate(mock_lineage):
+    evidence = EvidencePassage(
+        evidence_id="e-exact",
+        article_id="a1",
+        text="Cognition reached a $48 billion valuation.",
+        source_url="http://test.com",
+        content_hash="exact-hash",
+    )
+    lineage = mock_lineage.model_copy(update={"evidence_passages": [evidence]})
+    claim = Claim(
+        claim_id="c-exact",
+        claim_text="Cognition의 기업가치는 480억 달러다.",
+        claim_type="numerical",
+        entities=["Cognition"],
+        numbers=[
+            NormalizedNumber(
+                raw_text="$48 billion",
+                normalized_value=Decimal("48000000000"),
+                unit="dollars",
+            )
+        ],
+        evidence_ids=["e-exact"],
+    )
+
+    DeterministicVerifier.verify_claims([claim], lineage)
+
+    assert claim.verification_status == "verified"
+
+
+def test_48_billion_matches_480_eok_dollars(mock_lineage):
+    evidence = EvidencePassage(
+        evidence_id="e-valuation",
+        article_id="a1",
+        text="Cognition raised $2 billion at a $48B valuation.",
+        source_url="http://test.com",
+        content_hash="valuation-hash",
+    )
+    lineage = mock_lineage.model_copy(update={"evidence_passages": [evidence]})
+    claim = Claim(
+        claim_id="c-valuation",
+        claim_text="Cognition은 20억 달러를 조달하며 기업가치 480억 달러를 인정받았다.",
+        claim_type="numerical",
+        entities=["Cognition"],
+        numbers=[
+            NormalizedNumber(
+                raw_text="20억 달러",
+                normalized_value=Decimal("2000000000"),
+                unit="달러",
+            ),
+            NormalizedNumber(
+                raw_text="480억 달러",
+                normalized_value=Decimal("48000000000"),
+                unit="달러",
+            ),
+        ],
+        evidence_ids=["e-valuation"],
+    )
+
+    DeterministicVerifier.verify_claims([claim], lineage)
+
+    assert claim.verification_status == "verified"
+
+
+def test_48_billion_does_not_match_48_eok_dollars(mock_lineage):
+    evidence = EvidencePassage(
+        evidence_id="e-valuation",
+        article_id="a1",
+        text="Cognition reached a $48 billion valuation.",
+        source_url="http://test.com",
+        content_hash="valuation-hash",
+    )
+    lineage = mock_lineage.model_copy(update={"evidence_passages": [evidence]})
+    claim = Claim(
+        claim_id="c-valuation",
+        claim_text="Cognition의 기업가치는 48억 달러다.",
+        claim_type="numerical",
+        entities=["Cognition"],
+        numbers=[
+            NormalizedNumber(
+                raw_text="48억 달러",
+                normalized_value=Decimal("4800000000"),
+                unit="달러",
+            )
+        ],
+        evidence_ids=["e-valuation"],
+    )
+
+    with pytest.raises(QualityGateError) as exc:
+        DeterministicVerifier.verify_claims([claim], lineage)
+
+    assert exc.value.error_code == "NUMBER_UNSUPPORTED"
+
+
+def test_repairs_unambiguous_48_billion_to_480_eok_localization(mock_lineage):
+    evidence = EvidencePassage(
+        evidence_id="e-valuation",
+        article_id="a1",
+        text="Cognition reached a $48B valuation.",
+        source_url="http://test.com",
+        content_hash="valuation-hash",
+    )
+    lineage = mock_lineage.model_copy(update={"evidence_passages": [evidence]})
+    claim = Claim(
+        claim_id="c-valuation",
+        display_title="Cognition 48억 달러 가치",
+        claim_text="Cognition의 기업가치는 48억 달러로 평가됐다.",
+        claim_type="numerical",
+        entities=["Cognition"],
+        numbers=[
+            NormalizedNumber(
+                raw_text="48억 달러",
+                normalized_value=Decimal("4800000000"),
+                unit="달러",
+            )
+        ],
+        evidence_ids=["e-valuation"],
+    )
+
+    repaired, repairs = repair_source_backed_numeric_localizations([claim], lineage)
+
+    assert repairs == [("c-valuation", "48억 달러", "480억 달러")]
+    assert repaired[0].display_title == "Cognition 480억 달러 가치"
+    assert repaired[0].claim_text == "Cognition의 기업가치는 480억 달러로 평가됐다."
+    assert repaired[0].numbers[0].raw_text == "480억 달러"
+    assert repaired[0].numbers[0].normalized_value == Decimal("48000000000")
+    DeterministicVerifier.verify_claims(repaired, lineage)
+
+
+def test_does_not_repair_unrelated_unsupported_amount(mock_lineage):
+    evidence = EvidencePassage(
+        evidence_id="e-valuation",
+        article_id="a1",
+        text="Cognition reached a $49B valuation.",
+        source_url="http://test.com",
+        content_hash="valuation-hash",
+    )
+    lineage = mock_lineage.model_copy(update={"evidence_passages": [evidence]})
+    claim = Claim(
+        claim_id="c-valuation",
+        claim_text="Cognition의 기업가치는 48억 달러로 평가됐다.",
+        claim_type="numerical",
+        numbers=[
+            NormalizedNumber(
+                raw_text="48억 달러",
+                normalized_value=Decimal("4800000000"),
+                unit="달러",
+            )
+        ],
+        evidence_ids=["e-valuation"],
+    )
+
+    repaired, repairs = repair_source_backed_numeric_localizations([claim], lineage)
+
+    assert repairs == []
+    assert repaired[0] == claim
+
+
+def test_korean_compound_scale_matches_english_m_suffix(mock_lineage):
+    evidence = EvidencePassage(
+        evidence_id="e-compound",
+        article_id="a1",
+        text="The model contains 105M parameters.",
+        source_url="http://test.com",
+        content_hash="compound-hash",
+    )
+    lineage = mock_lineage.model_copy(update={"evidence_passages": [evidence]})
+    claim = Claim(
+        claim_id="c-compound",
+        claim_text="이 모델은 1억 500만 개의 파라미터를 포함한다.",
+        claim_type="numerical",
+        numbers=[
+            NormalizedNumber(
+                raw_text="1억 500만 개",
+                normalized_value=Decimal("105000000"),
+                unit="개",
+            )
+        ],
+        evidence_ids=["e-compound"],
+    )
+
+    DeterministicVerifier.verify_claims([claim], lineage)
+
+    assert claim.verification_status == "verified"
+
+
+def test_korean_105_man_does_not_match_english_105_million(mock_lineage):
+    evidence = EvidencePassage(
+        evidence_id="e-mismatch",
+        article_id="a1",
+        text="The model contains 105M parameters.",
+        source_url="http://test.com",
+        content_hash="mismatch-hash",
+    )
+    lineage = mock_lineage.model_copy(update={"evidence_passages": [evidence]})
+    claim = Claim(
+        claim_id="c-mismatch",
+        claim_text="이 모델은 105만 개의 파라미터를 포함한다.",
+        claim_type="numerical",
+        numbers=[
+            NormalizedNumber(
+                raw_text="105만 개",
+                normalized_value=Decimal("105"),
+                unit="개",
+            )
+        ],
+        evidence_ids=["e-mismatch"],
+    )
+
+    with pytest.raises(QualityGateError) as exc:
+        DeterministicVerifier.verify_claims([claim], lineage)
+
+    assert exc.value.error_code == "NUMBER_UNSUPPORTED"
+
 def test_number_unit_mismatch(mock_lineage):
     # 30% vs 30명
     claim = Claim(
@@ -202,6 +517,97 @@ def test_date_relative_absolute_mismatch(mock_lineage):
         DeterministicVerifier.verify_claims([claim], mock_lineage)
     assert exc.value.error_code == "DATE_UNSUPPORTED"
 
+
+def test_korean_month_matches_english_month_name(mock_lineage):
+    evidence = EvidencePassage(
+        evidence_id="e-date",
+        article_id="a1",
+        text="Cognition introduced the coding product in May.",
+        source_url="http://test.com",
+        content_hash="date-hash",
+    )
+    lineage = mock_lineage.model_copy(update={"evidence_passages": [evidence]})
+    claim = Claim(
+        claim_id="c-date",
+        claim_text="Cognition은 5월에 코딩 제품을 공개했다.",
+        claim_type="factual",
+        entities=["Cognition"],
+        dates=[
+            NormalizedDate(
+                raw_text="5월",
+                normalized_date="--05",
+                precision="month",
+                is_relative=False,
+            )
+        ],
+        evidence_ids=["e-date"],
+    )
+
+    DeterministicVerifier.verify_claims([claim], lineage)
+
+    assert claim.verification_status == "verified"
+
+
+def test_korean_month_does_not_match_different_english_month(mock_lineage):
+    evidence = EvidencePassage(
+        evidence_id="e-date",
+        article_id="a1",
+        text="Cognition introduced the coding product in June.",
+        source_url="http://test.com",
+        content_hash="date-hash",
+    )
+    lineage = mock_lineage.model_copy(update={"evidence_passages": [evidence]})
+    claim = Claim(
+        claim_id="c-date",
+        claim_text="Cognition은 5월에 코딩 제품을 공개했다.",
+        claim_type="factual",
+        entities=["Cognition"],
+        dates=[
+            NormalizedDate(
+                raw_text="5월",
+                normalized_date="--05",
+                precision="month",
+                is_relative=False,
+            )
+        ],
+        evidence_ids=["e-date"],
+    )
+
+    with pytest.raises(QualityGateError) as exc:
+        DeterministicVerifier.verify_claims([claim], lineage)
+
+    assert exc.value.error_code == "DATE_UNSUPPORTED"
+
+
+def test_lowercase_modal_may_is_not_treated_as_date(mock_lineage):
+    evidence = EvidencePassage(
+        evidence_id="e-date",
+        article_id="a1",
+        text="The product may improve coding workflows.",
+        source_url="http://test.com",
+        content_hash="date-hash",
+    )
+    lineage = mock_lineage.model_copy(update={"evidence_passages": [evidence]})
+    claim = Claim(
+        claim_id="c-date",
+        claim_text="제품은 5월에 공개됐다.",
+        claim_type="factual",
+        dates=[
+            NormalizedDate(
+                raw_text="5월",
+                normalized_date="--05",
+                precision="month",
+                is_relative=False,
+            )
+        ],
+        evidence_ids=["e-date"],
+    )
+
+    with pytest.raises(QualityGateError) as exc:
+        DeterministicVerifier.verify_claims([claim], lineage)
+
+    assert exc.value.error_code == "DATE_UNSUPPORTED"
+
 # --- SEMANTIC CRITIC TESTS (Meaning Distortion) ---
 def get_mock_llm(verdict="contradicted", reason="reason", confidence=1.0, claim_id="c1", evidence_ids=["e1"]):
     import json
@@ -216,6 +622,60 @@ def get_mock_llm(verdict="contradicted", reason="reason", confidence=1.0, claim_
             })
         return Resp()
     return RunnableLambda(invoke)
+
+
+def test_editorial_revision_rejects_number_missing_from_evidence(mock_lineage):
+    mock_llm = get_mock_llm(
+        verdict="supported",
+        claim_id="editorial-revision",
+        evidence_ids=["e1", "e2", "e3", "e4"],
+    )
+
+    with pytest.raises(QualityGateError) as exc:
+        validate_edited_slide(
+            title="점유율 급등",
+            body="점유율이 99%로 올랐다.",
+            slide_type="content",
+            source_lineage=mock_lineage,
+            semantic_llm=mock_llm,
+        )
+
+    assert exc.value.error_code == "NUMBER_UNSUPPORTED"
+
+
+def test_editorial_revision_requires_semantic_support(mock_lineage):
+    mock_llm = get_mock_llm(
+        verdict="contradicted",
+        claim_id="editorial-revision",
+        evidence_ids=["e1", "e2", "e3", "e4"],
+    )
+
+    with pytest.raises(QualityGateError) as exc:
+        validate_edited_slide(
+            title="발표 취소",
+            body="OpenAI가 모델 발표를 취소했다.",
+            slide_type="content",
+            source_lineage=mock_lineage,
+            semantic_llm=mock_llm,
+        )
+
+    assert exc.value.error_code == "CLAIM_CONTRADICTED"
+
+
+def test_editorial_revision_accepts_supported_copy(mock_lineage):
+    mock_llm = get_mock_llm(
+        verdict="supported",
+        claim_id="editorial-revision",
+        evidence_ids=["e1", "e2", "e3", "e4"],
+    )
+
+    validate_edited_slide(
+        title="새 모델 발표",
+        body="OpenAI는 최근 새로운 모델을 발표했다.",
+        slide_type="content",
+        source_lineage=mock_lineage,
+        semantic_llm=mock_llm,
+    )
 
 def test_semantic_critic_positive_negative(mock_lineage):
     # 긍정 ↔ 부정
@@ -257,6 +717,39 @@ def test_semantic_critic_overgeneralization(mock_lineage):
     with pytest.raises(QualityGateError) as exc:
         run_semantic_critic([claim], mock_lineage, llm=mock_llm)
     assert exc.value.error_code == "CLAIM_CONTRADICTED"
+
+
+def test_semantic_critic_also_checks_generated_display_title(mock_lineage):
+    import json
+
+    prompts = []
+
+    def invoke(prompt):
+        prompts.append(str(prompt))
+
+        class Resp:
+            content = json.dumps({
+                "verdict": "supported",
+                "reason": "제목과 본문이 원문에 의해 지지됩니다.",
+                "confidence": 1.0,
+                "claim_id": "c1",
+                "evidence_ids": ["e1"],
+            })
+
+        return Resp()
+
+    claim = Claim(
+        claim_id="c1",
+        display_title="OpenAI 새 모델 공개",
+        claim_text="OpenAI는 최근 새로운 모델을 발표했다.",
+        claim_type="factual",
+        evidence_ids=["e1"],
+        verification_status="verified",
+    )
+
+    SemanticCritic(llm=RunnableLambda(invoke)).critique_claim(claim, mock_lineage)
+
+    assert "카드 제목: OpenAI 새 모델 공개" in prompts[0]
 
 # --- SEMANTIC CRITIC SYSTEM TESTS ---
 def test_semantic_critic_claim_id_mismatch(mock_lineage):
@@ -348,3 +841,32 @@ def test_script_assembler(mock_lineage):
     script = ScriptAssembler.assemble("AI Tech", [claim])
     assert script.topic == "AI Tech"
     assert len(script.slides) == 3 # 1 cover, 1 content, 1 cta
+    assert script.slides[1].title.startswith("OpenAI는 최근 새로운 모델")
+    assert len(script.slides[1].title) <= 22
+    assert "핵심 포인트" not in script.slides[1].title
+
+
+def test_script_assembler_applies_angle_and_requested_card_count(mock_lineage):
+    claims = [
+        Claim(
+            claim_id=f"c{index}",
+            claim_text=f"OpenAI는 검증된 기능 {index}을 발표했다.",
+            claim_type="factual",
+            entities=["OpenAI"],
+            evidence_ids=["e1"],
+            verification_status="verified",
+        )
+        for index in range(1, 7)
+    ]
+
+    script = ScriptAssembler.assemble(
+        "OpenAI 업데이트",
+        claims,
+        num_cards=5,
+        editorial_angle="공감",
+    )
+
+    assert len(script.slides) == 5
+    assert script.hook == "복잡한 소식을 쉽게 풀었습니다"
+    assert script.cover.body == script.hook
+    assert "#OpenAI" in script.hashtags
