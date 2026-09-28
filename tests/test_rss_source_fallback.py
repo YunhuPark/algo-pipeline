@@ -132,6 +132,28 @@ def test_looks_like_article_url_rejects_listing_and_tag_pages():
     assert looks_like_article_url("https://example.com/magazine/list/new/") is False
 
 
+def test_looks_like_article_url_rejects_bare_section_slug():
+    # 실제로 이 버그 때문에 큐 항목 하나가 통째로 생성 실패했다: 뉴스
+    # 수집기가 "https://news.daum.net/tech"(IT/과학 섹션 첫 화면, 개별
+    # 기사가 아님)를 실제 기사로 취급 → 본문 없이 생성 시도 → 근거 부족으로
+    # 편집 검증이 9번 재시도 끝에 전부 실패. 경로가 그 섹션명 한 단어
+    # 뿐이면(_BARE_SECTION_NAMES) 기사가 아니라 섹션 첫 화면으로 판단한다 —
+    # "roundup"/"apple-titan"처럼 이 목록에 없는 한 단어 슬러그는 실제
+    # 기사일 수 있으므로 그대로 통과시킨다(아래 다른 테스트에서 확인).
+    assert looks_like_article_url("https://news.daum.net/tech") is False
+    assert looks_like_article_url("https://news.daum.net/tech/") is False
+    assert looks_like_article_url("https://example.com/politics") is False
+    assert looks_like_article_url("https://example.com/roundup") is True
+    assert looks_like_article_url("https://example.com/apple-titan") is True
+    # 숫자가 포함된 한 단어 경로는 여전히 기사로 취급 (예: 짧은 기사 ID)
+    assert looks_like_article_url("https://example.com/article12345") is True
+    # 길고 서술적인 한 단어(하이픈 슬러그) 경로는 섹션명이 아니라 실제
+    # 기사 슬러그이므로 그대로 통과시킨다.
+    assert looks_like_article_url(
+        "https://example.com/apple-ships-new-iphone-with-longer-battery-life"
+    ) is True
+
+
 def test_collect_and_select_excludes_homepage_only_candidates(monkeypatch):
     homepage_item = news_collector.NewsItem(
         title="요즘 사람들의 IT 매거진, 요즘IT",

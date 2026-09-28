@@ -19,6 +19,21 @@ _LISTING_PATH_SEGMENTS = {
     "search", "collection", "collections",
 }
 
+# A section front page is sometimes just one bare word ("/tech", "/it",
+# "/politics") with none of the structural keywords above in the path at
+# all - the word itself IS the section name, which varies by outlet and
+# language. This is only checked when it's the *entire* path (see below):
+# a multi-segment path that merely contains "tech" as one component (e.g.
+# "/tech/apple-ships-new-iphone") is a normal article filed under that
+# section, not a listing page, so this list must never be checked against
+# individual segments the way _LISTING_PATH_SEGMENTS is.
+_BARE_SECTION_NAMES = {
+    "tech", "technology", "it", "politics", "sports", "business", "world",
+    "opinion", "science", "economy", "society", "entertainment", "culture",
+    "health", "money", "finance", "market", "markets", "news",
+    "national", "international", "local",
+}
+
 
 def looks_like_article_url(url: str) -> bool:
     """Reject a bare homepage or listing/section URL masquerading as an article.
@@ -34,8 +49,13 @@ def looks_like_article_url(url: str) -> bool:
     path = urlparse(url).path.strip("/")
     if not path:
         return False
-    segments = {segment.lower() for segment in path.split("/") if segment}
-    return not (segments & _LISTING_PATH_SEGMENTS)
+    parts = [segment.lower() for segment in path.split("/") if segment]
+    segments = set(parts)
+    if segments & _LISTING_PATH_SEGMENTS:
+        return False
+    if len(parts) == 1 and parts[0] in _BARE_SECTION_NAMES:
+        return False
+    return True
 
 
 def _field(value: Any, name: str, default: Any = "") -> Any:
