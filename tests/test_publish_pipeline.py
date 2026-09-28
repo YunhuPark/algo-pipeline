@@ -93,6 +93,62 @@ def test_pipeline_does_not_call_deprecated_fact_checker(mock_pipeline_agents):
     mock_pipeline_agents["fc_check"].assert_not_called()
 
 
+def test_supervised_publish_records_explicit_approval(mock_pipeline_agents):
+    """감독 게시에서는 실제 승인 응답 이후에만 publisher를 호출한다."""
+    from src.pipeline import run_pipeline
+
+    before_publish = MagicMock()
+    on_remote_id = MagicMock()
+    with patch("src.pipeline.ig_publisher.publish", return_value="ig-approved"), patch(
+        "src.agents.publisher.get_post_permalink", return_value=None
+    ):
+        result = run_pipeline(
+            topic="Test",
+            publish=True,
+            human_approval=True,
+            auto=False,
+            publish_attempt_id="attempt-approved",
+            before_publish=before_publish,
+            on_remote_id=on_remote_id,
+        )
+
+    mock_pipeline_agents["app"].assert_called_once_with(
+        [Path("dummy.png")], auto=False
+    )
+    assert result.approval_decision == "APPROVED"
+    assert result.review_duration_sec >= 0
+    assert result.publish_succeeded is True
+    before_publish.assert_called_once_with("attempt-approved")
+    on_remote_id.assert_called_once_with("attempt-approved", "ig-approved")
+
+
+def test_supervised_rejection_blocks_remote_publish(mock_pipeline_agents):
+    """사람이 반려하면 원격 publisher 호출 없이 명시적 결과를 반환한다."""
+    from src.pipeline import run_pipeline
+
+    mock_pipeline_agents["app"].return_value = "skip"
+    with patch("src.pipeline.ig_publisher.publish") as publisher:
+        result = run_pipeline(
+            topic="Test",
+            publish=True,
+            human_approval=True,
+            auto=False,
+        )
+
+    assert result.generation_succeeded is True
+    assert result.publish_succeeded is False
+    assert result.failure_stage == "approval"
+    assert result.error_code == "HUMAN_REJECTED"
+    assert result.approval_decision == "REJECTED"
+    publisher.assert_not_called()
+
+
+def test_human_approval_fails_closed_without_reviewable_png():
+    from src.agents.approval import wait_for_approval
+
+    assert wait_for_approval([Path("reels.mp4")], auto=False) == "skip"
+
+
 def test_pipeline_fails_closed_without_fact_check_report(mock_pipeline_agents):
     """ContentCreator가 검증 보고서를 남기지 않으면 렌더·게시 전에 차단한다."""
     from src.pipeline import run_pipeline

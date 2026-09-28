@@ -14,6 +14,9 @@ Phase 7: Multi-Platform — Threads / 블로그 동시 발행
 from __future__ import annotations
 
 import json as _json
+import os
+import time
+from dataclasses import replace
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
@@ -51,7 +54,7 @@ def run_pipeline(
     select_angle: bool = False,
     human_approval: bool = False,
     auto: bool = False,
-    template: str = "auto",       # auto=주제 자동 감지, dark/light/bold/minimal/gradient
+    template: str = "brand",      # brand=브랜드 기본값, auto=주제 기반 실험 선택
     fact_check: bool = True,      # 팩트체크 레이어 실행 여부
     publish_threads: bool = False, # Threads 동시 발행
     publish_blog: bool = False,   # 블로그 동시 발행
@@ -102,7 +105,7 @@ def run_pipeline(
             on_remote_id=on_remote_id,
         )
         if res is not None:
-            return res
+            return replace(res, retry_count=retry)
 
         # 기사 교체 없이 재시도 = 팩트체크 실패 (같은 기사 재시도)
         if ignored_titles == prev_ignored:
@@ -157,7 +160,10 @@ def _run_once(
     print(_sep)
 
     # ── 템플릿 결정 ───────────────────────────────────────
-    tmpl_name = get_template_for_topic(topic) if template == "auto" else template
+    if template == "brand":
+        tmpl_name = os.getenv("DEFAULT_CARD_TEMPLATE", "brand").strip() or "brand"
+    else:
+        tmpl_name = get_template_for_topic(topic) if template == "auto" else template
     tmpl = get_template(tmpl_name)
     print(f"\n  템플릿: [{tmpl_name}] {tmpl['name']} — {tmpl.get('description','')}")
 
@@ -204,14 +210,32 @@ def _run_once(
 
     if source_lineage:
         print("\n[1] Source Lineage 주입...")
+        lineage_results: list[TrendResult] = []
+        seen_evidence: set[tuple[str, str]] = set()
+        for evidence in source_lineage.evidence_passages:
+            key = (evidence.source_url, evidence.content_hash)
+            if key in seen_evidence:
+                continue
+            seen_evidence.add(key)
+            is_primary = (
+                evidence.article_id == source_lineage.article_id
+                and evidence.source_url == source_lineage.source_url
+            )
+            lineage_results.append(
+                TrendResult(
+                    title=(
+                        source_lineage.source_title
+                        if is_primary
+                        else evidence.location or evidence.source_url
+                    ),
+                    url=evidence.source_url,
+                    content=evidence.text,
+                    score=1.0 if is_primary else 0.8,
+                )
+            )
         trend_report = TrendReport(
             query=source_lineage.topic,
-            results=[TrendResult(
-                title=source_lineage.source_title,
-                url=source_lineage.source_url,
-                content=source_lineage.context,
-                score=1.0
-            )],
+            results=lineage_results,
             summary=source_lineage.context,
         )
     elif trend_context:
@@ -272,14 +296,6 @@ def _run_once(
 
     # ── Phase 2: Content Creator ─────────────────────────
     print("\n[2] 카드뉴스 스크립트 생성 중 (GPT-4o + 자기검증)...")
-    if selected_angle:
-        angle_hint = (
-            f"\n\n[마케팅 앵글]\n앵글: {selected_angle.angle}\n"
-            f"커버 제목(반드시): {selected_angle.cover_title}\n"
-            f"캡션 훅(반드시): {selected_angle.hook}"
-        )
-        trend_report.summary = (trend_report.summary or "") + angle_hint
-
     # ── Fix A1: 단일 기사 집중 ─────────────────────────────
     # 상위 3건을 혼합하면 서로 다른 주제 기사가 섞여 카드 내용이 분산된다.
     # trend_report.results[0]이 trend_analyzer가 선정한 최고 관련 기사임.
@@ -312,6 +328,7 @@ def _run_once(
             raw_article_body=raw_article_body,
             disputed_notes=notes_state.get("last", "") if notes_state else "",
             source_lineage=source_lineage,
+            editorial_angle=selected_angle.angle if selected_angle else "",
         )
         fc_report = cc.last_fact_check_report
         from src.qa.publish_quality_gate import validate_publish_quality
@@ -603,14 +620,30 @@ def _run_once(
 
     # ── Phase 5: 사용자 최종 확인 ────────────────────────
     decision = "upload"
+    approval_decision = "NOT_REQUIRED"
+    review_duration_sec = 0.0
     if human_approval:
         print("\n[5] 최종 확인 — 이미지를 검토해주세요.")
+        review_started = time.monotonic()
         decision = wait_for_approval(paths, auto=auto)
+        review_duration_sec = time.monotonic() - review_started
         if decision == "retry":
             return None
         if decision == "skip":
             print("  업로드 취소.")
-            return PipelineResult(image_paths=paths, generation_succeeded=True, publish_requested=publish, publish_succeeded=False, ig_post_id=None, permalink=None, failure_stage=None, error_code=None)
+            return PipelineResult(
+                image_paths=paths,
+                generation_succeeded=True,
+                publish_requested=publish,
+                publish_succeeded=False,
+                ig_post_id=None,
+                permalink=None,
+                failure_stage="approval",
+                error_code="HUMAN_REJECTED",
+                approval_decision="REJECTED",
+                review_duration_sec=review_duration_sec,
+            )
+        approval_decision = "APPROVED"
 
     publish_succeeded = False
     ig_post_id = None
@@ -783,4 +816,17 @@ def _run_once(
     except Exception:
         pass
 
-    return PipelineResult(image_paths=paths, generation_succeeded=True, publish_requested=publish, publish_succeeded=publish_succeeded, ig_post_id=ig_post_id, permalink=_permalink, failure_stage=failure_stage, error_code=error_code, publish_attempt_state=attempt_state, publish_attempt_id=publish_attempt_id)
+    return PipelineResult(
+        image_paths=paths,
+        generation_succeeded=True,
+        publish_requested=publish,
+        publish_succeeded=publish_succeeded,
+        ig_post_id=ig_post_id,
+        permalink=_permalink,
+        failure_stage=failure_stage,
+        error_code=error_code,
+        publish_attempt_state=attempt_state,
+        publish_attempt_id=publish_attempt_id,
+        approval_decision=approval_decision,
+        review_duration_sec=review_duration_sec,
+    )

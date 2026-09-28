@@ -220,3 +220,27 @@ def test_existing_remote_id_is_never_dequeued(queue_db):
     with patch.object(content_queue, "_run_full_pipeline") as publisher:
         assert content_queue.publish_next() is None
         publisher.assert_not_called()
+
+
+def test_human_rejection_marks_queue_skipped_without_remote_attempt(queue_db):
+    row_id = db.enqueue_v2(metadata(), CollectionMethod.NEWS_COLLECTOR)
+    rejected = PipelineResult(
+        image_paths=[Path("card.png")],
+        generation_succeeded=True,
+        publish_requested=True,
+        publish_succeeded=False,
+        ig_post_id=None,
+        permalink=None,
+        failure_stage="approval",
+        error_code="HUMAN_REJECTED",
+        approval_decision="REJECTED",
+    )
+
+    with patch.object(content_queue, "_run_full_pipeline", return_value=rejected):
+        assert content_queue.publish_next() is None
+
+    with sqlite3.connect(queue_db) as conn:
+        status = conn.execute(
+            "SELECT status FROM queue WHERE id=?", (row_id,)
+        ).fetchone()[0]
+    assert status == "skipped"

@@ -15,9 +15,12 @@ Analytics — Instagram 성과 데이터 수집 + GPT-4o-mini 분석
 from __future__ import annotations
 
 import os
+import hashlib
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import httpx
 from dotenv import load_dotenv
@@ -41,6 +44,8 @@ class PostInsights:
     saves: int = 0
     reach: int = 0
     impressions: int = 0
+    shares: int = 0
+    fetch_succeeded: bool = False
 
 
 @dataclass
@@ -58,14 +63,18 @@ def fetch_post_insights(post_id: str) -> PostInsights:
     """
     Instagram Graph API로 단일 게시물 성과 지표 수집.
 
-    GET /{media-id}/insights?metric=likes,comments,saved,reach,impressions
+    GET /{media-id}/insights?metric=likes,comments,saved,reach,shares,views
+
+    ``views`` is mirrored into the legacy ``impressions`` field so the old
+    dashboard remains compatible while new snapshots keep an explicit metric
+    definition version.
     """
     if not IG_ACCESS_TOKEN:
         raise EnvironmentError("IG_ACCESS_TOKEN이 .env에 없습니다.")
 
     url = f"{IG_GRAPH_BASE}/{post_id}/insights"
     params = {
-        "metric": "likes,comments,saved,reach,impressions",
+        "metric": "likes,comments,saved,reach,shares,views",
         "access_token": IG_ACCESS_TOKEN,
     }
 
@@ -78,7 +87,11 @@ def fetch_post_insights(post_id: str) -> PostInsights:
 
         for item in data.get("data", []):
             name = item.get("name", "")
-            value = item.get("values", [{}])[0].get("value", 0)
+            total_value = item.get("total_value") or {}
+            value = total_value.get("value")
+            if value is None:
+                values = item.get("values") or []
+                value = values[0].get("value", 0) if values else 0
 
             if name == "likes":
                 result.likes = int(value)
@@ -90,6 +103,12 @@ def fetch_post_insights(post_id: str) -> PostInsights:
                 result.reach = int(value)
             elif name == "impressions":
                 result.impressions = int(value)
+            elif name == "views":
+                result.impressions = int(value)
+            elif name == "shares":
+                result.shares = int(value)
+
+        result.fetch_succeeded = True
 
     except httpx.HTTPStatusError as e:
         print(f"  [Analytics] API 오류 (post_id={post_id}): {e.response.status_code}")
@@ -99,11 +118,39 @@ def fetch_post_insights(post_id: str) -> PostInsights:
     return result
 
 
+def _publication_datetime(value: Any) -> datetime:
+    """Normalize legacy post timestamps to UTC for snapshot maturity checks."""
+
+    raw = str(value or "").strip()
+    if not raw:
+        raise ValueError("posted_at is required for a performance snapshot")
+    parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    if parsed.tzinfo is None:
+        local_tz = ZoneInfo(os.getenv("ALGO_TIMEZONE", "Asia/Seoul"))
+        parsed = parsed.replace(tzinfo=local_tz)
+    return parsed.astimezone(timezone.utc)
+
+
+def _snapshot_key(post_id: str, measured_at: datetime) -> str:
+    """Use an hourly bucket so retries cannot duplicate the same observation."""
+
+    bucket = measured_at.replace(minute=0, second=0, microsecond=0).isoformat()
+    raw = f"instagram_graph_api:{post_id}:{bucket}"
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
 def sync_all_insights() -> int:
     """
-    DB의 모든 instagram posts 레코드에 대해 insights를 가져와 analytics 테이블에 저장.
+    DB의 모든 Instagram 게시물 성과를 구형 화면용 테이블과 추적 DB의
+    provenance-aware snapshot 양쪽에 저장합니다.
+
+    API 요청이 실패하면 0으로 저장하지 않고 해당 게시물을 건너뜁니다.
     Returns: 업데이트된 게시물 수
     """
+    from src.analytics.db_experiments import init_tracking_db
+    from src.analytics.import_snapshot import import_performance_snapshot
+
+    init_tracking_db()
     posts = get_posts(platform="instagram", limit=200)
     updated = 0
 
@@ -114,6 +161,12 @@ def sync_all_insights() -> int:
 
         try:
             insights = fetch_post_insights(post_id)
+            if not insights.fetch_succeeded:
+                print(f"  [Analytics] 스킵 (post_id={post_id}): Insights 수집 실패")
+                continue
+
+            measured_at = datetime.now(timezone.utc)
+            publication_at = _publication_datetime(post["posted_at"])
             insert_analytics(
                 post_id=post_id,
                 platform="instagram",
@@ -123,10 +176,23 @@ def sync_all_insights() -> int:
                 reach=insights.reach,
                 impressions=insights.impressions,
             )
+            import_performance_snapshot(
+                publication_id=post_id,
+                measured_at=measured_at,
+                publication_at=publication_at,
+                reach=insights.reach,
+                saves=insights.saves,
+                shares=insights.shares,
+                likes=insights.likes,
+                comments=insights.comments,
+                source_type="instagram_graph_api",
+                metric_definition_version="instagram-media-insights-views-v1",
+                import_idempotency_key=_snapshot_key(post_id, measured_at),
+            )
             updated += 1
             print(f"  [Analytics] 업데이트: {post_id} — "
                   f"좋아요 {insights.likes}, 댓글 {insights.comments}, "
-                  f"저장 {insights.saves}, 도달 {insights.reach}")
+                  f"저장 {insights.saves}, 공유 {insights.shares}, 도달 {insights.reach}")
         except Exception as e:
             print(f"  [Analytics] 스킵 (post_id={post_id}): {e}")
 

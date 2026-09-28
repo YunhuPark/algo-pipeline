@@ -6,6 +6,7 @@ algo-site/src/data/posts_meta.json 으로 내보냅니다.
 from __future__ import annotations
 
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -22,6 +23,10 @@ _TARGETS = [
 
 def export() -> int:
     records: list[dict] = []
+
+    if not OUTPUT_DIR.exists():
+        print("  -> output directory not found; metadata export skipped")
+        return 0
 
     for folder in sorted(OUTPUT_DIR.iterdir(), reverse=True):
         meta_path = folder / "meta.json"
@@ -47,8 +52,10 @@ def export() -> int:
 
     print(f"  -> posts_meta.json saved ({len(records)} records, {saved} targets)")
 
-    # algo-site git push → Vercel 자동 배포
-    _git_push()
+    # External repository writes are explicit opt-in.  Normal generation only
+    # exports local metadata and never commits or pushes another repository.
+    if os.environ.get("AUTO_EXPORT_META_GIT_PUSH", "false").lower() == "true":
+        _git_push()
 
     return len(records)
 
@@ -62,13 +69,25 @@ def _git_push() -> None:
         return
     # Python subprocess + cwd로 직접 호출 — CreateProcessW가 한글 경로 정상 처리
     try:
-        _sp.run(["git", "add", "src/data/posts_meta.json"], cwd=str(algo_site), check=True, capture_output=True)
+        target_file = next(
+            (
+                target / "posts_meta.json"
+                for target in _TARGETS
+                if algo_site in target.parents and (target / "posts_meta.json").exists()
+            ),
+            None,
+        )
+        if target_file is None:
+            print("  -> algo-site metadata target 없음 (git 스킵)")
+            return
+        relative_target = target_file.relative_to(algo_site).as_posix()
+        _sp.run(["git", "add", "--", relative_target], cwd=str(algo_site), check=True, capture_output=True)
         result = _sp.run(["git", "diff", "--cached", "--quiet"], cwd=str(algo_site), capture_output=True)
         if result.returncode == 0:
             print("  -> algo-site 변경 없음 (스킵)")
             return
         _sp.run(["git", "commit", "-m", "data: posts_meta.json 자동 갱신"], cwd=str(algo_site), check=True, capture_output=True)
-        _sp.run(["git", "push", "origin", "main"], cwd=str(algo_site), check=True, capture_output=True)
+        _sp.run(["git", "push", "origin", "HEAD"], cwd=str(algo_site), check=True, capture_output=True)
         print("  -> algo-site git push 완료 (Vercel 배포 트리거)")
     except Exception as e:
         print(f"  -> git push 실패 (무시): {e}")
