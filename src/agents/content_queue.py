@@ -160,6 +160,17 @@ def _fill_from_news(count: int) -> list[int]:
 
             excluded_urls.add(selected_item.url)
 
+            # GPT가 topic과 selected_index를 자기모순적으로 고를 수 있다. 큐에
+            # 쌓기 전에 topic이 실제 선택된 기사와 무관하지 않은지 확인한다.
+            from src.qa.topic_source_guard import topic_matches_source
+
+            if not topic_matches_source(news.topic, selected_item.title, selected_item.summary):
+                print(
+                    "  [ContentQueue] 주제-출처 불일치 감지, 큐 추가 생략: "
+                    f"'{news.topic}' vs '{selected_item.title}'"
+                )
+                continue
+
             # 중복 주제 회피
             topic = news.topic
             if topic in seen_topics:
