@@ -337,21 +337,26 @@ def _draw_glass_panel(
     return Image.alpha_composite(img.convert("RGBA"), layer).convert("RGB")
 
 
-def _draw_body_panel(
-    img: Image.Image,
-    body: str,
-    *,
-    top: int = 850,
-) -> Image.Image:
-    """Render the verified claim as a readable editorial note."""
+OPTICAL_CENTER_SHIFT = 52
 
-    box = (PAD, top, W - PAD, H - 92)
-    img = _draw_glass_panel(img, box, fill_alpha=185, outline_alpha=65)
-    draw = ImageDraw.Draw(img)
 
-    label_font = _font(21, bold=True)
-    draw.text((PAD + 34, top + 30), "근거로 확인된 내용", font=label_font, fill=STYLE["accent2"])
+def _balanced_top(group_h: int, floor: int, bottom: int = H - 92) -> int:
+    """Top y that puts a block of `group_h` at the card's optical center.
 
+    The old layouts anchored content to a fixed y and a panel that stretched to
+    the bottom edge, so the text sat high inside a tall box and the whole block
+    read as bottom-heavy. Centering exactly on the card leaves it looking
+    top-heavy because the headline already sits at the top, so the target is
+    OPTICAL_CENTER_SHIFT px below the card's middle (roughly halfway between
+    the card center and the middle of the space under the headline). `floor`
+    keeps the block clear of the headline and `bottom` clear of the footer.
+    """
+
+    ideal = (H - group_h) // 2 + OPTICAL_CENTER_SHIFT
+    return max(floor, min(ideal, bottom - group_h))
+
+
+def _body_panel_layout(body: str, draw: ImageDraw.ImageDraw):
     cleaned = _clean(body)
     body_font = _auto_font(
         cleaned,
@@ -359,10 +364,42 @@ def _draw_body_panel(
         bold=False,
         steps=((55, 1.0), (85, 0.91), (115, 0.82)),
     )
-    lines = wrap_text(cleaned, body_font, draw, W - PAD * 2 - 68)
+    lines = wrap_text(cleaned, body_font, draw, W - PAD * 2 - 68)[:5]
     _, _, _, line_h = draw.textbbox((0, 0), "가나다", font=body_font)
+    panel_h = 74 + len(lines) * int(line_h * 1.38) + 36
+    return body_font, lines, line_h, panel_h
+
+
+def _body_panel_height(body: str) -> int:
+    """Height of the evidence note when it is sized to its text."""
+
+    return _body_panel_layout(body, ImageDraw.Draw(Image.new("RGB", (10, 10))))[3]
+
+
+def _draw_body_panel(
+    img: Image.Image,
+    body: str,
+    *,
+    top: int = 850,
+    fit: bool = False,
+) -> Image.Image:
+    """Render the verified claim as a readable editorial note.
+
+    fit=True sizes the panel to its text; the default keeps the legacy box that
+    runs down to the footer.
+    """
+
+    draw = ImageDraw.Draw(img)
+    body_font, lines, line_h, panel_h = _body_panel_layout(body, draw)
+    box = (PAD, top, W - PAD, top + panel_h if fit else H - 92)
+    img = _draw_glass_panel(img, box, fill_alpha=185, outline_alpha=65)
+    draw = ImageDraw.Draw(img)
+
+    label_font = _font(21, bold=True)
+    draw.text((PAD + 34, top + 30), "근거로 확인된 내용", font=label_font, fill=STYLE["accent2"])
+
     y = top + 74
-    for line in lines[:5]:
+    for line in lines:
         draw.text((PAD + 34, y), line, font=body_font, fill=STYLE["text_secondary"])
         y += int(line_h * 1.38)
     return img
@@ -395,9 +432,8 @@ def _draw_statement_body(img: Image.Image, body: str, *, top: int) -> Image.Imag
     pad_top, gap, pad_bottom = 34, 26, 42
     block_h = len(lines) * int(line_h * 1.34)
     panel_h = pad_top + label_h + gap + block_h + pad_bottom
-    region_top, region_bot = top, H - 92
-    panel_top = region_top + max(0, (region_bot - region_top - panel_h) // 2)
-    panel_bot = min(region_bot, panel_top + panel_h)
+    panel_top = _balanced_top(panel_h, top)
+    panel_bot = panel_top + panel_h
 
     img = _draw_glass_panel(
         img, (PAD, panel_top, W - PAD, panel_bot), fill_alpha=170, outline_alpha=60
@@ -543,15 +579,15 @@ def _render_infographic_content(
         values = [_clean(slide.accent)]
     visual_type, values, labels = _resolve_visual_layout(slide, values, labels)
 
+    # 제목 바로 아래를 바닥선으로 두고, 그 아래 콘텐츠 덩어리는 카드 중앙에 둔다.
+    content_floor = title_bottom + 40
     visual_top = max(330, title_bottom + 30)
-    visual_bottom = 800
-    visual_box = (PAD, visual_top, W - PAD, visual_bottom)
 
     # 인포그래픽은 보여줄 데이터가 있을 때만 그린다. warning/entity/impact는
     # 삼각형·동심원 안에 단어 하나를 넣을 뿐이라 470px을 장식에 쓰고 정작
     # 주장은 아래로 밀려났다. 그런 카드는 문장을 키워 그 공간을 쓴다.
     if visual_type not in {"hero_stat", "comparison", "process"}:
-        img = _draw_statement_body(img, slide.body, top=visual_top)
+        img = _draw_statement_body(img, slide.body, top=content_floor)
         _bottom_accent_line(ImageDraw.Draw(img))
         return img
 
@@ -589,6 +625,13 @@ def _render_infographic_content(
                 )
             y += card_h + card_gap
     else:
+        # 수치 박스 + 근거 패널을 한 덩어리로 보고 카드 중앙에 맞춘다. 패널은
+        # 글 높이에 맞춰 줄인다 (예전에는 바닥까지 늘어 글이 위쪽에만 몰렸다).
+        visual_h, panel_gap = 400, 44
+        panel_h = _body_panel_height(slide.body)
+        visual_top = _balanced_top(visual_h + panel_gap + panel_h, content_floor)
+        visual_bottom = visual_top + visual_h
+        visual_box = (PAD, visual_top, W - PAD, visual_bottom)
         img = _draw_glass_panel(img, visual_box, fill_alpha=145, outline_alpha=95)
         draw = ImageDraw.Draw(img)
         center_x = W // 2
@@ -707,7 +750,9 @@ def _render_infographic_content(
                 draw.text((center_x - value_w // 2, vy), line, font=value_font, fill=STYLE["text_primary"])
                 vy += int(value_h * 1.04)
 
-        img = _draw_body_panel(img, slide.body, top=850)
+        img = _draw_body_panel(
+            img, slide.body, top=visual_bottom + panel_gap, fit=True
+        )
 
     _bottom_accent_line(ImageDraw.Draw(img))
     return img
