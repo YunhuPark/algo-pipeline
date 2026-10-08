@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ast
 import os
+import re
 import sqlite3
 import subprocess
 import sys
@@ -82,6 +83,32 @@ def test_manual_cli_publish_is_blocked_before_importing_publisher():
     )
     assert result.returncode == 2
     assert "durable attempt" in result.stdout
+
+
+def test_threads_flag_is_blocked_before_any_mode_runs():
+    # --templates is a harmless mode: without the guard it would just print and
+    # exit 0.  Never use pipeline/agent modes here; a regression would start
+    # real generation or an endless scheduler.
+    result = subprocess.run(
+        [sys.executable, str(ROOT / "main.py"), "--templates", "--threads"],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        check=False,
+        timeout=60,
+    )
+    assert result.returncode == 2
+    assert "durable attempt" in result.stdout
+
+
+def test_threads_guard_is_the_first_branch_in_main():
+    source = _function_source(ROOT / "main.py", "main")
+    first_branch = re.search(r"if args\.(\w+)", source)
+    assert first_branch is not None
+    assert first_branch.group(1) == "threads"
+    assert "sys.exit(2)" in source[first_branch.start():first_branch.start() + 300]
 
 
 def test_cached_output_direct_publish_is_blocked():
