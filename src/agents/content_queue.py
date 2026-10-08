@@ -556,7 +556,15 @@ def _publish_cached_render(
             return None
 
     try:
-        ig_post_id = ig_publisher.publish(image_paths=paths, hook=hook, hashtags=hashtags)
+        # 사람이 검토한 캡션(caption.txt)을 그대로 올린다 — 승인한 것과 게시되는
+        # 것이 같도록. 파일이 없으면 기존처럼 hook + 해시태그로 조합한다.
+        extra = {}
+        reviewed_caption = ig_publisher.read_card_caption(folder)
+        if isinstance(reviewed_caption, str) and reviewed_caption:
+            extra["caption"] = reviewed_caption
+        ig_post_id = ig_publisher.publish(
+            image_paths=paths, hook=hook, hashtags=hashtags, **extra
+        )
     except Exception as e:
         print(f"  [ContentQueue] 캐시 렌더링 발행 실패 (큐 id={queue_id}): {e}")
         mark_queue_error(queue_id, "REMOTE_PUBLISH_PERSISTENCE_UNCERTAIN")

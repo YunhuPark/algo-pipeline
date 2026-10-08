@@ -578,10 +578,22 @@ def _run_once(
     p_tmpl.accent_color = "#{:02X}{:02X}{:02X}".format(r2, g2, b2)
     p_tmpl.overlay_darkness = tmpl["overlay_alpha"]
 
+    # 출처(매체·기사 제목·발행일)를 마지막 카드와 캡션에 싣는다. 출처 계보가 없는
+    # 경로(수동 실행 등)에서는 알 수 없으므로 표기하지 않는다.
+    source_note = None
+    if source_lineage is not None:
+        try:
+            from src.source_note import from_lineage
+
+            source_note = from_lineage(source_lineage)
+        except Exception as e:
+            print(f"  ⚠️ 출처 표기 생성 실패({type(e).__name__}) — 출처 없이 렌더링합니다")
+
     paths = design_renderer.render_card_set(
         script=script, background=bg, handle=h, persona=p_tmpl,
         video_infos=video_infos,
         pexels_video_map=pexels_preview_map or None,
+        source=source_note,
     )
 
     # ── Phase 2.6 후처리: script.json에 영상 매핑 결과 저장 ──
@@ -849,11 +861,18 @@ def _run_once(
         else:
             attempt_state = PublishAttemptState.STARTED
         try:
+            # 검토한 캡션(caption.txt, 출처 포함)을 그대로 올린다. 없으면 기존 조합.
+            publish_kwargs = {}
+            if paths:
+                reviewed_caption = ig_publisher.read_card_caption(paths[0].parent)
+                if isinstance(reviewed_caption, str) and reviewed_caption:
+                    publish_kwargs["caption"] = reviewed_caption
             ig_post_id = ig_publisher.publish(
                 image_paths=paths,
                 hook=script.hook,
                 hashtags=script.hashtags,
                 base_url=ig_base_url,
+                **publish_kwargs,
             )
             if not ig_post_id:
                 attempt_state = PublishAttemptState.UNKNOWN
