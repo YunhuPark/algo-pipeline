@@ -234,6 +234,25 @@ class ProviderAwareChatOpenAI(_OriginalChatOpenAI):
         )
         raise fallback_error
 
+    @staticmethod
+    def _track(provider: str, model: str, result=None, error: Exception | None = None) -> None:
+        """Record this call's token usage/cost. Never raises (see usage_tracker)."""
+
+        from src.usage_tracker import record_llm_call, usage_from_result
+
+        if error is not None:
+            record_llm_call(
+                provider=provider, model=model, ok=False, error=type(error).__name__
+            )
+            return
+        tokens_in, tokens_out = usage_from_result(result)
+        record_llm_call(
+            provider=provider,
+            model=model,
+            input_tokens=tokens_in,
+            output_tokens=tokens_out,
+        )
+
     def _generate(self, messages, stop=None, run_manager=None, **kwargs):
         if _primary_likely_down():
             fallback = self._fallback_model()
@@ -247,7 +266,9 @@ class ProviderAwareChatOpenAI(_OriginalChatOpenAI):
                         messages, stop=stop, run_manager=run_manager, **kwargs
                     )
                 except Exception as fallback_error:
+                    self._track("fallback", fallback.model_name, error=fallback_error)
                     self._raise_fallback_error(fallback, fallback_error)
+                self._track("fallback", fallback.model_name, result)
                 return result
         try:
             result = super()._generate(
@@ -257,8 +278,10 @@ class ProviderAwareChatOpenAI(_OriginalChatOpenAI):
                 **kwargs,
             )
             _clear_primary_outage()
+            self._track("openai", self.model_name, result)
             return result
         except Exception as primary_error:
+            self._track("openai", self.model_name, error=primary_error)
             if not _is_provider_failure(primary_error):
                 raise
             _mark_primary_down()
@@ -275,14 +298,17 @@ class ProviderAwareChatOpenAI(_OriginalChatOpenAI):
                 f"timeout={_fallback_timeout_seconds():g}s)"
             )
             try:
-                return fallback._generate(
+                result = fallback._generate(
                     messages,
                     stop=stop,
                     run_manager=run_manager,
                     **kwargs,
                 )
             except Exception as fallback_error:
+                self._track("fallback", fallback.model_name, error=fallback_error)
                 self._raise_fallback_error(fallback, fallback_error)
+            self._track("fallback", fallback.model_name, result)
+            return result
 
     async def _agenerate(self, messages, stop=None, run_manager=None, **kwargs):
         if _primary_likely_down():
