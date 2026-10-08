@@ -1298,6 +1298,9 @@ def queue_skip(qid: int):
     # 발행은 이 시점엔 막을 방법이 없다. 조용히 "건너뜀"이라고 속이지 않고
     # 정확한 상태를 알려준다.
     if try_mark_queue_skipped(qid):
+        # 렌더링된 카드를 사람이 거절한 경우엔 검토 결정으로 남긴다 (회고 집계용).
+        # 렌더링 전 항목이나 이미 발행 중이라 건너뛸 수 없던 경우는 기록하지 않는다.
+        _record_queue_review(qid, "REJECTED")
         return redirect(url_for("queue_page", msg=f"#{qid} 건너뜀"))
     return redirect(url_for(
         "queue_page",
@@ -1445,15 +1448,22 @@ def queue_prepare_next():
 
 
 def _record_queue_approval(queue_id: int) -> bool:
-    """Log the operator's approval for a queue item before it is published.
+    """Log the operator's approval for a queue item before it is published."""
+    return _record_queue_review(queue_id, "APPROVED")
 
-    /queue/approve_publish is the only place a human signs off on a queued card
-    in the dashboard, but it never wrote an editorial_feedback_events row — so
-    the weekly review saw zero review decisions and stayed INSUFFICIENT_DATA no
-    matter how many cards were approved. The idempotency key is shared with
-    /generate/review, so approving the same card through both paths counts once.
 
-    Best-effort and observational only: it never blocks or triggers publishing.
+def _record_queue_review(queue_id: int, decision: str) -> bool:
+    """Log the operator's APPROVED/REJECTED decision for a rendered queue card.
+
+    The queue page is where a human signs off on (or rejects) a card, but it
+    never wrote an editorial_feedback_events row — so the weekly review saw zero
+    review decisions and stayed INSUFFICIENT_DATA no matter how many cards were
+    handled. The idempotency key is shared with /generate/review, so handling
+    the same card through both paths counts once.
+
+    Best-effort and observational only: it never blocks publishing or skipping.
+    A card that was never rendered (no image_dir/meta.json) has nothing to
+    review, so it records nothing.
     """
     try:
         from src.db import get_queue_row
@@ -1471,21 +1481,26 @@ def _record_queue_approval(queue_id: int) -> bool:
         run_id = str(meta.get("run_id") or "")
         if not run_id:
             return False
-        if str(meta.get("editorial_validation_status") or "") not in {
-            "ORIGINAL_VERIFIED",
-            "EDIT_VERIFIED",
-        }:
+        decision = decision.strip().upper()
+        # Approving needs verified evidence (same rule as /generate/review);
+        # rejecting never does — declining an unverified card is always fine.
+        if decision == "APPROVED" and str(
+            meta.get("editorial_validation_status") or ""
+        ) not in {"ORIGINAL_VERIFIED", "EDIT_VERIFIED"}:
             return False
         log_editorial_feedback(
             content_id=dir_name,
             run_id=run_id,
             editor_id="dashboard_user",
-            approval_decision="APPROVED",
-            idempotency_key=f"review:{dir_name}:APPROVED",
+            approval_decision=decision,
+            edit_reason_category=(
+                "review_rejection" if decision == "REJECTED" else ""
+            ),
+            idempotency_key=f"review:{dir_name}:{decision}",
         )
         return True
     except Exception as exc:
-        print(f"  [Tracking] 큐 승인 기록 실패: {type(exc).__name__}")
+        print(f"  [Tracking] 큐 검토 기록 실패({decision}): {type(exc).__name__}")
         return False
 
 
