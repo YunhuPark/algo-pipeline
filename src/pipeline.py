@@ -208,24 +208,26 @@ def _run_once(
             print(f"  ⚠️ 주제 정제 스킵 ({e})")
 
     # ── Phase 0: 앵글 선택 ───────────────────────────────
-    # select_angle=True 또는 시사성 높은 주제 키워드 감지 시 자동 활성화
-    selected_angle = None
-    auto_angle = any(kw in topic for kw in _ANGLE_AUTO_KEYWORDS)
-    should_select_angle = select_angle or auto_angle
+    # 모든 게시물에 앵글이 필수다. 예전에는 select_angle=True이거나 주제에
+    # 시사성 키워드가 있을 때만 골라서, 키워드가 없는 주제는 앵글이 빈 채로
+    # 게시돼 앵글별 성과 분석에서 빠졌다. select_angle 인자는 호환용으로만 남긴다.
+    from src.agents.angle_selector import ensure_valid_angle, fallback_angle
 
-    if should_select_angle:
-        reason = "자동 (시사성 높은 주제)" if auto_angle and not select_angle else "수동"
-        print(f"\n[0] 마케팅 앵글 선택 중... ({reason})")
+    reason = "자동 (시사성 높은 주제)" if any(kw in topic for kw in _ANGLE_AUTO_KEYWORDS) else "필수"
+    if select_angle:
+        reason = "수동"
+    print(f"\n[0] 마케팅 앵글 선택 중... ({reason})")
 
-        # 이 계정의 실제 게시물 성과(analytics.sync_all_insights로 쌓인 데이터)를
-        # 반영 — 데이터가 아직 없거나 조회 자체가 실패해도 앵글 선택을 막지 않는다.
-        performance_hints = ""
-        try:
-            from src.agents.analytics import get_performance_hints
-            performance_hints = get_performance_hints()
-        except Exception as e:
-            print(f"  [AngleSelector] 성과 데이터 조회 실패({type(e).__name__}) — 일반 기준으로 진행")
+    # 이 계정의 실제 게시물 성과(analytics.sync_all_insights로 쌓인 데이터)를
+    # 반영 — 데이터가 아직 없거나 조회 자체가 실패해도 앵글 선택을 막지 않는다.
+    performance_hints = ""
+    try:
+        from src.agents.analytics import get_performance_hints
+        performance_hints = get_performance_hints()
+    except Exception as e:
+        print(f"  [AngleSelector] 성과 데이터 조회 실패({type(e).__name__}) — 일반 기준으로 진행")
 
+    try:
         selected_angle = pick_angle(
             topic=topic,
             trend_summary=trend_context or topic,
@@ -233,6 +235,11 @@ def _run_once(
             auto=auto,
             performance_hints=performance_hints,
         )
+    except Exception as e:
+        # 앵글 때문에 생성 전체가 실패하면 안 되고, 앵글이 빈 채로 가서도 안 된다.
+        print(f"  [AngleSelector] 앵글 생성 실패({type(e).__name__}) — 기본 앵글로 진행")
+        selected_angle = fallback_angle(topic, type(e).__name__)
+    selected_angle = ensure_valid_angle(selected_angle, topic)
 
     # ── Phase 1: Trend Analyzer ──────────────────────────
     from src.schemas.card_news import TrendReport, TrendResult

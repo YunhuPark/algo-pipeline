@@ -34,6 +34,16 @@ IG_ACCESS_TOKEN: str = os.getenv("IG_ACCESS_TOKEN", "")
 IG_USER_ID: str = os.getenv("IG_USER_ID", "")
 IG_GRAPH_BASE = "https://graph.instagram.com"
 
+# 응답에 반드시 들어 있어야 하는 지표. 하나라도 빠지면 0으로 채우지 않고
+# 수집 실패로 처리한다 (빠진 지표를 0으로 저장하면 진짜 0과 구분할 수 없다).
+REQUIRED_INSIGHT_METRICS = frozenset(
+    {"likes", "comments", "saved", "reach", "shares", "views"}
+)
+
+# 마지막 sync_all_insights() 실행 결과. 반환값(성공 건수)만으로는
+# "전부 실패"와 "갱신할 게 없음"을 구분할 수 없어서 따로 남긴다.
+LAST_SYNC_REPORT: dict[str, Any] = {"updated": 0, "failed": 0, "failures": []}
+
 # ── 데이터클래스 ──────────────────────────────────────────
 
 @dataclass
@@ -46,6 +56,9 @@ class PostInsights:
     impressions: int = 0
     shares: int = 0
     fetch_succeeded: bool = False
+    # 실패 사유. fetch_succeeded=True이면 빈 문자열이다 — 0으로 보이는 값이
+    # "진짜 0"인지 "못 가져온 것"인지 이 필드로 구분한다.
+    error: str = ""
 
 
 @dataclass
@@ -85,8 +98,10 @@ def fetch_post_insights(post_id: str) -> PostInsights:
         resp.raise_for_status()
         data: dict[str, Any] = resp.json()
 
+        seen: set[str] = set()
         for item in data.get("data", []):
             name = item.get("name", "")
+            seen.add(name)
             total_value = item.get("total_value") or {}
             value = total_value.get("value")
             if value is None:
@@ -108,11 +123,18 @@ def fetch_post_insights(post_id: str) -> PostInsights:
             elif name == "shares":
                 result.shares = int(value)
 
-        result.fetch_succeeded = True
+        missing = sorted(REQUIRED_INSIGHT_METRICS - seen)
+        if missing:
+            result.error = f"INCOMPLETE_METRICS:{','.join(missing)}"
+            print(f"  [Analytics] 지표 누락 (post_id={post_id}): {', '.join(missing)}")
+        else:
+            result.fetch_succeeded = True
 
     except httpx.HTTPStatusError as e:
+        result.error = f"HTTP_{e.response.status_code}"
         print(f"  [Analytics] API 오류 (post_id={post_id}): {e.response.status_code}")
     except Exception as e:
+        result.error = type(e).__name__
         print(f"  [Analytics] 요청 실패 (post_id={post_id}): {e}")
 
     return result
@@ -144,15 +166,22 @@ def sync_all_insights() -> int:
     DB의 모든 Instagram 게시물 성과를 구형 화면용 테이블과 추적 DB의
     provenance-aware snapshot 양쪽에 저장합니다.
 
-    API 요청이 실패하면 0으로 저장하지 않고 해당 게시물을 건너뜁니다.
+    API 요청이 실패하거나 지표가 빠지면 0으로 저장하지 않고 해당 게시물을
+    건너뛴다. 실패 건수와 사유는 반환값이 아니라 LAST_SYNC_REPORT에 남는다
+    (성공 0건이 "전부 실패"인지 "게시물 없음"인지 구분하기 위해).
+    성공한 뒤에는 게시물당 최신 snapshot 한 행만 남기도록 정리한다.
     Returns: 업데이트된 게시물 수
     """
     from src.analytics.db_experiments import init_tracking_db
-    from src.analytics.import_snapshot import import_performance_snapshot
+    from src.analytics.import_snapshot import (
+        compact_performance_snapshots,
+        import_performance_snapshot,
+    )
 
     init_tracking_db()
     posts = get_posts(platform="instagram", limit=200)
     updated = 0
+    failures: list[dict[str, str]] = []
 
     for post in posts:
         post_id = post["post_id"]
@@ -162,7 +191,9 @@ def sync_all_insights() -> int:
         try:
             insights = fetch_post_insights(post_id)
             if not insights.fetch_succeeded:
-                print(f"  [Analytics] 스킵 (post_id={post_id}): Insights 수집 실패")
+                reason = insights.error or "UNKNOWN"
+                failures.append({"post_id": str(post_id), "reason": reason})
+                print(f"  [Analytics] 스킵 (post_id={post_id}): Insights 수집 실패 ({reason})")
                 continue
 
             measured_at = datetime.now(timezone.utc)
@@ -194,9 +225,18 @@ def sync_all_insights() -> int:
                   f"좋아요 {insights.likes}, 댓글 {insights.comments}, "
                   f"저장 {insights.saves}, 공유 {insights.shares}, 도달 {insights.reach}")
         except Exception as e:
+            failures.append({"post_id": str(post_id), "reason": type(e).__name__})
             print(f"  [Analytics] 스킵 (post_id={post_id}): {e}")
 
-    print(f"  [Analytics] 총 {updated}개 게시물 업데이트 완료")
+    try:
+        removed = compact_performance_snapshots()
+        if removed:
+            print(f"  [Analytics] 이전 snapshot {removed}행 정리 (게시물당 최신 1행 유지)")
+    except Exception as e:
+        print(f"  [Analytics] snapshot 정리 실패 (무시): {type(e).__name__}")
+
+    LAST_SYNC_REPORT.update(updated=updated, failed=len(failures), failures=failures)
+    print(f"  [Analytics] 총 {updated}개 게시물 업데이트 완료, 수집 실패 {len(failures)}건")
     return updated
 
 
