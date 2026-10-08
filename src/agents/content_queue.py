@@ -142,7 +142,10 @@ def bulk_generate(
         raise ValueError("직접 주제는 출처 attestation이 없어 Queue V2에 등록할 수 없습니다.")
 
     elif auto_news:
-        ids.extend(_fill_from_news(count))
+        from src.usage_tracker import usage_scope
+
+        with usage_scope("collection"):
+            ids.extend(_fill_from_news(count))
 
     else:
         print("  [ContentQueue] topics와 auto_news 모두 없음 — 아무것도 추가하지 않습니다.")

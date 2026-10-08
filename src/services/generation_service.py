@@ -246,11 +246,16 @@ def _finish_tracking(
         return
     try:
         from src.db_tracking import end_run, link_run_publication, log_quality_check
+        from src.usage_tracker import run_totals
 
         status = "SUCCESS" if result.generation_succeeded else "FAILED"
+        # None (stored as NULL) when any call in the run had no known price:
+        # writing a partial sum — or the old default 0.0 — would pass for a cost.
+        totals = run_totals(run_id)
         end_run(
             run_id,
             status,
+            cost=totals["cost_usd"] if totals["calls"] else None,
             latency=elapsed,
             error=result.error_code or "",
             strategy_id=strategy_id,
@@ -349,26 +354,30 @@ def execute_generation(
         context = f"{context}\n[앵글 힌트] {angle_hint}".strip()
 
     try:
-        result = pipeline.run_pipeline(
-            topic=topic,
-            persona=load_persona(),
-            num_cards=num_cards,
-            handle=handle,
-            force_dalle=force_dalle,
-            force_refresh=force_refresh,
-            trend_context=context,
-            publish=publish,
-            auto=auto,
-            make_reels=make_reels,
-            template=template,
-            select_angle=select_angle,
-            human_approval=human_approval,
-            topic_refined=True,
-            source_lineage=source_lineage,
-            publish_attempt_id=publish_attempt_id,
-            before_publish=before_publish,
-            on_remote_id=on_remote_id,
-        )
+        from src.usage_tracker import usage_scope
+
+        # Every LLM call made while this run is active is recorded against it.
+        with usage_scope("generation", run_id):
+            result = pipeline.run_pipeline(
+                topic=topic,
+                persona=load_persona(),
+                num_cards=num_cards,
+                handle=handle,
+                force_dalle=force_dalle,
+                force_refresh=force_refresh,
+                trend_context=context,
+                publish=publish,
+                auto=auto,
+                make_reels=make_reels,
+                template=template,
+                select_angle=select_angle,
+                human_approval=human_approval,
+                topic_refined=True,
+                source_lineage=source_lineage,
+                publish_attempt_id=publish_attempt_id,
+                before_publish=before_publish,
+                on_remote_id=on_remote_id,
+            )
         if result is None:
             result = PipelineResult(
                 image_paths=[],
