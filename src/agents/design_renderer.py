@@ -1076,8 +1076,64 @@ def _render_split(
 
 # ── CTA ────────────────────────────────────────────────────
 
+def _source_box_layout(draw: ImageDraw.ImageDraw, source) -> tuple[list, int]:
+    """Rows for the source attribution box and its total height.
+
+    Each row is (text, font, fill, line_height). The headline wraps to at most
+    two lines; everything is measured before drawing so the closing card can
+    reserve the space and keep its content vertically centered.
+    """
+
+    if source is None:
+        return [], 0
+    inner_w = W - PAD * 2 - 120 - 60
+    label_font = _font(22, bold=False)
+    name_font = _font(30, bold=False)
+    title_font = _font(26, bold=False)
+    date_font = _font(22, bold=False)
+
+    def height_of(font) -> int:
+        return draw.textbbox((0, 0), "가나다", font=font)[3]
+
+    rows: list[tuple[str, ImageFont.FreeTypeFont, tuple, int]] = [
+        ("출처", label_font, STYLE["accent2"], height_of(label_font))
+    ]
+    if source.outlet:
+        rows.append((source.outlet, name_font, STYLE["text_primary"], height_of(name_font)))
+    if source.title:
+        for line in wrap_text(source.title, title_font, draw, inner_w)[:2]:
+            rows.append((line, title_font, STYLE["text_secondary"], height_of(title_font)))
+    if source.published:
+        rows.append(
+            (f"{source.date_text()} 발행", date_font, STYLE["text_muted"], height_of(date_font))
+        )
+    gap = 10
+    box_h = 22 * 2 + sum(row[3] for row in rows) + gap * (len(rows) - 1)
+    return rows, box_h
+
+
+def _draw_source_box(img: Image.Image, top: int, rows: list, box_h: int) -> Image.Image:
+    """Draw the attribution box centered at `top` (a translucent glass panel)."""
+
+    box_w = W - PAD * 2 - 120
+    left = (W - box_w) // 2
+    layer = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+    ld = ImageDraw.Draw(layer)
+    ld.rounded_rectangle(
+        (left, top, left + box_w, top + box_h), radius=22, fill=(8, 10, 24, 190),
+        outline=(90, 90, 200, 150), width=2,
+    )
+    img = Image.alpha_composite(img.convert("RGBA"), layer).convert("RGB")
+    draw = ImageDraw.Draw(img)
+    y = top + 22
+    for text, font, fill, line_h in rows:
+        draw.text((_cx(draw, text, font), y), text, font=font, fill=fill)
+        y += line_h + 10
+    return img
+
+
 def _render_cta(img: Image.Image, slide: Slide, total: int,
-                handle: str, hashtags: list[str]) -> Image.Image:
+                handle: str, hashtags: list[str], source=None) -> Image.Image:
     """
     CTA: 상단+하단 gradient → 배지 → 이모지 → accent bar → 타이틀
          → 본문 → handle pill → 해시태그 pill 배지들
@@ -1117,6 +1173,12 @@ def _render_cta(img: Image.Image, slide: Slide, total: int,
     est_h += sum(int(lh2 * 1.5) for _ in b_lines) + 20   # 본문
     if handle:
         est_h += 52                                      # handle pill
+
+    # 출처 박스 — 높이를 미리 재서 콘텐츠 블록의 세로 중앙 정렬에 포함한다.
+    source_rows, source_h = _source_box_layout(draw, source)
+    source_gap = 30
+    if source_rows:
+        est_h += source_gap + source_h
 
     top_margin = int(H * 0.12)   # 상단 배지와 겹치지 않을 최소 여백
     free_space = (CONTENT_BOTTOM - top_margin) - est_h
@@ -1171,6 +1233,14 @@ def _render_cta(img: Image.Image, slide: Slide, total: int,
         text_h = bb[3] - bb[1]
         text_top = hy + (52 - text_h) // 2
         draw.text((hx + hpad, text_top), handle, font=hf, fill=STYLE["accent2"])
+        y += 52
+
+    # 출처 — 핸들 아래. 공간이 모자라면(est_h에 이미 반영돼 드문 경우) 생략한다.
+    if source_rows:
+        source_top = y + source_gap
+        if source_top + source_h <= CONTENT_BOTTOM + 20:
+            img = _draw_source_box(img, source_top, source_rows, source_h)
+            draw = ImageDraw.Draw(img)
 
     # 해시태그 — pill 배지, 항상 하단에 고정 배치
     if hashtags:
@@ -1270,7 +1340,11 @@ def render_card_set(
     youtube_keyword: str = "",
     video_infos: list | None = None,
     pexels_video_map: dict[int, Image.Image] | None = None,
+    source=None,
 ) -> list[Path]:
+    """Render the card set. `source` (a SourceNote) is drawn on the closing card
+    and appended to the caption, so the post names where its facts came from."""
+
     p = persona or load_persona()
     active_handle = handle or p.handle
     global STYLE
@@ -1338,7 +1412,7 @@ def render_card_set(
         if slide.slide_type == "cover":
             rendered = _render_cover(bg_cover, slide, total, active_handle, hook=script.hook)
         elif slide.slide_type == "cta":
-            rendered = _render_cta(bg, slide, total, active_handle, script.hashtags)
+            rendered = _render_cta(bg, slide, total, active_handle, script.hashtags, source=source)
         elif slide.slide_number in thumb_map:
             thumb, vid_url = thumb_map[slide.slide_number]
             print(f"  [Renderer] 슬라이드 {slide.slide_number}: split ({vid_url})")
@@ -1358,6 +1432,13 @@ def render_card_set(
 
     (out_dir / "hashtags.txt").write_text(" ".join(script.hashtags), encoding="utf-8")
     caption = _generate_caption(script, active_handle)
+    if source is not None:
+        from src.source_note import insert_into_caption
+
+        caption = insert_into_caption(
+            caption, source.caption_block(), " ".join(script.hashtags[:15])
+        )
+    # 이 파일이 곧 게시되는 캡션이다 (publisher가 그대로 읽는다).
     (out_dir / "caption.txt").write_text(caption, encoding="utf-8")
     print(f"  [Renderer] 캡션 저장: caption.txt")
 
@@ -1382,6 +1463,9 @@ def render_card_set(
             for s in script.slides
         ],
     }
+    if source is not None:
+        # 슬라이드 부분 수정 때 마지막 카드와 캡션에 출처를 다시 넣기 위해 보관한다.
+        script_data["source_note"] = source.to_dict()
     (out_dir / "script.json").write_text(
         _json.dumps(script_data, ensure_ascii=False, indent=2), encoding="utf-8"
     )

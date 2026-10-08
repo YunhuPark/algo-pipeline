@@ -2923,6 +2923,10 @@ def edit_slide():
 
         total = len(updated_slides)
         slide_data = slides[slide_index]
+        # 렌더 때 보관해 둔 출처 — 마지막 카드와 캡션을 다시 만들 때 빠지지 않게 한다.
+        from src.source_note import SourceNote
+
+        source_note = SourceNote.from_dict(script_data.get("source_note"))
 
         # video 매핑이 있는 content 슬라이드 → split 레이아웃 유지
         if (
@@ -2942,7 +2946,10 @@ def edit_slide():
         elif target_slide.slide_type == "cover":
             rendered = _dr._render_cover(rendered_bg, target_slide, total, persona.handle, hook=updated_script.hook)
         elif target_slide.slide_type == "cta":
-            rendered = _dr._render_cta(rendered_bg, target_slide, total, persona.handle, updated_script.hashtags)
+            rendered = _dr._render_cta(
+                rendered_bg, target_slide, total, persona.handle, updated_script.hashtags,
+                source=source_note,
+            )
         else:
             rendered = _dr._render_content(rendered_bg, target_slide, total, persona.handle)
 
@@ -2953,6 +2960,12 @@ def edit_slide():
         # 캡션도 갱신
         from src.agents.design_renderer import _generate_caption
         new_caption = _generate_caption(updated_script, persona.handle)
+        if source_note is not None:
+            from src.source_note import insert_into_caption
+
+            new_caption = insert_into_caption(
+                new_caption, source_note.caption_block(), " ".join(updated_script.hashtags[:15])
+            )
         (d / "caption.txt").write_text(new_caption, encoding="utf-8")
         script_json = _json.dumps(script_data, ensure_ascii=False, indent=2)
         script_path.write_text(script_json, encoding="utf-8")

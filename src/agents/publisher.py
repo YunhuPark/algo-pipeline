@@ -315,6 +315,32 @@ def _build_caption(hook: str, hashtags: list[str]) -> str:
     return f"{hook}\n\n.\n.\n.\n{tag_str}"
 
 
+INSTAGRAM_CAPTION_LIMIT = 2200
+
+
+def read_card_caption(folder: Path) -> str:
+    """The caption the card set was reviewed with (caption.txt), or "" if absent.
+
+    Reviewers see caption.txt in the dashboard preview, but the publisher used to
+    rebuild a different caption from hook + hashtags, so what was approved was not
+    what was posted. Publishing the reviewed text removes that gap.
+    """
+
+    try:
+        return (Path(folder) / "caption.txt").read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""
+
+
+def _final_caption(caption: str | None, hook: str, hashtags: list[str]) -> str:
+    text = (caption or "").strip()
+    if not text:
+        return _build_caption(hook, hashtags)
+    if len(text) > INSTAGRAM_CAPTION_LIMIT:
+        text = text[: INSTAGRAM_CAPTION_LIMIT - 1].rstrip() + "…"
+    return text
+
+
 # ── 공개 인터페이스 ───────────────────────────────────────
 
 def publish(
@@ -322,6 +348,7 @@ def publish(
     hook: str,
     hashtags: list[str],
     base_url: str = "",
+    caption: str | None = None,
 ) -> str:
     """
     카드뉴스 이미지들을 Instagram 캐러셀로 게시.
@@ -331,6 +358,7 @@ def publish(
         hook:        캡션 첫 줄 후킹 문구
         hashtags:    해시태그 목록
         base_url:    이미지 공개 URL 베이스 (비어있으면 .env IG_IMAGE_BASE_URL 사용)
+        caption:     검토 때 본 캡션 전문(caption.txt). 없으면 hook + 해시태그로 조합한다.
     Returns:
         업로드된 게시물 ID
     """
@@ -362,9 +390,9 @@ def publish(
         container_ids.append(cid)
 
     # 2. 캐러셀 컨테이너 생성
-    caption = _build_caption(hook, hashtags)
+    final_caption = _final_caption(caption, hook, hashtags)
     print(f"  [Publisher] 캐러셀 컨테이너 생성...")
-    carousel_id = _create_carousel_container(container_ids, caption)
+    carousel_id = _create_carousel_container(container_ids, final_caption)
     print(f"    → carousel_id: {carousel_id}")
     _wait_for_ready(carousel_id)
 

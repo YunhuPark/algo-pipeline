@@ -242,7 +242,9 @@ def _visual_type(claim: Claim) -> str:
 
 
 def _hashtags(topic: str, claims: List[Claim]) -> list[str]:
-    tags = ["#알고", "#카드뉴스", "#뉴스분석", "#팩트체크", "#인사이트"]
+    # "#팩트체크"는 넣지 않는다 — 카드는 출처 한 건과의 일치만 검증하므로
+    # 외부 팩트체크를 했다는 인상을 주는 태그는 과장이다.
+    tags = ["#알고", "#카드뉴스", "#뉴스분석", "#인사이트"]
     candidates = [topic]
     candidates.extend(entity for claim in claims for entity in claim.entities)
     for item in candidates:
