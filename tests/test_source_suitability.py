@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime
 from types import SimpleNamespace
 
 import pytest
@@ -65,7 +66,12 @@ def test_topics_with_concrete_subjects_pass(topic):
 
 
 def _news(topic: str, summary: str):
-    item = SimpleNamespace(url="https://example.com/a", title="title", summary=summary)
+    item = SimpleNamespace(
+        url="https://example.com/a",
+        title="title",
+        summary=summary,
+        published=datetime.now(),  # fresh, so only suitability is under test
+    )
     return SimpleNamespace(topic=topic, selected_item=item)
 
 

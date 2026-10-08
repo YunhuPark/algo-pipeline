@@ -137,6 +137,40 @@ def test_queue_approval_is_skipped_for_unverified_cards(monkeypatch, tmp_path, t
     assert _decisions(tracking) == []
 
 
+def test_queue_rejection_is_recorded_even_for_an_unverified_card(monkeypatch, tmp_path, tracking):
+    # Approving needs verified evidence; declining a card never does.
+    dashboard = _app_with_card(monkeypatch, tmp_path, tracking, status="UNVERIFIED")
+
+    assert dashboard._record_queue_review(9, "REJECTED") is True
+    assert dashboard._record_queue_review(9, "REJECTED") is True  # duplicate ignored
+
+    assert _decisions(tracking) == [("20260101_0000_card", "REJECTED")]
+
+
+def test_approval_and_rejection_of_the_same_card_are_separate_decisions(
+    monkeypatch, tmp_path, tracking
+):
+    dashboard = _app_with_card(
+        monkeypatch, tmp_path, tracking, status="ORIGINAL_VERIFIED"
+    )
+
+    dashboard._record_queue_review(9, "APPROVED")
+    dashboard._record_queue_review(9, "REJECTED")
+
+    assert sorted(d for _, d in _decisions(tracking)) == ["APPROVED", "REJECTED"]
+
+
+def test_rejecting_a_card_that_was_never_rendered_records_nothing(
+    monkeypatch, tmp_path, tracking
+):
+    from src.dashboard import app as dashboard
+
+    monkeypatch.setattr("src.db.get_queue_row", lambda queue_id: {"image_dir": ""})
+
+    assert dashboard._record_queue_review(9, "REJECTED") is False
+    assert _decisions(tracking) == []
+
+
 def test_queue_approval_is_skipped_without_run_id(monkeypatch, tmp_path, tracking):
     dashboard = _app_with_card(
         monkeypatch, tmp_path, tracking, status="ORIGINAL_VERIFIED", run_id=""
