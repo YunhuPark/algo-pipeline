@@ -35,6 +35,7 @@ from src.db import (
     queue_count,
     get_queue,
 )
+from src.qa.source_suitability import check_source_suitability
 from src.schemas.queue_schemas import CollectionMethod, PublishAttemptState, QueueMetadataV2
 
 
@@ -168,6 +169,19 @@ def _fill_from_news(count: int) -> list[int]:
                 print(
                     "  [ContentQueue] 주제-출처 불일치 감지, 큐 추가 생략: "
                     f"'{news.topic}' vs '{selected_item.title}'"
+                )
+                continue
+
+            # 생성 단계에서 아홉 번 재시도하고도 반드시 실패하는 항목(주제가
+            # 너무 막연하거나, 원문이 답을 다음 편으로 미루는 경우)은 큐에
+            # 쌓기 전에 거른다.
+            suitability = check_source_suitability(
+                news.topic, selected_item.summary, selected_item.title
+            )
+            if not suitability.ok:
+                print(
+                    f"  [ContentQueue] 생성이 불가능한 항목, 큐 추가 생략 "
+                    f"({suitability.code}): '{news.topic}' — {suitability.detail}"
                 )
                 continue
 
@@ -380,6 +394,21 @@ def _process_claimed_row(
                 print("  [ContentQueue] 이미 준비됨 — 재생성 없이 그대로 반환")
                 return {"id": queue_id, "topic": topic, "paths": paths}
         else:
+            # 이미 큐에 들어와 있는 항목도 생성 전에 한 번 거른다 — 반드시
+            # 실패할 항목에 재시도 예산(LLM 호출 수십 번)을 쓰지 않도록.
+            suitability = check_source_suitability(topic, context, check_length=False)
+            if not suitability.ok:
+                print(
+                    f"  [ContentQueue] 생성 불가 항목 ({suitability.code}): "
+                    f"'{topic}' — {suitability.detail}"
+                )
+                mark_queue_error(
+                    queue_id,
+                    suitability.error_code,
+                    increment_retry=False,
+                    preserve_attempt=True,
+                )
+                return None
             res = run_full_pipeline()
 
         if res and hasattr(res, 'image_paths') and res.image_paths:

@@ -1444,6 +1444,51 @@ def queue_prepare_next():
     return {"job_id": job_id}
 
 
+def _record_queue_approval(queue_id: int) -> bool:
+    """Log the operator's approval for a queue item before it is published.
+
+    /queue/approve_publish is the only place a human signs off on a queued card
+    in the dashboard, but it never wrote an editorial_feedback_events row — so
+    the weekly review saw zero review decisions and stayed INSUFFICIENT_DATA no
+    matter how many cards were approved. The idempotency key is shared with
+    /generate/review, so approving the same card through both paths counts once.
+
+    Best-effort and observational only: it never blocks or triggers publishing.
+    """
+    try:
+        from src.db import get_queue_row
+        from src.analytics.feedback import log_editorial_feedback
+
+        row = get_queue_row(queue_id)
+        image_dir = str((row["image_dir"] if row else "") or "").strip()
+        if not image_dir:
+            return False
+        dir_name = Path(image_dir).name
+        meta_path = _resolve_output_file(dir_name, "meta.json")
+        if not meta_path.exists():
+            return False
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        run_id = str(meta.get("run_id") or "")
+        if not run_id:
+            return False
+        if str(meta.get("editorial_validation_status") or "") not in {
+            "ORIGINAL_VERIFIED",
+            "EDIT_VERIFIED",
+        }:
+            return False
+        log_editorial_feedback(
+            content_id=dir_name,
+            run_id=run_id,
+            editor_id="dashboard_user",
+            approval_decision="APPROVED",
+            idempotency_key=f"review:{dir_name}:APPROVED",
+        )
+        return True
+    except Exception as exc:
+        print(f"  [Tracking] 큐 승인 기록 실패: {type(exc).__name__}")
+        return False
+
+
 def _run_queue_publish_job(job_id: str, queue_id: int) -> None:
     global _ACTIVE_QUEUE_JOB
     _ACTIVE_QUEUE_JOB = {"job_id": job_id, "mode": "publish"}
@@ -1475,6 +1520,7 @@ def _run_queue_publish_job(job_id: str, queue_id: int) -> None:
         # 렌더링을 그대로 올리는 _publish_cached_render라 애초에 승인
         # 단계를 타지 않지만, image_dir가 없어 전체 파이프라인으로 떨어지는
         # 예외 상황까지 대비해 명시한다.
+        _record_queue_approval(queue_id)
         result = publish_specific(
             queue_id, publish_to_ig=True, require_human_approval=False
         )
