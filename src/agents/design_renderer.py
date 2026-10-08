@@ -438,11 +438,11 @@ def _draw_infographic_title(img: Image.Image, title: str) -> tuple[Image.Image, 
     return img, y
 
 
-def _split_verified_clauses(body: str) -> list[str]:
-    """Split the existing claim into visual steps without adding new copy."""
+def _real_clauses(body: str) -> list[str]:
+    """Split a claim only at real boundaries (sentence ends, commas, sequence words)."""
 
     clean = re.sub(r"\s+", " ", _clean(body)).strip()
-    clauses = [
+    return [
         part.strip(" ,.;:·")
         for part in re.split(
             r"(?<=[.!?])\s+|[,;]\s*|\s+(?=(?:그리고|이어|이후|다음으로|마지막으로)\s)",
@@ -450,14 +450,72 @@ def _split_verified_clauses(body: str) -> list[str]:
         )
         if part.strip(" ,.;:·")
     ]
-    if len(clauses) == 1 and len(clean) > 44:
-        midpoint = len(clean) // 2
-        split_at = clean.rfind(" ", 0, midpoint)
-        if split_at < 18:
-            split_at = clean.find(" ", midpoint)
-        if split_at > 0:
-            clauses = [clean[:split_at].strip(), clean[split_at:].strip()]
-    return clauses[:3] or [clean]
+
+
+def _split_verified_clauses(body: str) -> list[str]:
+    """Split the existing claim into visual steps without adding new copy.
+
+    There is deliberately no "cut a long sentence in half" fallback: that turned
+    one sentence into two numbered steps split mid-phrase
+    ("...DevSecOps와" / "AIOps 등 ..."), which read as broken copy.
+    """
+
+    clean = re.sub(r"\s+", " ", _clean(body)).strip()
+    return _real_clauses(body)[:3] or [clean]
+
+
+_RANGE_MARKERS = r"(?:에서|부터|~|～|-|–|—)"
+_STAT_RE = re.compile(r"^\s*(\d[\d,]*(?:\.\d+)?)\s*(\D*?)\s*$")
+
+
+def _collapse_stat_range(values: list[str], body: str) -> str | None:
+    """Return "30~40%" when the body states these values as one range, else None.
+
+    A hero stat shows exactly one number. When the claim is a range ("30%에서
+    40%"), showing only one end overstates it, so show the whole range.
+    """
+
+    parsed = [_STAT_RE.match(value) for value in values]
+    if not parsed or any(match is None for match in parsed):
+        return None
+    units = {match.group(2) for match in parsed if match}
+    if len(units) != 1:
+        return None
+    unit = units.pop()
+    ordered = sorted(
+        (match.group(1) for match in parsed if match),
+        key=lambda number: float(number.replace(",", "")),
+    )
+    low, high = ordered[0], ordered[-1]
+    pattern = (
+        rf"{re.escape(low)}\s*{re.escape(unit)}\s*{_RANGE_MARKERS}\s*{re.escape(high)}"
+    )
+    return f"{low}~{high}{unit}" if re.search(pattern, body) else None
+
+
+def _resolve_visual_layout(
+    slide: Slide, values: list[str], labels: list[str]
+) -> tuple[str, list[str], list[str]]:
+    """Pick a layout the evidence actually supports, else fall back to a statement.
+
+    - process needs at least two real clauses; a single sentence is not steps.
+    - hero_stat shows one number. Several distinct values are shown as a range
+      when the body states one, otherwise the slide falls back to a statement
+      instead of silently dropping all but the first value.
+    "entity" with no values is the plain statement layout.
+    """
+
+    visual_type = slide.visual_type
+    if visual_type == "process" and len(_real_clauses(slide.body)) < 2:
+        return "entity", [], []
+    if visual_type == "hero_stat":
+        distinct = list(dict.fromkeys(values))
+        if len(distinct) > 1:
+            collapsed = _collapse_stat_range(distinct, _clean(slide.body))
+            if collapsed:
+                return "hero_stat", [collapsed], labels[:1]
+            return "entity", [], []
+    return visual_type, values, labels
 
 
 def _render_infographic_content(
@@ -483,6 +541,7 @@ def _render_infographic_content(
     labels = [_clean(label) for label in slide.visual_labels]
     if not values and slide.accent:
         values = [_clean(slide.accent)]
+    visual_type, values, labels = _resolve_visual_layout(slide, values, labels)
 
     visual_top = max(330, title_bottom + 30)
     visual_bottom = 800
@@ -639,7 +698,7 @@ def _render_infographic_content(
                 fill=STYLE["accent"],
             )
             draw.text((center_x - label_w // 2, visual_top + 71), label, font=label_font, fill=(255, 255, 255))
-            value_font = _auto_font(value, 112, bold=True, steps=((7, 1.0), (11, 0.84), (16, 0.68)))
+            value_font = _auto_font(value, 88, bold=True, steps=((7, 1.0), (11, 0.84), (16, 0.68)))
             value_lines = wrap_text(value, value_font, draw, W - PAD * 2 - 90)
             _, _, _, value_h = draw.textbbox((0, 0), "123", font=value_font)
             vy = center_y - len(value_lines) * value_h // 2 + 42
