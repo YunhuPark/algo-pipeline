@@ -131,7 +131,9 @@ def test_tall_blocks_still_respect_the_floor_over_the_footer():
     assert renderer._balanced_top(1200, floor=300) == 300
 
 
-def test_fitted_body_panel_is_shorter_than_the_legacy_box():
+def test_fitted_body_panel_is_shorter_than_the_legacy_box(monkeypatch):
+    # Measuring text needs a font; CI has no Korean one (see _use_test_fonts).
+    _use_test_fonts(monkeypatch)
     legacy_height = (renderer.H - 92) - 850
     short = "근거 문장이 짧은 경우입니다."
     long = "근거 문장이 길어서 여러 줄로 이어지는 경우입니다. " * 4
