@@ -102,6 +102,44 @@ def test_other_layouts_are_untouched():
     assert _resolve(slide) == ("comparison", ["1", "2"], ["a", "b"])
 
 
+# ── vertical balance ──────────────────────────────────────
+
+
+def test_content_block_is_centered_below_the_card_middle():
+    group_h = 300
+
+    top = renderer._balanced_top(group_h, floor=0)
+
+    assert top == (renderer.H - group_h) // 2 + renderer.OPTICAL_CENTER_SHIFT
+
+
+def test_block_never_rises_into_the_headline():
+    assert renderer._balanced_top(300, floor=900) == 900
+
+
+def test_block_never_falls_into_the_footer():
+    group_h = 1000
+    bottom = renderer.H - 92
+
+    top = renderer._balanced_top(group_h, floor=0, bottom=bottom)
+
+    assert top + group_h <= bottom
+
+
+def test_tall_blocks_still_respect_the_floor_over_the_footer():
+    # If the block cannot fit at all, the headline clearance wins (no overlap).
+    assert renderer._balanced_top(1200, floor=300) == 300
+
+
+def test_fitted_body_panel_is_shorter_than_the_legacy_box():
+    legacy_height = (renderer.H - 92) - 850
+    short = "근거 문장이 짧은 경우입니다."
+    long = "근거 문장이 길어서 여러 줄로 이어지는 경우입니다. " * 4
+
+    assert renderer._body_panel_height(short) < legacy_height
+    assert renderer._body_panel_height(short) < renderer._body_panel_height(long)
+
+
 # ── rendering ─────────────────────────────────────────────
 
 
