@@ -67,7 +67,7 @@ def parse_args() -> argparse.Namespace:
     # 업로드
     p.add_argument("--publish",        action="store_true", help="Instagram 업로드")
     p.add_argument("--upload-dir",     metavar="DIR",       help="기존 output 폴더를 재생성 없이 바로 업로드")
-    p.add_argument("--threads",        action="store_true", help="Threads 동시 발행")
+    p.add_argument("--threads",        action="store_true", help="비활성화: Queue V2 durable attempt 미연결로 차단")
     p.add_argument("--blog",           action="store_true", help="블로그 동시 발행")
     p.add_argument("--approve",        action="store_true", help="업로드 전 직접 확인")
     p.add_argument("--ig-url",         default="")
@@ -98,6 +98,13 @@ def extract_topic(text: str) -> str:
 
 def main() -> None:
     args = parse_args()
+
+    # ── Threads 발행 차단 ─────────────────────────────────
+    # Threads publisher는 Queue V2 durable attempt와 연결되어 있지 않다.
+    # 조용히 무시하면 게시된 줄 오해하므로 모든 모드에서 먼저 거부한다.
+    if args.threads:
+        print("--threads 발행은 Queue V2 durable attempt에 연결되지 않아 차단합니다.")
+        sys.exit(2)
 
     # ── 템플릿 목록 ───────────────────────────────────────
     if args.templates:
