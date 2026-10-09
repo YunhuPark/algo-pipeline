@@ -170,6 +170,10 @@ def _run_once(
     from src.agents.approval import wait_for_approval
     from src.agents.design_templates import get_template, get_template_for_topic
 
+    # 중지 요청이 있으면 새 시도(재생성 포함)를 시작하지 않는다.
+    from src.cancellation import raise_if_requested
+    raise_if_requested()
+
     start = datetime.now()
     _sep = "=" * 55
     retry_label = f" (재생성 {retry_num}회차)" if retry_num > 0 else ""
@@ -567,6 +571,7 @@ def _run_once(
     print(f"  → {bg.size[0]}×{bg.size[1]}px 준비 완료")
 
     # ── Phase 4: Design Renderer ─────────────────────────
+    raise_if_requested()   # 렌더링·영상 합성은 오래 걸리니 시작 전에 한 번 더 확인한다
     print(f"\n[4] 카드 렌더링 중... (템플릿: {tmpl_name})")
 
     # 템플릿 색상을 persona에 임시 적용
