@@ -72,3 +72,35 @@ def get_metrics(experiment_id: str) -> dict:
     if _route_db_path() is not None:
         metrics.TRACKING_DB_PATH = _route_db_path()
     return metrics.get_experiment_metrics(experiment_id)
+
+
+@app.get("/api/quality-reviews")
+def get_quality_reviews(limit: int = 12) -> dict:
+    from src.analytics import weekly_review
+
+    if _route_db_path() is not None:
+        weekly_review.TRACKING_DB_PATH = _route_db_path()
+    items = weekly_review.list_weekly_quality_reviews(limit=limit)
+    return {"total": len(items), "items": items}
+
+
+@app.get("/api/quality-reviews/latest")
+def get_latest_quality_review() -> dict:
+    from src.analytics import weekly_review
+
+    if _route_db_path() is not None:
+        weekly_review.TRACKING_DB_PATH = _route_db_path()
+    item = weekly_review.get_latest_weekly_quality_review()
+    return item or {"status": "INSUFFICIENT_DATA", "review_id": None}
+
+
+@app.post("/api/quality-reviews/run")
+def post_quality_review(
+    _actor_type: str = Depends(require_admin_token),
+    _origin: None = Depends(verify_origin),
+) -> dict:
+    from src.analytics import weekly_review
+
+    if _route_db_path() is not None:
+        weekly_review.TRACKING_DB_PATH = _route_db_path()
+    return weekly_review.run_weekly_quality_review()
