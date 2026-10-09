@@ -1067,7 +1067,11 @@ def queue_page():
       <div class="panel">
         <div class="panel-header">
           <div class="panel-title" id="qProgressTitle">준비 중...</div>
-          <span id="qProgressBadge" class="badge badge-pending">실행 중</span>
+          <div style="display:flex;gap:10px;align-items:center">
+            <button id="qStopBtn" type="button" class="btn btn-danger"
+                    style="padding:4px 12px;font-size:12px">⏹ 중지</button>
+            <span id="qProgressBadge" class="badge badge-pending">실행 중</span>
+          </div>
         </div>
         <div class="progress-bar"><div class="progress-fill" style="width:100%"></div></div>
         <div id="qLogBox" class="logbox"></div>
@@ -1119,6 +1123,34 @@ fetch('/queue/current_job')
     qListenSSE(qJobId, data.mode);
   }})
   .catch(() => {{}});
+
+// ── 중지 버튼 ────────────────────────────────────────────
+// 위의 진행 표시 로직은 건드리지 않는다. 버튼은 "실행 중" 배지와 제목만 보고
+// 보였다 숨는다 (게시 중에는 중지할 수 없어서 숨긴다).
+const qStopBtn = document.getElementById('qStopBtn');
+function qSyncStopBtn() {{
+  const running = document.getElementById('qProgressBadge').textContent.trim() === '실행 중';
+  const publishing = document.getElementById('qProgressTitle').textContent.includes('발행');
+  qStopBtn.style.display = (running && !publishing) ? '' : 'none';
+  if (running) {{ qStopBtn.disabled = false; qStopBtn.textContent = '⏹ 중지'; }}
+}}
+['qProgressBadge', 'qProgressTitle'].forEach(id => {{
+  new MutationObserver(qSyncStopBtn).observe(document.getElementById(id), {{
+    childList: true, characterData: true, subtree: true,
+  }});
+}});
+qSyncStopBtn();
+qStopBtn.addEventListener('click', () => {{
+  if (!confirm('생성을 중지할까요?\\n이미 호출된 AI 비용은 돌려받을 수 없고, 지금부터의 새 호출만 멈춥니다.')) return;
+  qStopBtn.disabled = true;
+  qStopBtn.textContent = '중지 요청 중...';
+  fetch('/queue/cancel', {{method: 'POST'}})
+    .then(r => r.json())
+    .then(d => {{
+      if (d.error) {{ qLogErr(d.error); qSyncStopBtn(); }}
+    }})
+    .catch(() => {{ qStopBtn.disabled = false; qStopBtn.textContent = '⏹ 중지'; }});
+}});
 
 function qStartPrepare(queueId) {{
   document.getElementById('qProgressPanel').style.display = 'block';
@@ -1360,6 +1392,9 @@ def _run_queue_prepare_job(job_id: str, queue_id: int | None = None) -> None:
             return len(s)
         def flush(self): pass
 
+    from src import cancellation
+
+    cancellation.reset()   # 이전 작업의 중지 요청이 남아 이번 작업을 막지 않게 한다
     old_stdout = sys.stdout
     sys.stdout = _StreamCapture()
     try:
@@ -1398,6 +1433,13 @@ def _run_queue_prepare_job(job_id: str, queue_id: int | None = None) -> None:
             job["status"] = "error"
             job["error"] = "대기 중인 큐 항목이 없거나 생성에 실패했습니다."
             _emit(q, "error", job["error"])
+    except cancellation.GenerationCancelled:
+        # 운영자가 중지했다. 항목은 content_queue의 finally에서 이미 원래 상태
+        # (대기)로 돌아갔다 — 오류 코드는 남기지 않는다.
+        sys.stdout = old_stdout
+        job["status"] = "cancelled"
+        job["error"] = "사용자가 중지했습니다. 항목은 대기 상태로 돌아갔습니다."
+        _emit(q, "error", "⏹ " + job["error"] + " (이미 호출된 AI 비용은 환불되지 않습니다)")
     except Exception as e:
         sys.stdout = old_stdout
         tb = traceback.format_exc()
@@ -1408,9 +1450,35 @@ def _run_queue_prepare_job(job_id: str, queue_id: int | None = None) -> None:
         _emit(q, "error", str(e))
     finally:
         sys.stdout = old_stdout
+        cancellation.reset()
         q.put(None)
         _ACTIVE_QUEUE_JOB = None
         _GENERATION_LOCK.release()
+
+
+@app.route("/queue/cancel", methods=["POST"])
+def queue_cancel():
+    """Ask the running preview generation to stop before its next paid LLM call.
+
+    Only a *prepare* job can be stopped. A publish job is mid-upload to Instagram
+    and must be allowed to finish so the post and its record stay consistent.
+    """
+    from src import cancellation
+
+    active = _ACTIVE_QUEUE_JOB
+    if active is None:
+        return {"error": "진행 중인 작업이 없습니다."}, 409
+    if active.get("mode") != "prepare":
+        return {"error": "게시 중에는 중지할 수 없습니다. 인스타그램 업로드가 끝날 때까지 기다려 주세요."}, 409
+    cancellation.request_cancel()
+    job = _JOBS.get(active["job_id"])
+    message = "⏹ 중지 요청을 받았습니다 — 진행 중인 AI 호출이 끝나는 대로 멈춥니다."
+    if job is not None:
+        job["logs"].append(message)
+        q = _JOB_QUEUES.get(active["job_id"])
+        if q is not None:
+            _emit(q, "log", message)
+    return {"ok": True, "job_id": active["job_id"]}
 
 
 @app.route("/queue/prepare_next", methods=["POST"])

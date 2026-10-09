@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
 
+from src.cancellation import GenerationCancelled
 from src.schemas.card_news import SourceLineage, TrendReport
 from src.schemas.content_package import PipelineResult
 from src.schemas.queue_schemas import (
@@ -274,6 +275,28 @@ def _finish_tracking(
         print(f"  [Tracking] 실행 기록 종료 실패: {type(exc).__name__}")
 
 
+def _close_cancelled_run(run_id: str | None, elapsed: float, strategy_id: str) -> None:
+    """Mark a stopped run CANCELLED, keeping what it already spent."""
+
+    if not run_id:
+        return
+    try:
+        from src.db_tracking import end_run
+        from src.usage_tracker import run_totals
+
+        totals = run_totals(run_id)
+        end_run(
+            run_id,
+            "CANCELLED",
+            cost=totals["cost_usd"] if totals["calls"] else None,
+            latency=elapsed,
+            error="CANCELLED_BY_OPERATOR",
+            strategy_id=strategy_id,
+        )
+    except Exception as exc:
+        print(f"  [Tracking] 취소된 실행 기록 실패: {type(exc).__name__}")
+
+
 def _record_editorial_review(result: PipelineResult, run_id: str | None) -> None:
     """Persist an explicit terminal/Telegram review; never publish from here."""
     if (
@@ -391,6 +414,11 @@ def execute_generation(
                 publish_attempt_state=PublishAttemptState.NOT_ATTEMPTED,
                 publish_attempt_id=publish_attempt_id,
             )
+    except GenerationCancelled:
+        # 운영자가 중지했다. 실패가 아니라 "취소"로 닫고, 그때까지 쓴 호출 비용은
+        # 그대로 남긴다 (이미 나간 호출은 청구되므로). 예외는 다시 던져 위에서 처리한다.
+        _close_cancelled_run(run_id, time.monotonic() - started, strategy_id)
+        raise
     except Exception:
         if run_id:
             failed = PipelineResult(
