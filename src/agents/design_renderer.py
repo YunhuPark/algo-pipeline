@@ -1281,6 +1281,21 @@ def _render_cta(img: Image.Image, slide: Slide, total: int,
 
 # ── 캡션 생성 ─────────────────────────────────────────────
 
+def _safe_caption(script: CardNewsScript, handle: str, hashtag_str: str) -> str:
+    """Caption built only from text that already passed verification.
+
+    Used when the model's caption keeps stating figures the cards do not
+    support: the hook and the content slides' headlines, no free-form numbers.
+    """
+
+    lines = [f"⚡ {script.hook}", ""]
+    for slide in script.slides:
+        if slide.slide_type == "content":
+            lines.append(f"· {slide.title}")
+    lines += ["", "저장해두고 나중에 다시 확인해요 💾", "", handle, "", hashtag_str]
+    return "\n".join(lines)
+
+
 def _generate_caption(script: CardNewsScript, handle: str) -> str:
     """GPT-4o-mini로 카드 내용 기반 인스타그램 캡션 동적 생성 — 사람이 쓴 것처럼"""
     slides_summary = "\n".join(
@@ -1314,12 +1329,33 @@ def _generate_caption(script: CardNewsScript, handle: str) -> str:
     try:
         from langchain_openai import ChatOpenAI
         from src.config import OPENAI_API_KEY
+        from src.qa.caption_guard import unsupported_figures, unsupported_hype
+
         llm = ChatOpenAI(model="gpt-4o-mini", temperature=0.75, api_key=OPENAI_API_KEY)
-        result = llm.invoke(prompt)
-        body = result.content.strip()
-        if hashtag_str and hashtag_str[:10] not in body:
-            body = f"{body}\n\n{hashtag_str}"
-        return body
+
+        # 캡션은 카드와 달리 검증을 거치지 않는 자유 문장이라 숫자가 틀리거나
+        # 과장이 붙을 수 있다 ("15억 달러"를 "1.5억 달러"로, "데이터 보안을 유지하며"를
+        # "데이터 보안도 완벽!"으로 쓴 실제 사례). 카드에 없는 숫자·강한 표현이 나오면
+        # 한 번 다시 쓰게 하고, 그래도 틀리면 카드 제목만으로 만든 캡션을 쓴다.
+        support = [script.hook] + [
+            f"{s.title} {s.body} {s.accent} {' '.join(s.visual_values)}" for s in script.slides
+        ]
+        attempt_prompt = prompt
+        for attempt in range(2):
+            body = llm.invoke(attempt_prompt).content.strip()
+            bad = unsupported_figures(body, support) + unsupported_hype(body, support)
+            if not bad:
+                if hashtag_str and hashtag_str[:10] not in body:
+                    body = f"{body}\n\n{hashtag_str}"
+                return body
+            print(f"  [Renderer] 캡션이 카드 내용과 맞지 않음 ({', '.join(bad)}) — "
+                  f"{'다시 작성' if attempt == 0 else '안전한 캡션으로 대체'}")
+            attempt_prompt = (
+                f"{prompt}\n\n[수정 지시] 직전 캡션의 다음 표현은 카드에 없는 내용입니다: "
+                f"{', '.join(bad)}. 숫자는 카드에 쓰인 표기를 그대로 쓰고, 카드에 없는 "
+                f"강한 표현(완벽·압도적·최고 등)은 쓰지 마세요. 확신이 없으면 빼세요."
+            )
+        return _safe_caption(script, handle, hashtag_str)
     except Exception as e:
         print(f"  [Renderer] AI 캡션 생성 실패({e}), 기본 캡션 사용")
         lines = [f"⚡ {script.hook}", ""]
