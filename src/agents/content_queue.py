@@ -34,8 +34,14 @@ from src.db import (
     unclaim_queue_row,
     queue_count,
     get_queue,
+    try_mark_queue_skipped,
 )
-from src.qa.source_freshness import check_freshness, parse_date, resolve_published
+from src.qa.source_freshness import (
+    check_freshness,
+    fetch_published_date,
+    parse_date,
+    resolve_published,
+)
 from src.qa.source_suitability import check_source_suitability
 from src.schemas.queue_schemas import CollectionMethod, PublishAttemptState, QueueMetadataV2
 
@@ -90,6 +96,58 @@ def _stamp_published(metadata: Any, published: Any) -> None:
         metadata.evidence[0].published_at = published.isoformat()
     except (AttributeError, IndexError, TypeError):
         pass
+
+
+def _row_freshness(metadata: Any):
+    """Is this queued item's article still fresh *now*?
+
+    Items wait in the queue for days (a few candidates are collected, one is
+    posted per day), so freshness has to be re-checked when the item is used,
+    not only when it was collected. Rows queued before the publication date was
+    recorded have none: ask the article page. An age that cannot be read at all
+    is allowed (the rule only blocks what it can show is old).
+    """
+
+    recorded = (
+        parse_date(metadata.evidence[0].published_at) if metadata.evidence else None
+    )
+    if recorded is None:
+        recorded = fetch_published_date(getattr(metadata, "source_url", "") or "")
+    return check_freshness(recorded, allow_unknown=True)
+
+
+def _clear_unpicked_candidates(picked_id: int) -> int:
+    """After a post goes out, drop the other healthy waiting candidates.
+
+    Candidates are collected together and one is posted per day. The rest would
+    only age, so they are skipped automatically and tomorrow starts from fresh
+    news. Rows carrying an error code are left alone: a corrupted or blocked row
+    is a signal a person should see, not something to sweep away silently.
+    Turn off with QUEUE_CLEAR_AFTER_PUBLISH=false. Never raises: the post is
+    already out and this is housekeeping.
+    """
+
+    import os
+
+    if os.getenv("QUEUE_CLEAR_AFTER_PUBLISH", "true").strip().lower() in {
+        "0", "false", "no", "off",
+    }:
+        return 0
+    cleared = 0
+    try:
+        for row in get_queue():
+            if (
+                row["id"] != picked_id
+                and row["status"] in ("pending", "ready")
+                and not row["publish_error_code"]
+            ):
+                if try_mark_queue_skipped(row["id"]):
+                    cleared += 1
+        if cleared:
+            print(f"  [ContentQueue] 게시한 항목 외 후보 {cleared}개를 정리했습니다 (오래되기 전에 비움)")
+    except Exception as exc:
+        print(f"  [ContentQueue] 후보 정리 실패(무시): {type(exc).__name__}")
+    return cleared
 
 
 def _queued_source_urls() -> set[str]:
@@ -417,6 +475,21 @@ def _process_claimed_row(
                 print("  [ContentQueue] PNG 없음 — 전체 파이프라인 실행")
                 res = run_full_pipeline()
             elif publish_to_ig:
+                # 미리보기를 만들어 두고 며칠 뒤 승인하는 경우, 그 사이 기사가
+                # 오래된 것이 됐을 수 있다. 올리기 직전에 최신성을 다시 확인한다.
+                freshness = _row_freshness(metadata)
+                if not freshness.ok:
+                    print(
+                        f"  [ContentQueue] 게시 차단 ({freshness.code}): "
+                        f"'{topic}' — {freshness.detail}"
+                    )
+                    mark_queue_error(
+                        queue_id,
+                        freshness.error_code,
+                        increment_retry=False,
+                        preserve_attempt=True,
+                    )
+                    return None
                 # 사람이 이미 검토·승인한 바로 그 렌더링을 그대로 올린다 —
                 # 여기서 다시 생성하면 승인한 화면과 실제 게시물이 달라질 수 있다.
                 return _publish_cached_render(
@@ -430,14 +503,9 @@ def _process_claimed_row(
             # 실패할 항목에 재시도 예산(LLM 호출 수십 번)을 쓰지 않도록.
             suitability = check_source_suitability(topic, context, check_length=False)
             if suitability.ok:
-                # 큐에서 며칠 기다리는 동안 오래된 기사가 될 수 있다. 발행일이
-                # 기록된 항목만 검사하고, 기록 이전에 쌓인 항목(날짜 없음)은 막지 않는다.
-                recorded = (
-                    parse_date(metadata.evidence[0].published_at)
-                    if metadata.evidence
-                    else None
-                )
-                suitability = check_freshness(recorded, allow_unknown=True)
+                # 큐에서 기다리는 동안 오래된 기사가 될 수 있다. 기록된 발행일을
+                # 쓰고, 기록 이전에 쌓인 항목은 기사 페이지에서 읽어 확인한다.
+                suitability = _row_freshness(metadata)
             if not suitability.ok:
                 print(
                     f"  [ContentQueue] 생성 불가 항목 ({suitability.code}): "
@@ -461,6 +529,7 @@ def _process_claimed_row(
                 if res.publish_succeeded and res.ig_post_id:
                     complete_queue_publish(queue_id, attempt_id, res.ig_post_id)
                     print(f"  [ContentQueue] 발행 완료: {topic} ({len(res.image_paths)}장)")
+                    _clear_unpicked_candidates(queue_id)
                     return {"id": queue_id, "topic": topic, "paths": res.image_paths}
                 else:
                     print(f"  [ContentQueue] 게시 실패 (큐 id={queue_id}): {res.error_code}")
@@ -592,6 +661,7 @@ def _publish_cached_render(
     )
     complete_queue_publish(queue_id, attempt_id, ig_post_id)
     print(f"  [ContentQueue] 캐시 렌더링 발행 완료: {topic} ({len(paths)}장)")
+    _clear_unpicked_candidates(queue_id)
     return {"id": queue_id, "topic": topic, "paths": paths}
 
 

@@ -741,6 +741,180 @@ def test_cached_publish_normalizes_non_list_hashtags(queue_db, tmp_path):
     publish.assert_called_once_with(image_paths=[out_dir / "card_01_cover.png"], hook="hook text", hashtags=[])
 
 
+def dated_metadata(name: str, published_at: str = "") -> QueueMetadataV2:
+    return QueueMetadataV2(
+        topic=f"검증된 AI 뉴스 {name}",
+        source_title=f"원문 기사 {name}",
+        source_url=f"https://example.com/{name}",
+        context=f"검증에 사용할 충분한 기사 문맥 {name}",
+        evidence=[
+            {
+                "title": f"원문 기사 {name}",
+                "url": f"https://example.com/{name}",
+                "published_at": published_at,
+            }
+        ],
+    )
+
+
+def _ready_with_cards(queue_db, tmp_path, row_id, name):
+    out_dir = tmp_path / f"20261009_{name}"
+    out_dir.mkdir()
+    (out_dir / "card_01_cover.png").write_bytes(b"fake-png")
+    (out_dir / "script.json").write_text('{"hook": "h", "hashtags": ["#a"]}', encoding="utf-8")
+    with sqlite3.connect(queue_db) as conn:
+        conn.execute(
+            "UPDATE queue SET status='ready', image_dir=? WHERE id=?", (str(out_dir), row_id)
+        )
+    return out_dir
+
+
+def _row(queue_db, row_id):
+    with sqlite3.connect(queue_db) as conn:
+        conn.row_factory = sqlite3.Row
+        return conn.execute("SELECT * FROM queue WHERE id=?", (row_id,)).fetchone()
+
+
+def test_the_queue_list_names_each_candidates_outlet_and_date(queue_db):
+    from src.dashboard import app as dashboard
+
+    dated = db.enqueue_v2(
+        dated_metadata("a", "2026-10-07"), CollectionMethod.NEWS_COLLECTOR
+    )
+    legacy = db.enqueue_v2(dated_metadata("b"), CollectionMethod.NEWS_COLLECTOR)
+
+    assert "Example · 2026.10.07" in dashboard._candidate_source_label(db.get_queue_row(dated))
+    assert "Example" in dashboard._candidate_source_label(db.get_queue_row(legacy))
+    assert "2026" not in dashboard._candidate_source_label(db.get_queue_row(legacy))
+
+
+def test_a_row_with_unreadable_metadata_shows_no_label():
+    from src.dashboard import app as dashboard
+
+    assert dashboard._candidate_source_label({"metadata_json": "{not json"}) == ""
+    assert dashboard._candidate_source_label({"metadata_json": None}) == ""
+
+
+def test_a_card_approved_days_later_is_not_posted_if_its_article_went_stale(queue_db, tmp_path):
+    from datetime import date
+
+    row_id = db.enqueue_v2(dated_metadata("a", "2025-07-07"), CollectionMethod.NEWS_COLLECTOR)
+    _ready_with_cards(queue_db, tmp_path, row_id, "a")
+
+    with patch("src.agents.publisher.publish") as publish:
+        result = content_queue.publish_next(publish_to_ig=True)
+
+    assert result is None
+    publish.assert_not_called()
+    row = _row(queue_db, row_id)
+    assert row["publish_error_code"] == "SOURCE_UNSUITABLE_SOURCE_TOO_OLD"
+    assert row["status"] == "ready"  # still reviewable, just not postable
+
+
+def test_a_fresh_card_is_posted_normally(queue_db, tmp_path):
+    from datetime import date
+
+    row_id = db.enqueue_v2(
+        dated_metadata("a", date.today().isoformat()), CollectionMethod.NEWS_COLLECTOR
+    )
+    _ready_with_cards(queue_db, tmp_path, row_id, "a")
+
+    with patch("src.agents.publisher.publish", return_value="ig-1") as publish:
+        result = content_queue.publish_next(publish_to_ig=True)
+
+    assert result["id"] == row_id
+    publish.assert_called_once()
+    assert _row(queue_db, row_id)["status"] == "published"
+
+
+def test_a_legacy_row_without_a_recorded_date_is_checked_against_its_page(
+    queue_db, tmp_path, monkeypatch
+):
+    from datetime import date
+
+    row_id = db.enqueue_v2(dated_metadata("legacy"), CollectionMethod.NEWS_COLLECTOR)
+    _ready_with_cards(queue_db, tmp_path, row_id, "legacy")
+
+    monkeypatch.setattr(content_queue, "fetch_published_date", lambda url, **kw: date(2025, 7, 7))
+    with patch("src.agents.publisher.publish") as publish:
+        assert content_queue.publish_next(publish_to_ig=True) is None
+        publish.assert_not_called()
+    assert _row(queue_db, row_id)["publish_error_code"] == "SOURCE_UNSUITABLE_SOURCE_TOO_OLD"
+
+
+def test_a_legacy_row_whose_page_date_cannot_be_read_is_not_blocked(queue_db, tmp_path):
+    row_id = db.enqueue_v2(dated_metadata("legacy"), CollectionMethod.NEWS_COLLECTOR)
+    _ready_with_cards(queue_db, tmp_path, row_id, "legacy")
+
+    with patch("src.agents.publisher.publish", return_value="ig-1") as publish:
+        assert content_queue.publish_next(publish_to_ig=True)["id"] == row_id
+        publish.assert_called_once()
+
+
+def _three_candidates(queue_db, tmp_path):
+    from datetime import date
+
+    today = date.today().isoformat()
+    ids = [
+        db.enqueue_v2(dated_metadata(n, today), CollectionMethod.NEWS_COLLECTOR)
+        for n in ("a", "b", "c")
+    ]
+    _ready_with_cards(queue_db, tmp_path, ids[0], "a")          # the one that gets posted
+    _ready_with_cards(queue_db, tmp_path, ids[2], "c")          # a candidate with a preview
+    return ids
+
+
+def test_posting_one_candidate_clears_the_others(queue_db, tmp_path):
+    a, b, c = _three_candidates(queue_db, tmp_path)
+
+    with patch("src.agents.publisher.publish", return_value="ig-1"):
+        assert content_queue.publish_next(publish_to_ig=True)["id"] == a
+
+    assert [_row(queue_db, i)["status"] for i in (a, b, c)] == ["published", "skipped", "skipped"]
+
+
+def test_clearing_can_be_turned_off(queue_db, tmp_path, monkeypatch):
+    monkeypatch.setenv("QUEUE_CLEAR_AFTER_PUBLISH", "false")
+    a, b, c = _three_candidates(queue_db, tmp_path)
+
+    with patch("src.agents.publisher.publish", return_value="ig-1"):
+        content_queue.publish_next(publish_to_ig=True)
+
+    assert [_row(queue_db, i)["status"] for i in (a, b, c)] == ["published", "pending", "ready"]
+
+
+def test_a_candidate_being_generated_right_now_is_left_alone(queue_db, tmp_path):
+    a, b, c = _three_candidates(queue_db, tmp_path)
+    assert db.claim_queue_row(b)  # b is mid-generation
+
+    with patch("src.agents.publisher.publish", return_value="ig-1"):
+        content_queue.publish_next(publish_to_ig=True)
+
+    assert [_row(queue_db, i)["status"] for i in (a, b, c)] == ["published", "processing", "skipped"]
+
+
+def test_a_blocked_row_is_kept_for_a_person_to_see_not_swept_away(queue_db, tmp_path):
+    a, b, c = _three_candidates(queue_db, tmp_path)
+    db.mark_queue_error(b, "SOURCE_UNSUITABLE_SOURCE_TOO_OLD")
+
+    with patch("src.agents.publisher.publish", return_value="ig-1"):
+        content_queue.publish_next(publish_to_ig=True)
+
+    assert _row(queue_db, b)["status"] == "pending"
+    assert _row(queue_db, b)["publish_error_code"] == "SOURCE_UNSUITABLE_SOURCE_TOO_OLD"
+    assert _row(queue_db, c)["status"] == "skipped"
+
+
+def test_a_failed_post_does_not_clear_anything(queue_db, tmp_path):
+    a, b, c = _three_candidates(queue_db, tmp_path)
+
+    with patch("src.agents.publisher.publish", side_effect=RuntimeError("instagram down")):
+        content_queue.publish_next(publish_to_ig=True)
+
+    assert _row(queue_db, b)["status"] == "pending"
+    assert _row(queue_db, c)["status"] == "ready"
+
+
 def test_cached_publish_posts_the_caption_the_reviewer_saw(queue_db, tmp_path):
     """The dashboard previews caption.txt; the post must carry that same text
     (source attribution included), not a caption rebuilt from hook + hashtags."""

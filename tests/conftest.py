@@ -15,3 +15,13 @@ def _no_real_cover_copy_llm_call(monkeypatch):
         "src.qa.script_assembler._generate_cover_copy",
         lambda *args, **kwargs: None,
     )
+
+
+@pytest.fixture(autouse=True)
+def _no_live_publication_date_lookups(monkeypatch):
+    """Queue freshness re-checks ask the article page for rows with no recorded
+    date. Tests must never reach the network for that; a test that cares about the
+    looked-up date patches this name itself."""
+    monkeypatch.setattr(
+        "src.agents.content_queue.fetch_published_date", lambda url, **kw: None
+    )

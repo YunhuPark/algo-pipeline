@@ -994,7 +994,7 @@ def queue_page():
 
     trs = "".join(
         f"<tr><td style='color:var(--muted);font-size:12px'>#{r['id']}</td>"
-        f"<td style='font-weight:500'>{escape(r['topic'])}{_error_cell(r)}</td>"
+        f"<td style='font-weight:500'>{escape(r['topic'])}{_candidate_source_label(r)}{_error_cell(r)}</td>"
         f"<td>{_badge(r['status'])}</td>"
         f"<td style='color:var(--muted);font-size:12px'>{r['scheduled_at'] or '다음 차례'}</td>"
         f"<td>{_prepare_btn(r)}<form method='post' action='/queue/skip/{r['id']}' style='margin:0;display:inline'>"
@@ -1445,6 +1445,34 @@ def queue_prepare_next():
         _GENERATION_LOCK.release()
         raise
     return {"job_id": job_id}
+
+
+def _candidate_source_label(row) -> str:
+    """Small "TechCrunch · 2026.10.07" line shown under a queued candidate.
+
+    Candidates are collected together and one is picked per day, so the list has
+    to say where each came from and how fresh it is. Pure data from the row; no
+    network. Items queued before the date was recorded show the outlet only.
+    """
+
+    try:
+        data = json.loads(row["metadata_json"] or "{}")
+        url = str(data.get("source_url") or "")
+        evidence = data.get("evidence") or []
+        published = str((evidence[0].get("published_at") if evidence else "") or "")
+    except (KeyError, IndexError, TypeError, ValueError, AttributeError):
+        return ""
+    from src.qa.source_freshness import parse_date
+    from src.source_note import outlet_from_url
+
+    parts = [outlet_from_url(url)]
+    day = parse_date(published)
+    if day:
+        parts.append(day.strftime("%Y.%m.%d"))
+    text = " · ".join(part for part in parts if part)
+    if not text:
+        return ""
+    return f"<div style='color:var(--muted);font-size:11px;margin-top:2px'>{escape(text)}</div>"
 
 
 def _record_queue_approval(queue_id: int) -> bool:
