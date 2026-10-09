@@ -1279,6 +1279,24 @@ def _render_cta(img: Image.Image, slide: Slide, total: int,
     return img
 
 
+def render_text_card(
+    path: Path,
+    slide: Slide,
+    total: int,
+    handle: str,
+    background: Image.Image,
+) -> Path:
+    """Re-render a content slide as a plain text card, overwriting `path`.
+
+    Used when a slide's video could not be produced, so the card is a text card
+    like the others rather than a still thumbnail with a play button.
+    """
+
+    rendered = _render_content(_apply_background(background), slide, total, handle)
+    rendered.save(str(path), "PNG", optimize=True)
+    return path
+
+
 # ── 캡션 생성 ─────────────────────────────────────────────
 
 def _safe_caption(script: CardNewsScript, handle: str, hashtag_str: str) -> str:
