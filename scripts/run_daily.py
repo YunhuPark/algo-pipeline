@@ -106,9 +106,12 @@ def main() -> None:
     prepare_queue_runtime()
 
     try:
-        from src.agents.analytics import sync_all_insights
-        updated = sync_all_insights()
-        _log(f"Insights 동기화 완료: {updated}건 갱신")
+        from src.agents import analytics as _analytics
+        updated = _analytics.sync_all_insights()
+        failed = _analytics.LAST_SYNC_REPORT.get("failed", 0)
+        _log(f"Insights 동기화 완료: {updated}건 갱신, 수집 실패 {failed}건")
+        for item in _analytics.LAST_SYNC_REPORT.get("failures", []):
+            _log(f"  - 수집 실패 {item['post_id']}: {item['reason']}")
     except Exception as e:
         _log(f"Insights 동기화 실패 (무시하고 계속): {e}")
 

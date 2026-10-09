@@ -741,6 +741,34 @@ def test_cached_publish_normalizes_non_list_hashtags(queue_db, tmp_path):
     publish.assert_called_once_with(image_paths=[out_dir / "card_01_cover.png"], hook="hook text", hashtags=[])
 
 
+def test_cached_publish_posts_the_caption_the_reviewer_saw(queue_db, tmp_path):
+    """The dashboard previews caption.txt; the post must carry that same text
+    (source attribution included), not a caption rebuilt from hook + hashtags."""
+    row_id = db.enqueue_v2(metadata(), CollectionMethod.NEWS_COLLECTOR)
+    out_dir = tmp_path / "20260922_reviewed"
+    out_dir.mkdir()
+    (out_dir / "card_01_cover.png").write_bytes(b"fake-png")
+    (out_dir / "caption.txt").write_text("검토한 캡션\n\n출처: TechCrunch\n\n#알고", encoding="utf-8")
+    (out_dir / "script.json").write_text(
+        '{"hook": "hook text", "hashtags": ["#알고"]}', encoding="utf-8"
+    )
+    with sqlite3.connect(queue_db) as conn:
+        conn.execute(
+            "UPDATE queue SET status='ready', image_dir=? WHERE id=?",
+            (str(out_dir), row_id),
+        )
+
+    with patch("src.agents.publisher.publish", return_value="ig-1") as publish:
+        content_queue.publish_next(publish_to_ig=True)
+
+    publish.assert_called_once_with(
+        image_paths=[out_dir / "card_01_cover.png"],
+        hook="hook text",
+        hashtags=["#알고"],
+        caption="검토한 캡션\n\n출처: TechCrunch\n\n#알고",
+    )
+
+
 def test_human_rejection_marks_queue_skipped_without_remote_attempt(queue_db):
     row_id = db.enqueue_v2(metadata(), CollectionMethod.NEWS_COLLECTOR)
     rejected = PipelineResult(

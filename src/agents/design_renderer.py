@@ -337,21 +337,26 @@ def _draw_glass_panel(
     return Image.alpha_composite(img.convert("RGBA"), layer).convert("RGB")
 
 
-def _draw_body_panel(
-    img: Image.Image,
-    body: str,
-    *,
-    top: int = 850,
-) -> Image.Image:
-    """Render the verified claim as a readable editorial note."""
+OPTICAL_CENTER_SHIFT = 52
 
-    box = (PAD, top, W - PAD, H - 92)
-    img = _draw_glass_panel(img, box, fill_alpha=185, outline_alpha=65)
-    draw = ImageDraw.Draw(img)
 
-    label_font = _font(21, bold=True)
-    draw.text((PAD + 34, top + 30), "근거로 확인된 내용", font=label_font, fill=STYLE["accent2"])
+def _balanced_top(group_h: int, floor: int, bottom: int = H - 92) -> int:
+    """Top y that puts a block of `group_h` at the card's optical center.
 
+    The old layouts anchored content to a fixed y and a panel that stretched to
+    the bottom edge, so the text sat high inside a tall box and the whole block
+    read as bottom-heavy. Centering exactly on the card leaves it looking
+    top-heavy because the headline already sits at the top, so the target is
+    OPTICAL_CENTER_SHIFT px below the card's middle (roughly halfway between
+    the card center and the middle of the space under the headline). `floor`
+    keeps the block clear of the headline and `bottom` clear of the footer.
+    """
+
+    ideal = (H - group_h) // 2 + OPTICAL_CENTER_SHIFT
+    return max(floor, min(ideal, bottom - group_h))
+
+
+def _body_panel_layout(body: str, draw: ImageDraw.ImageDraw):
     cleaned = _clean(body)
     body_font = _auto_font(
         cleaned,
@@ -359,10 +364,42 @@ def _draw_body_panel(
         bold=False,
         steps=((55, 1.0), (85, 0.91), (115, 0.82)),
     )
-    lines = wrap_text(cleaned, body_font, draw, W - PAD * 2 - 68)
+    lines = wrap_text(cleaned, body_font, draw, W - PAD * 2 - 68)[:5]
     _, _, _, line_h = draw.textbbox((0, 0), "가나다", font=body_font)
+    panel_h = 74 + len(lines) * int(line_h * 1.38) + 36
+    return body_font, lines, line_h, panel_h
+
+
+def _body_panel_height(body: str) -> int:
+    """Height of the evidence note when it is sized to its text."""
+
+    return _body_panel_layout(body, ImageDraw.Draw(Image.new("RGB", (10, 10))))[3]
+
+
+def _draw_body_panel(
+    img: Image.Image,
+    body: str,
+    *,
+    top: int = 850,
+    fit: bool = False,
+) -> Image.Image:
+    """Render the verified claim as a readable editorial note.
+
+    fit=True sizes the panel to its text; the default keeps the legacy box that
+    runs down to the footer.
+    """
+
+    draw = ImageDraw.Draw(img)
+    body_font, lines, line_h, panel_h = _body_panel_layout(body, draw)
+    box = (PAD, top, W - PAD, top + panel_h if fit else H - 92)
+    img = _draw_glass_panel(img, box, fill_alpha=185, outline_alpha=65)
+    draw = ImageDraw.Draw(img)
+
+    label_font = _font(21, bold=True)
+    draw.text((PAD + 34, top + 30), "근거로 확인된 내용", font=label_font, fill=STYLE["accent2"])
+
     y = top + 74
-    for line in lines[:5]:
+    for line in lines:
         draw.text((PAD + 34, y), line, font=body_font, fill=STYLE["text_secondary"])
         y += int(line_h * 1.38)
     return img
@@ -395,9 +432,8 @@ def _draw_statement_body(img: Image.Image, body: str, *, top: int) -> Image.Imag
     pad_top, gap, pad_bottom = 34, 26, 42
     block_h = len(lines) * int(line_h * 1.34)
     panel_h = pad_top + label_h + gap + block_h + pad_bottom
-    region_top, region_bot = top, H - 92
-    panel_top = region_top + max(0, (region_bot - region_top - panel_h) // 2)
-    panel_bot = min(region_bot, panel_top + panel_h)
+    panel_top = _balanced_top(panel_h, top)
+    panel_bot = panel_top + panel_h
 
     img = _draw_glass_panel(
         img, (PAD, panel_top, W - PAD, panel_bot), fill_alpha=170, outline_alpha=60
@@ -438,11 +474,11 @@ def _draw_infographic_title(img: Image.Image, title: str) -> tuple[Image.Image, 
     return img, y
 
 
-def _split_verified_clauses(body: str) -> list[str]:
-    """Split the existing claim into visual steps without adding new copy."""
+def _real_clauses(body: str) -> list[str]:
+    """Split a claim only at real boundaries (sentence ends, commas, sequence words)."""
 
     clean = re.sub(r"\s+", " ", _clean(body)).strip()
-    clauses = [
+    return [
         part.strip(" ,.;:·")
         for part in re.split(
             r"(?<=[.!?])\s+|[,;]\s*|\s+(?=(?:그리고|이어|이후|다음으로|마지막으로)\s)",
@@ -450,14 +486,72 @@ def _split_verified_clauses(body: str) -> list[str]:
         )
         if part.strip(" ,.;:·")
     ]
-    if len(clauses) == 1 and len(clean) > 44:
-        midpoint = len(clean) // 2
-        split_at = clean.rfind(" ", 0, midpoint)
-        if split_at < 18:
-            split_at = clean.find(" ", midpoint)
-        if split_at > 0:
-            clauses = [clean[:split_at].strip(), clean[split_at:].strip()]
-    return clauses[:3] or [clean]
+
+
+def _split_verified_clauses(body: str) -> list[str]:
+    """Split the existing claim into visual steps without adding new copy.
+
+    There is deliberately no "cut a long sentence in half" fallback: that turned
+    one sentence into two numbered steps split mid-phrase
+    ("...DevSecOps와" / "AIOps 등 ..."), which read as broken copy.
+    """
+
+    clean = re.sub(r"\s+", " ", _clean(body)).strip()
+    return _real_clauses(body)[:3] or [clean]
+
+
+_RANGE_MARKERS = r"(?:에서|부터|~|～|-|–|—)"
+_STAT_RE = re.compile(r"^\s*(\d[\d,]*(?:\.\d+)?)\s*(\D*?)\s*$")
+
+
+def _collapse_stat_range(values: list[str], body: str) -> str | None:
+    """Return "30~40%" when the body states these values as one range, else None.
+
+    A hero stat shows exactly one number. When the claim is a range ("30%에서
+    40%"), showing only one end overstates it, so show the whole range.
+    """
+
+    parsed = [_STAT_RE.match(value) for value in values]
+    if not parsed or any(match is None for match in parsed):
+        return None
+    units = {match.group(2) for match in parsed if match}
+    if len(units) != 1:
+        return None
+    unit = units.pop()
+    ordered = sorted(
+        (match.group(1) for match in parsed if match),
+        key=lambda number: float(number.replace(",", "")),
+    )
+    low, high = ordered[0], ordered[-1]
+    pattern = (
+        rf"{re.escape(low)}\s*{re.escape(unit)}\s*{_RANGE_MARKERS}\s*{re.escape(high)}"
+    )
+    return f"{low}~{high}{unit}" if re.search(pattern, body) else None
+
+
+def _resolve_visual_layout(
+    slide: Slide, values: list[str], labels: list[str]
+) -> tuple[str, list[str], list[str]]:
+    """Pick a layout the evidence actually supports, else fall back to a statement.
+
+    - process needs at least two real clauses; a single sentence is not steps.
+    - hero_stat shows one number. Several distinct values are shown as a range
+      when the body states one, otherwise the slide falls back to a statement
+      instead of silently dropping all but the first value.
+    "entity" with no values is the plain statement layout.
+    """
+
+    visual_type = slide.visual_type
+    if visual_type == "process" and len(_real_clauses(slide.body)) < 2:
+        return "entity", [], []
+    if visual_type == "hero_stat":
+        distinct = list(dict.fromkeys(values))
+        if len(distinct) > 1:
+            collapsed = _collapse_stat_range(distinct, _clean(slide.body))
+            if collapsed:
+                return "hero_stat", [collapsed], labels[:1]
+            return "entity", [], []
+    return visual_type, values, labels
 
 
 def _render_infographic_content(
@@ -483,16 +577,17 @@ def _render_infographic_content(
     labels = [_clean(label) for label in slide.visual_labels]
     if not values and slide.accent:
         values = [_clean(slide.accent)]
+    visual_type, values, labels = _resolve_visual_layout(slide, values, labels)
 
+    # 제목 바로 아래를 바닥선으로 두고, 그 아래 콘텐츠 덩어리는 카드 중앙에 둔다.
+    content_floor = title_bottom + 40
     visual_top = max(330, title_bottom + 30)
-    visual_bottom = 800
-    visual_box = (PAD, visual_top, W - PAD, visual_bottom)
 
     # 인포그래픽은 보여줄 데이터가 있을 때만 그린다. warning/entity/impact는
     # 삼각형·동심원 안에 단어 하나를 넣을 뿐이라 470px을 장식에 쓰고 정작
     # 주장은 아래로 밀려났다. 그런 카드는 문장을 키워 그 공간을 쓴다.
     if visual_type not in {"hero_stat", "comparison", "process"}:
-        img = _draw_statement_body(img, slide.body, top=visual_top)
+        img = _draw_statement_body(img, slide.body, top=content_floor)
         _bottom_accent_line(ImageDraw.Draw(img))
         return img
 
@@ -530,6 +625,13 @@ def _render_infographic_content(
                 )
             y += card_h + card_gap
     else:
+        # 수치 박스 + 근거 패널을 한 덩어리로 보고 카드 중앙에 맞춘다. 패널은
+        # 글 높이에 맞춰 줄인다 (예전에는 바닥까지 늘어 글이 위쪽에만 몰렸다).
+        visual_h, panel_gap = 400, 44
+        panel_h = _body_panel_height(slide.body)
+        visual_top = _balanced_top(visual_h + panel_gap + panel_h, content_floor)
+        visual_bottom = visual_top + visual_h
+        visual_box = (PAD, visual_top, W - PAD, visual_bottom)
         img = _draw_glass_panel(img, visual_box, fill_alpha=145, outline_alpha=95)
         draw = ImageDraw.Draw(img)
         center_x = W // 2
@@ -639,7 +741,7 @@ def _render_infographic_content(
                 fill=STYLE["accent"],
             )
             draw.text((center_x - label_w // 2, visual_top + 71), label, font=label_font, fill=(255, 255, 255))
-            value_font = _auto_font(value, 112, bold=True, steps=((7, 1.0), (11, 0.84), (16, 0.68)))
+            value_font = _auto_font(value, 88, bold=True, steps=((7, 1.0), (11, 0.84), (16, 0.68)))
             value_lines = wrap_text(value, value_font, draw, W - PAD * 2 - 90)
             _, _, _, value_h = draw.textbbox((0, 0), "123", font=value_font)
             vy = center_y - len(value_lines) * value_h // 2 + 42
@@ -648,7 +750,9 @@ def _render_infographic_content(
                 draw.text((center_x - value_w // 2, vy), line, font=value_font, fill=STYLE["text_primary"])
                 vy += int(value_h * 1.04)
 
-        img = _draw_body_panel(img, slide.body, top=850)
+        img = _draw_body_panel(
+            img, slide.body, top=visual_bottom + panel_gap, fit=True
+        )
 
     _bottom_accent_line(ImageDraw.Draw(img))
     return img
@@ -899,19 +1003,10 @@ def _render_split(
     img = _draw_badge(img, slide.slide_number, total, handle)
     draw = ImageDraw.Draw(img)
 
-    # 영상 URL 오버레이 (썸네일 우하단)
-    if video_url:
-        uf = _font(21, bold=False)
-        url_text = f"▶ {video_url}"
-        uw = int(draw.textlength(url_text, font=uf))
-        ux, uy = W - uw - 14, thumb_h - 34
-        url_layer = Image.new("RGBA", (W, H), (0, 0, 0, 0))
-        ul = ImageDraw.Draw(url_layer)
-        ul.rounded_rectangle([ux - 6, uy - 4, ux + uw + 6, uy + 26],
-                              radius=5, fill=(0, 0, 0, 170))
-        img = Image.alpha_composite(img.convert("RGBA"), url_layer).convert("RGB")
-        draw = ImageDraw.Draw(img)
-        draw.text((ux, uy), url_text, font=uf, fill=(0, 229, 255))
+    # 영상 출처는 여기(썸네일 위)에 그리지 않는다. 영상 합성(video_renderer)이 이
+    # 영역을 통째로 덮어서, 그 위의 표기는 영상이 만들어진 카드에서는 보이지 않는다.
+    # 영상·기사 출처는 카드 맨 아래 한 줄(_draw_source_footer)로 표기한다.
+    # video_url 인자는 호출부 호환을 위해 남겨 둔다.
 
     # 텍스트 영역 (썸네일 아래 55% — 세로 중앙 정렬)
     text_w = W - PAD * 2
@@ -971,6 +1066,50 @@ def _render_split(
 
 
 # ── CTA ────────────────────────────────────────────────────
+
+def _draw_source_footer(
+    img: Image.Image,
+    source=None,
+    video_creator: str | None = None,
+) -> Image.Image:
+    """One small credit line along the bottom edge of a content card.
+
+    Names the article the facts come from and, when the card plays a video, the
+    channel it came from. It sits below the video: a credit drawn over the video
+    area is hidden once the clip is composed on top (that is why only cards whose
+    video failed ever showed "youtu.be/..."). `video_creator` is None for a card
+    without a video and "" when the channel is unknown.
+    """
+
+    parts: list[str] = []
+    if source is not None and getattr(source, "outlet", ""):
+        label = f"출처 {source.outlet}"
+        if getattr(source, "published", None):
+            label += f" · {source.date_text()}"
+        parts.append(label)
+    if video_creator is not None:
+        parts.append(f"영상 {video_creator.strip() or 'YouTube'}")
+    if not parts:
+        return img
+
+    font = _font(20, bold=False)
+    draw = ImageDraw.Draw(img)
+    separator = "  |  "
+    max_w = W - PAD * 2
+
+    def composed() -> str:
+        return separator.join(parts)
+
+    # A very long channel name must not run off the card: shorten that part, never
+    # the article credit in front of it.
+    if video_creator is not None:
+        name = video_creator.strip() or "YouTube"
+        while draw.textlength(composed(), font=font) > max_w and len(name) > 4:
+            name = name[:-2].rstrip() + "…" if not name.endswith("…") else name[:-2] + "…"
+            parts[-1] = f"영상 {name}"
+    draw.text((PAD, H - 52), composed(), font=font, fill=STYLE["text_muted"])
+    return img
+
 
 def _render_cta(img: Image.Image, slide: Slide, total: int,
                 handle: str, hashtags: list[str]) -> Image.Image:
@@ -1105,7 +1244,43 @@ def _render_cta(img: Image.Image, slide: Slide, total: int,
     return img
 
 
+def render_text_card(
+    path: Path,
+    slide: Slide,
+    total: int,
+    handle: str,
+    background: Image.Image,
+    source=None,
+) -> Path:
+    """Re-render a content slide as a plain text card, overwriting `path`.
+
+    Used when a slide's video could not be produced, so the card is a text card
+    like the others rather than a still thumbnail with a play button. It carries
+    the article credit only — there is no video to credit.
+    """
+
+    rendered = _render_content(_apply_background(background), slide, total, handle)
+    rendered = _draw_source_footer(rendered, source)
+    rendered.save(str(path), "PNG", optimize=True)
+    return path
+
+
 # ── 캡션 생성 ─────────────────────────────────────────────
+
+def _safe_caption(script: CardNewsScript, handle: str, hashtag_str: str) -> str:
+    """Caption built only from text that already passed verification.
+
+    Used when the model's caption keeps stating figures the cards do not
+    support: the hook and the content slides' headlines, no free-form numbers.
+    """
+
+    lines = [f"⚡ {script.hook}", ""]
+    for slide in script.slides:
+        if slide.slide_type == "content":
+            lines.append(f"· {slide.title}")
+    lines += ["", "저장해두고 나중에 다시 확인해요 💾", "", handle, "", hashtag_str]
+    return "\n".join(lines)
+
 
 def _generate_caption(script: CardNewsScript, handle: str) -> str:
     """GPT-4o-mini로 카드 내용 기반 인스타그램 캡션 동적 생성 — 사람이 쓴 것처럼"""
@@ -1140,12 +1315,33 @@ def _generate_caption(script: CardNewsScript, handle: str) -> str:
     try:
         from langchain_openai import ChatOpenAI
         from src.config import OPENAI_API_KEY
+        from src.qa.caption_guard import unsupported_figures, unsupported_hype
+
         llm = ChatOpenAI(model="gpt-4o-mini", temperature=0.75, api_key=OPENAI_API_KEY)
-        result = llm.invoke(prompt)
-        body = result.content.strip()
-        if hashtag_str and hashtag_str[:10] not in body:
-            body = f"{body}\n\n{hashtag_str}"
-        return body
+
+        # 캡션은 카드와 달리 검증을 거치지 않는 자유 문장이라 숫자가 틀리거나
+        # 과장이 붙을 수 있다 ("15억 달러"를 "1.5억 달러"로, "데이터 보안을 유지하며"를
+        # "데이터 보안도 완벽!"으로 쓴 실제 사례). 카드에 없는 숫자·강한 표현이 나오면
+        # 한 번 다시 쓰게 하고, 그래도 틀리면 카드 제목만으로 만든 캡션을 쓴다.
+        support = [script.hook] + [
+            f"{s.title} {s.body} {s.accent} {' '.join(s.visual_values)}" for s in script.slides
+        ]
+        attempt_prompt = prompt
+        for attempt in range(2):
+            body = llm.invoke(attempt_prompt).content.strip()
+            bad = unsupported_figures(body, support) + unsupported_hype(body, support)
+            if not bad:
+                if hashtag_str and hashtag_str[:10] not in body:
+                    body = f"{body}\n\n{hashtag_str}"
+                return body
+            print(f"  [Renderer] 캡션이 카드 내용과 맞지 않음 ({', '.join(bad)}) — "
+                  f"{'다시 작성' if attempt == 0 else '안전한 캡션으로 대체'}")
+            attempt_prompt = (
+                f"{prompt}\n\n[수정 지시] 직전 캡션의 다음 표현은 카드에 없는 내용입니다: "
+                f"{', '.join(bad)}. 숫자는 카드에 쓰인 표기를 그대로 쓰고, 카드에 없는 "
+                f"강한 표현(완벽·압도적·최고 등)은 쓰지 마세요. 확신이 없으면 빼세요."
+            )
+        return _safe_caption(script, handle, hashtag_str)
     except Exception as e:
         print(f"  [Renderer] AI 캡션 생성 실패({e}), 기본 캡션 사용")
         lines = [f"⚡ {script.hook}", ""]
@@ -1166,7 +1362,11 @@ def render_card_set(
     youtube_keyword: str = "",
     video_infos: list | None = None,
     pexels_video_map: dict[int, Image.Image] | None = None,
+    source=None,
 ) -> list[Path]:
+    """Render the card set. `source` (a SourceNote) is drawn on the closing card
+    and appended to the caption, so the post names where its facts came from."""
+
     p = persona or load_persona()
     active_handle = handle or p.handle
     global STYLE
@@ -1183,6 +1383,7 @@ def render_card_set(
     # content 슬라이드 → 썸네일 매핑
     content_slides = [s for s in script.slides if s.slide_type == "content"]
     thumb_map: dict[int, tuple[Image.Image, str]] = {}
+    video_credits: dict[int, str] = {}   # {slide_number: channel name} for the footer
     if video_infos:
         for i, slide in enumerate(content_slides):
             if i < len(video_infos):
@@ -1193,6 +1394,7 @@ def render_card_set(
                     if getattr(vi, "start_seconds", 0) > 0:
                         vid_url_with_t = f"youtu.be/{vi.video_id}?t={vi.start_seconds}"
                     thumb_map[slide.slide_number] = (vi.thumbnail, vid_url_with_t)
+                    video_credits[slide.slide_number] = (getattr(vi, "creator", "") or "")
 
     # 유튜브 매칭이 없는 슬라이드 중, 미리 구해둔 Pexels 스톡 영상이 있으면
     # 그것도 "split" 레이아웃으로 취급한다 (실제 모션이 있는 편이 정적 사진보다
@@ -1204,6 +1406,7 @@ def render_card_set(
             preview = pexels_video_map.get(slide.slide_number)
             if preview is not None:
                 thumb_map[slide.slide_number] = (preview, "Pexels")
+                video_credits[slide.slide_number] = "Pexels"
 
     # 그 나머지(영상도 Pexels 클립도 없는) 슬라이드 → 슬라이드별 개별 Pexels 사진
     slide_bg_map: dict[int, Image.Image] = {}   # {slide_number: bg_image}
@@ -1242,6 +1445,12 @@ def render_card_set(
         else:
             rendered = _render_content(slide_bg, slide, total, active_handle)
 
+        # 내용 카드마다 기사 출처(와 영상이 있으면 채널)를 맨 아래 한 줄로 작게 적는다.
+        if slide.slide_type == "content":
+            rendered = _draw_source_footer(
+                rendered, source, video_credits.get(slide.slide_number)
+            )
+
         fname = f"card_{slide.slide_number:02d}_{slide.slide_type}.png"
         fpath = out_dir / fname
         rendered.save(str(fpath), "PNG", optimize=True)
@@ -1254,6 +1463,13 @@ def render_card_set(
 
     (out_dir / "hashtags.txt").write_text(" ".join(script.hashtags), encoding="utf-8")
     caption = _generate_caption(script, active_handle)
+    if source is not None:
+        from src.source_note import insert_into_caption
+
+        caption = insert_into_caption(
+            caption, source.caption_block(), " ".join(script.hashtags[:15])
+        )
+    # 이 파일이 곧 게시되는 캡션이다 (publisher가 그대로 읽는다).
     (out_dir / "caption.txt").write_text(caption, encoding="utf-8")
     print(f"  [Renderer] 캡션 저장: caption.txt")
 
@@ -1278,6 +1494,9 @@ def render_card_set(
             for s in script.slides
         ],
     }
+    if source is not None:
+        # 슬라이드 부분 수정 때 마지막 카드와 캡션에 출처를 다시 넣기 위해 보관한다.
+        script_data["source_note"] = source.to_dict()
     (out_dir / "script.json").write_text(
         _json.dumps(script_data, ensure_ascii=False, indent=2), encoding="utf-8"
     )

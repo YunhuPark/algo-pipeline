@@ -62,6 +62,7 @@ def test_sync_all_insights_writes_provenance_snapshot(monkeypatch):
     )
     monkeypatch.setattr(analytics, "insert_analytics", lambda **kwargs: captured.update(legacy=kwargs))
     monkeypatch.setattr(db_experiments, "init_tracking_db", lambda: None)
+    monkeypatch.setattr(import_snapshot, "compact_performance_snapshots", lambda: 0)
     monkeypatch.setattr(
         import_snapshot,
         "import_performance_snapshot",
@@ -91,6 +92,7 @@ def test_sync_all_insights_does_not_record_failed_fetch(monkeypatch):
     )
     monkeypatch.setattr(analytics, "insert_analytics", lambda **kwargs: writes.append("legacy"))
     monkeypatch.setattr(db_experiments, "init_tracking_db", lambda: None)
+    monkeypatch.setattr(import_snapshot, "compact_performance_snapshots", lambda: 0)
     monkeypatch.setattr(
         import_snapshot,
         "import_performance_snapshot",

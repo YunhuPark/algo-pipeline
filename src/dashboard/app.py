@@ -1298,6 +1298,9 @@ def queue_skip(qid: int):
     # 발행은 이 시점엔 막을 방법이 없다. 조용히 "건너뜀"이라고 속이지 않고
     # 정확한 상태를 알려준다.
     if try_mark_queue_skipped(qid):
+        # 렌더링된 카드를 사람이 거절한 경우엔 검토 결정으로 남긴다 (회고 집계용).
+        # 렌더링 전 항목이나 이미 발행 중이라 건너뛸 수 없던 경우는 기록하지 않는다.
+        _record_queue_review(qid, "REJECTED")
         return redirect(url_for("queue_page", msg=f"#{qid} 건너뜀"))
     return redirect(url_for(
         "queue_page",
@@ -1444,6 +1447,63 @@ def queue_prepare_next():
     return {"job_id": job_id}
 
 
+def _record_queue_approval(queue_id: int) -> bool:
+    """Log the operator's approval for a queue item before it is published."""
+    return _record_queue_review(queue_id, "APPROVED")
+
+
+def _record_queue_review(queue_id: int, decision: str) -> bool:
+    """Log the operator's APPROVED/REJECTED decision for a rendered queue card.
+
+    The queue page is where a human signs off on (or rejects) a card, but it
+    never wrote an editorial_feedback_events row — so the weekly review saw zero
+    review decisions and stayed INSUFFICIENT_DATA no matter how many cards were
+    handled. The idempotency key is shared with /generate/review, so handling
+    the same card through both paths counts once.
+
+    Best-effort and observational only: it never blocks publishing or skipping.
+    A card that was never rendered (no image_dir/meta.json) has nothing to
+    review, so it records nothing.
+    """
+    try:
+        from src.db import get_queue_row
+        from src.analytics.feedback import log_editorial_feedback
+
+        row = get_queue_row(queue_id)
+        image_dir = str((row["image_dir"] if row else "") or "").strip()
+        if not image_dir:
+            return False
+        dir_name = Path(image_dir).name
+        meta_path = _resolve_output_file(dir_name, "meta.json")
+        if not meta_path.exists():
+            return False
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        run_id = str(meta.get("run_id") or "")
+        if not run_id:
+            return False
+        decision = decision.strip().upper()
+        # Approving needs verified evidence (same rule as /generate/review);
+        # rejecting never does — declining an unverified card is always fine.
+        if decision == "APPROVED" and str(
+            meta.get("editorial_validation_status") or ""
+        ) not in {"ORIGINAL_VERIFIED", "EDIT_VERIFIED"}:
+            return False
+        log_editorial_feedback(
+            content_id=dir_name,
+            run_id=run_id,
+            editor_id="dashboard_user",
+            approval_decision=decision,
+            edit_reason_category=(
+                "review_rejection" if decision == "REJECTED" else ""
+            ),
+            idempotency_key=f"review:{dir_name}:{decision}",
+        )
+        return True
+    except Exception as exc:
+        print(f"  [Tracking] 큐 검토 기록 실패({decision}): {type(exc).__name__}")
+        return False
+
+
 def _run_queue_publish_job(job_id: str, queue_id: int) -> None:
     global _ACTIVE_QUEUE_JOB
     _ACTIVE_QUEUE_JOB = {"job_id": job_id, "mode": "publish"}
@@ -1475,6 +1535,7 @@ def _run_queue_publish_job(job_id: str, queue_id: int) -> None:
         # 렌더링을 그대로 올리는 _publish_cached_render라 애초에 승인
         # 단계를 타지 않지만, image_dir가 없어 전체 파이프라인으로 떨어지는
         # 예외 상황까지 대비해 명시한다.
+        _record_queue_approval(queue_id)
         result = publish_specific(
             queue_id, publish_to_ig=True, require_human_approval=False
         )
@@ -2862,6 +2923,10 @@ def edit_slide():
 
         total = len(updated_slides)
         slide_data = slides[slide_index]
+        # 렌더 때 보관해 둔 출처 — 마지막 카드와 캡션을 다시 만들 때 빠지지 않게 한다.
+        from src.source_note import SourceNote
+
+        source_note = SourceNote.from_dict(script_data.get("source_note"))
 
         # video 매핑이 있는 content 슬라이드 → split 레이아웃 유지
         if (
@@ -2881,9 +2946,20 @@ def edit_slide():
         elif target_slide.slide_type == "cover":
             rendered = _dr._render_cover(rendered_bg, target_slide, total, persona.handle, hook=updated_script.hook)
         elif target_slide.slide_type == "cta":
-            rendered = _dr._render_cta(rendered_bg, target_slide, total, persona.handle, updated_script.hashtags)
+            rendered = _dr._render_cta(
+                rendered_bg, target_slide, total, persona.handle, updated_script.hashtags,
+            )
         else:
             rendered = _dr._render_content(rendered_bg, target_slide, total, persona.handle)
+
+        # 내용 카드의 맨 아래 출처 한 줄도 다시 단다 (수정해도 사라지지 않게).
+        if target_slide.slide_type == "content":
+            has_video = bool(slide_data.get("video_id"))
+            rendered = _dr._draw_source_footer(
+                rendered,
+                source_note,
+                (slide_data.get("video_creator") or "") if has_video else None,
+            )
 
         fname = f"card_{target_slide.slide_number:02d}_{target_slide.slide_type}.png"
         fpath = d / fname
@@ -2892,6 +2968,12 @@ def edit_slide():
         # 캡션도 갱신
         from src.agents.design_renderer import _generate_caption
         new_caption = _generate_caption(updated_script, persona.handle)
+        if source_note is not None:
+            from src.source_note import insert_into_caption
+
+            new_caption = insert_into_caption(
+                new_caption, source_note.caption_block(), " ".join(updated_script.hashtags[:15])
+            )
         (d / "caption.txt").write_text(new_caption, encoding="utf-8")
         script_json = _json.dumps(script_data, ensure_ascii=False, indent=2)
         script_path.write_text(script_json, encoding="utf-8")

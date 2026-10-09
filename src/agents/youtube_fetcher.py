@@ -648,6 +648,24 @@ def find_best_start_time(
     return 0
 
 
+def _is_playable_video(path: Path) -> bool:
+    """True if the file opens and yields a frame.
+
+    An interrupted download (connection reset) leaves a truncated mp4 with no
+    index ("moov atom not found"). It still exists on disk, so a cache check
+    based on existence alone kept reusing it, and every later run failed the same
+    way while the card quietly fell back to a still thumbnail.
+    """
+    try:
+        from moviepy import VideoFileClip
+
+        with VideoFileClip(str(path)) as clip:
+            clip.get_frame(min(0.5, max(clip.duration - 0.1, 0.0)))
+        return True
+    except Exception:
+        return False
+
+
 def download_video_snippet(
     video_id: str,
     duration: int = 15,
@@ -658,8 +676,12 @@ def download_video_snippet(
     cache_key = f"{video_id}_t{start_time}_{duration}"
     out_path = _CACHE_DIR / f"{cache_key}_snippet.mp4"
     if out_path.exists():
-        print(f"  [YouTubeFetcher] 캐시 사용: {cache_key}")
-        return out_path
+        if _is_playable_video(out_path):
+            print(f"  [YouTubeFetcher] 캐시 사용: {cache_key}")
+            return out_path
+        # 깨진 캐시는 버리고 새로 받는다 (끊긴 다운로드가 남긴 파일일 수 있다).
+        print(f"  [YouTubeFetcher] 캐시된 클립이 손상되어 다시 받습니다: {cache_key}")
+        out_path.unlink(missing_ok=True)
 
     try:
         import yt_dlp
@@ -687,9 +709,18 @@ def download_video_snippet(
             ydl.download([f'https://www.youtube.com/watch?v={video_id}'])
 
         if out_path.exists():
-            return out_path
+            if _is_playable_video(out_path):
+                return out_path
+            # 끊긴 다운로드는 파일이 남아도 재생되지 않는다. 캐시에 남기지 않는다.
+            print(f"  [YouTubeFetcher] 다운로드한 클립이 재생되지 않아 버립니다: {cache_key}")
+            out_path.unlink(missing_ok=True)
     except Exception as e:
         print(f"  [YouTubeFetcher] 영상 다운로드 실패: {e}")
+        # 중간에 끊겼다면 반쯤 받은 파일이 남아 있을 수 있다.
+        try:
+            out_path.unlink(missing_ok=True)
+        except OSError:
+            pass
     return None
 
 

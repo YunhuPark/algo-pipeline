@@ -35,6 +35,8 @@ from src.db import (
     queue_count,
     get_queue,
 )
+from src.qa.source_freshness import check_freshness, parse_date, resolve_published
+from src.qa.source_suitability import check_source_suitability
 from src.schemas.queue_schemas import CollectionMethod, PublishAttemptState, QueueMetadataV2
 
 
@@ -74,6 +76,20 @@ def _collect_news(exclude_urls: frozenset[str] = frozenset()):
     from src.agents.news_collector import collect_and_select
 
     return collect_and_select(exclude_urls=exclude_urls)
+
+
+def _stamp_published(metadata: Any, published: Any) -> None:
+    """Record the article's publication date on its primary evidence item.
+
+    Without it the queue cannot tell later (at generation time) that an item
+    that waited a few days has gone stale. Best-effort: the date is an extra,
+    so a metadata object that cannot take it is left untouched.
+    """
+
+    try:
+        metadata.evidence[0].published_at = published.isoformat()
+    except (AttributeError, IndexError, TypeError):
+        pass
 
 
 def _queued_source_urls() -> set[str]:
@@ -126,7 +142,10 @@ def bulk_generate(
         raise ValueError("직접 주제는 출처 attestation이 없어 Queue V2에 등록할 수 없습니다.")
 
     elif auto_news:
-        ids.extend(_fill_from_news(count))
+        from src.usage_tracker import usage_scope
+
+        with usage_scope("collection"):
+            ids.extend(_fill_from_news(count))
 
     else:
         print("  [ContentQueue] topics와 auto_news 모두 없음 — 아무것도 추가하지 않습니다.")
@@ -171,6 +190,32 @@ def _fill_from_news(count: int) -> list[int]:
                 )
                 continue
 
+            # 최신 기사만 쓴다. 발행일은 피드 값을, 없으면 기사 페이지의 메타데이터를
+            # 읽는다. 끝내 알 수 없으면 최신 기사임을 보장할 수 없으므로 거른다.
+            published = resolve_published(
+                getattr(selected_item, "published", None), selected_item.url
+            )
+            freshness = check_freshness(published)
+            if not freshness.ok:
+                print(
+                    f"  [ContentQueue] 최신 기사가 아님, 큐 추가 생략 "
+                    f"({freshness.code}): '{news.topic}' — {freshness.detail}"
+                )
+                continue
+
+            # 생성 단계에서 아홉 번 재시도하고도 반드시 실패하는 항목(주제가
+            # 너무 막연하거나, 원문이 답을 다음 편으로 미루는 경우)은 큐에
+            # 쌓기 전에 거른다.
+            suitability = check_source_suitability(
+                news.topic, selected_item.summary, selected_item.title
+            )
+            if not suitability.ok:
+                print(
+                    f"  [ContentQueue] 생성이 불가능한 항목, 큐 추가 생략 "
+                    f"({suitability.code}): '{news.topic}' — {suitability.detail}"
+                )
+                continue
+
             # 중복 주제 회피
             topic = news.topic
             if topic in seen_topics:
@@ -189,6 +234,7 @@ def _fill_from_news(count: int) -> list[int]:
                 content=selected_item.summary,
             )
             metadata = build_queue_metadata(topic, report)
+            _stamp_published(metadata, published)
             row_id = enqueue_v2(
                 metadata,
                 CollectionMethod.NEWS_COLLECTOR,
@@ -380,6 +426,30 @@ def _process_claimed_row(
                 print("  [ContentQueue] 이미 준비됨 — 재생성 없이 그대로 반환")
                 return {"id": queue_id, "topic": topic, "paths": paths}
         else:
+            # 이미 큐에 들어와 있는 항목도 생성 전에 한 번 거른다 — 반드시
+            # 실패할 항목에 재시도 예산(LLM 호출 수십 번)을 쓰지 않도록.
+            suitability = check_source_suitability(topic, context, check_length=False)
+            if suitability.ok:
+                # 큐에서 며칠 기다리는 동안 오래된 기사가 될 수 있다. 발행일이
+                # 기록된 항목만 검사하고, 기록 이전에 쌓인 항목(날짜 없음)은 막지 않는다.
+                recorded = (
+                    parse_date(metadata.evidence[0].published_at)
+                    if metadata.evidence
+                    else None
+                )
+                suitability = check_freshness(recorded, allow_unknown=True)
+            if not suitability.ok:
+                print(
+                    f"  [ContentQueue] 생성 불가 항목 ({suitability.code}): "
+                    f"'{topic}' — {suitability.detail}"
+                )
+                mark_queue_error(
+                    queue_id,
+                    suitability.error_code,
+                    increment_retry=False,
+                    preserve_attempt=True,
+                )
+                return None
             res = run_full_pipeline()
 
         if res and hasattr(res, 'image_paths') and res.image_paths:
@@ -486,7 +556,15 @@ def _publish_cached_render(
             return None
 
     try:
-        ig_post_id = ig_publisher.publish(image_paths=paths, hook=hook, hashtags=hashtags)
+        # 사람이 검토한 캡션(caption.txt)을 그대로 올린다 — 승인한 것과 게시되는
+        # 것이 같도록. 파일이 없으면 기존처럼 hook + 해시태그로 조합한다.
+        extra = {}
+        reviewed_caption = ig_publisher.read_card_caption(folder)
+        if isinstance(reviewed_caption, str) and reviewed_caption:
+            extra["caption"] = reviewed_caption
+        ig_post_id = ig_publisher.publish(
+            image_paths=paths, hook=hook, hashtags=hashtags, **extra
+        )
     except Exception as e:
         print(f"  [ContentQueue] 캐시 렌더링 발행 실패 (큐 id={queue_id}): {e}")
         mark_queue_error(queue_id, "REMOTE_PUBLISH_PERSISTENCE_UNCERTAIN")
