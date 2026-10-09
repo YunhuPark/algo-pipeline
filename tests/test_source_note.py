@@ -197,7 +197,7 @@ def test_attribution_is_appended_when_there_are_no_trailing_hashtags():
     assert sn.insert_into_caption("본문", "", "#a") == "본문"
 
 
-# ── the closing card ──────────────────────────────────────
+# ── the credit line on each content card ──────────────────
 
 
 def _fonts(monkeypatch):
@@ -226,29 +226,100 @@ def _cta() -> Slide:
     )
 
 
-def test_the_closing_card_shows_the_source_without_touching_the_hashtags(monkeypatch):
+def _blank() -> Image.Image:
+    return Image.new("RGB", (renderer.W, renderer.H), (11, 13, 29))
+
+
+def _changed_box(a: Image.Image, b: Image.Image):
+    return ImageChops.difference(a, b).getbbox()
+
+
+def test_the_credit_is_one_small_line_along_the_bottom_edge(monkeypatch):
     _fonts(monkeypatch)
-    background = Image.new("RGB", (renderer.W, renderer.H), (11, 13, 29))
-    tags = ["#알고", "#카드뉴스", "#인사이트"]
 
-    plain = renderer._render_cta(background, _cta(), 6, "@algo", tags)
-    sourced = renderer._render_cta(background, _cta(), 6, "@algo", tags, source=_note())
+    plain = _blank()
+    credited = renderer._draw_source_footer(_blank(), _note())
 
-    assert sourced.size == (1080, 1350)
-    assert ImageChops.difference(plain, sourced).getbbox() is not None
-    # The hashtag strip along the bottom is identical: the box never overlaps it.
-    strip = (0, renderer.H - 90, renderer.W, renderer.H)
-    assert ImageChops.difference(plain.crop(strip), sourced.crop(strip)).getbbox() is None
+    left, top, right, bottom = _changed_box(plain, credited)
+    assert top >= renderer.H - 60          # only the bottom strip changed
+    assert bottom <= renderer.H - 10       # and clear of the accent line at the very edge
+    assert right <= renderer.W - renderer.PAD
+    assert bottom - top <= 30              # one small line, not a box
 
 
-def test_a_card_without_a_source_renders_exactly_as_before(monkeypatch):
+def test_the_video_channel_is_named_when_the_card_has_a_video(monkeypatch):
     _fonts(monkeypatch)
-    background = Image.new("RGB", (renderer.W, renderer.H), (11, 13, 29))
 
-    a = renderer._render_cta(background, _cta(), 6, "@algo", ["#a"])
-    b = renderer._render_cta(background, _cta(), 6, "@algo", ["#a"], source=None)
+    article_only = renderer._draw_source_footer(_blank(), _note())
+    with_video = renderer._draw_source_footer(_blank(), _note(), "Hyperautomation Labs")
+    unknown_channel = renderer._draw_source_footer(_blank(), _note(), "")
 
-    assert ImageChops.difference(a, b).getbbox() is None
+    assert _changed_box(article_only, with_video) is not None       # channel adds text
+    assert _changed_box(with_video, unknown_channel) is not None    # "" falls back to "YouTube"
+    assert _changed_box(article_only, unknown_channel) is not None
+
+
+def test_a_card_with_neither_source_nor_video_gets_no_footer(monkeypatch):
+    _fonts(monkeypatch)
+
+    assert _changed_box(_blank(), renderer._draw_source_footer(_blank(), None, None)) is None
+
+
+def test_a_very_long_channel_name_cannot_run_off_the_card(monkeypatch):
+    _fonts(monkeypatch)
+
+    credited = renderer._draw_source_footer(_blank(), _note(), "가나다라마바사" * 30)
+
+    _, _, right, _ = _changed_box(_blank(), credited)
+    assert right <= renderer.W - renderer.PAD + 2
+
+
+def test_the_closing_card_no_longer_carries_a_source_box(monkeypatch):
+    # Moved to a small line on each content card; the last card stays uncluttered.
+    _fonts(monkeypatch)
+    assert "source" not in inspect.signature(renderer._render_cta).parameters
+
+
+def test_render_card_set_credits_every_content_card_and_only_those(monkeypatch, tmp_path):
+    from src.agents.youtube_fetcher import VideoInfo
+
+    _fonts(monkeypatch)
+    monkeypatch.setattr(renderer, "OUTPUT_DIR", tmp_path)
+    monkeypatch.setattr(renderer, "_generate_caption", lambda script, handle: "캡션\n#알고")
+    monkeypatch.setattr("src.agents.image_searcher.search_pexels", lambda *a, **k: None)
+    calls: list[tuple] = []
+    real = renderer._draw_source_footer
+    monkeypatch.setattr(
+        renderer,
+        "_draw_source_footer",
+        lambda img, source=None, video_creator=None: (
+            calls.append((source, video_creator)) or real(img, source, video_creator)
+        ),
+    )
+    script = CardNewsScript(
+        topic="Nous 15억 달러",
+        hook="hook",
+        hashtags=["#알고"],
+        slides=[
+            Slide(slide_number=1, slide_type="cover", title="표지", body="요약"),
+            Slide(slide_number=2, slide_type="content", title="영상 카드", body="검증된 본문입니다."),
+            Slide(slide_number=3, slide_type="content", title="문장 카드", body="검증된 본문입니다."),
+            _cta().model_copy(update={"slide_number": 4}),
+        ],
+    )
+    video = VideoInfo(
+        video_id="abc", url="youtu.be/abc", title="t", creator="Hyperautomation Labs",
+        thumbnail=Image.new("RGB", (640, 360), (40, 40, 40)),
+    )
+
+    renderer.render_card_set(
+        script, Image.new("RGB", (1080, 1350), (15, 16, 30)),
+        output_subdir="credits", video_infos=[video, None], source=_note(),
+    )
+
+    # One call per content card: the video card names its channel, the text card does not.
+    assert [creator for _, creator in calls] == ["Hyperautomation Labs", None]
+    assert all(source == _note() for source, _ in calls)
 
 
 def test_render_card_set_puts_the_source_in_caption_and_script_json(monkeypatch, tmp_path):
@@ -327,12 +398,15 @@ def test_the_pipeline_builds_the_note_from_the_lineage_and_passes_it_to_the_rend
     assert "from_lineage(source_lineage)" in source
     assert "source=source_note" in source
     assert "read_card_caption" in source
+    assert '"video_creator"' in source          # kept so a later edit can redraw the credit
 
 
-def test_a_slide_edit_keeps_the_source_on_the_card_and_in_the_caption():
+def test_a_slide_edit_keeps_the_credit_line_and_the_caption_source():
     from src.dashboard import app as dashboard
 
     source = inspect.getsource(dashboard)
 
     assert 'SourceNote.from_dict(script_data.get("source_note"))' in source
-    assert "source=source_note" in source
+    assert "_draw_source_footer" in source
+    assert 'slide_data.get("video_creator")' in source
+    assert "insert_into_caption" in source
