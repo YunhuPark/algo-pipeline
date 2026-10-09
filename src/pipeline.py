@@ -689,6 +689,20 @@ def _run_once(
                 if snippet_path:
                     out_mp4 = target_path.with_suffix(".mp4")
                     res = create_video_slide(target_path, snippet_path, out_mp4)
+                    if not res:
+                        # 합성이 실패했다면 클립이 깨졌을 수 있다. 캐시를 버리고
+                        # 새로 받아 딱 한 번 더 시도한다 (네트워크가 끊긴 순간의
+                        # 반쪽짜리 파일이 캐시에 남아 매번 같은 실패를 내던 문제).
+                        print(f"  [4.1] 슬라이드 {slide_script.slide_number}: 합성 실패 → 클립을 새로 받아 재시도")
+                        try:
+                            snippet_path.unlink(missing_ok=True)
+                        except OSError:
+                            pass
+                        retry_path = download_video_snippet(
+                            v_info.video_id, duration=15, start_time=best_t
+                        )
+                        if retry_path:
+                            res = create_video_slide(target_path, retry_path, out_mp4)
                     if res:
                         return target_idx, res, best_t, slide_script.slide_number
             except Exception as e:
@@ -699,14 +713,51 @@ def _run_once(
             print(f"\n[4.1] 비디오 슬라이드 병렬 합성 중 ({len(tasks)}개)...")
             max_workers = min(4, len(tasks))
             start_time_map: dict[int, int] = {}   # {slide_number: start_seconds}
+            without_video: list[tuple] = []   # (slide_script, target_path)
             with ThreadPoolExecutor(max_workers=max_workers) as executor:
                 futures = {executor.submit(_process_video_slide, t): t for t in tasks}
                 for future in as_completed(futures):
                     target_idx, result_path, best_t, slide_num = future.result()
                     if result_path:
                         paths[target_idx] = result_path
+                    else:
+                        task = futures[future]
+                        without_video.append((task[0], task[2]))
                     if best_t > 0 and slide_num > 0:
                         start_time_map[slide_num] = best_t
+
+            # 영상을 끝내 만들지 못한 슬라이드(정지 화면, 다운로드 실패 등)는 재생 버튼이
+            # 붙은 썸네일 이미지로 두지 않는다 — 재생되지 않는데 영상처럼 보이고, 같은
+            # 세트의 다른 카드와 일관되지 않는다. 영상 없는 카드는 문장 카드로 통일한다.
+            if without_video:
+                from src.agents import design_renderer as _dr
+
+                for slide_script, target_path in without_video:
+                    try:
+                        _dr.render_text_card(
+                            target_path, slide_script, len(script.slides), h, bg
+                        )
+                        print(
+                            f"  [4.1] 슬라이드 {slide_script.slide_number}: 영상 없음 → 문장 카드로 대체"
+                        )
+                    except Exception as e:
+                        print(f"  ⚠️ 슬라이드 {slide_script.slide_number} 문장 카드 대체 실패: {e}")
+                # 대시보드가 이 슬라이드를 다시 그릴 때 썸네일 레이아웃으로 되돌아가지 않도록
+                # script.json의 영상 매핑도 지운다.
+                try:
+                    sc_json = paths[0].parent / "script.json"
+                    if sc_json.exists():
+                        sc_data = _json.loads(sc_json.read_text(encoding="utf-8"))
+                        dropped = {s.slide_number for s, _ in without_video}
+                        for sl in sc_data.get("slides", []):
+                            if sl.get("slide_number") in dropped:
+                                for key in ("video_id", "video_title", "start_seconds"):
+                                    sl.pop(key, None)
+                        sc_json.write_text(
+                            _json.dumps(sc_data, ensure_ascii=False, indent=2), encoding="utf-8"
+                        )
+                except Exception as e:
+                    print(f"  ⚠️ script.json 영상 매핑 정리 실패: {e}")
 
             # start_seconds를 script.json에 저장 (대시보드 preview에서 활용)
             if start_time_map:
