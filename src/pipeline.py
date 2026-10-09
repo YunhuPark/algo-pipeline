@@ -612,6 +612,8 @@ def _run_once(
                         v = video_infos[vi_idx]
                         script_data["slides"][ci]["video_id"] = v.video_id
                         script_data["slides"][ci]["video_title"] = v.title
+                        # 카드 맨 아래 영상 출처 표기에 쓴다 (슬라이드 수정 때 다시 그릴 수 있게).
+                        script_data["slides"][ci]["video_creator"] = getattr(v, "creator", "") or ""
                 script_json_path.write_text(
                     _json.dumps(script_data, ensure_ascii=False, indent=2),
                     encoding="utf-8",
@@ -735,7 +737,8 @@ def _run_once(
                 for slide_script, target_path in without_video:
                     try:
                         _dr.render_text_card(
-                            target_path, slide_script, len(script.slides), h, bg
+                            target_path, slide_script, len(script.slides), h, bg,
+                            source=source_note,
                         )
                         print(
                             f"  [4.1] 슬라이드 {slide_script.slide_number}: 영상 없음 → 문장 카드로 대체"
@@ -751,7 +754,7 @@ def _run_once(
                         dropped = {s.slide_number for s, _ in without_video}
                         for sl in sc_data.get("slides", []):
                             if sl.get("slide_number") in dropped:
-                                for key in ("video_id", "video_title", "start_seconds"):
+                                for key in ("video_id", "video_title", "video_creator", "start_seconds"):
                                     sl.pop(key, None)
                         sc_json.write_text(
                             _json.dumps(sc_data, ensure_ascii=False, indent=2), encoding="utf-8"

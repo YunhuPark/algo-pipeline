@@ -2948,10 +2948,18 @@ def edit_slide():
         elif target_slide.slide_type == "cta":
             rendered = _dr._render_cta(
                 rendered_bg, target_slide, total, persona.handle, updated_script.hashtags,
-                source=source_note,
             )
         else:
             rendered = _dr._render_content(rendered_bg, target_slide, total, persona.handle)
+
+        # 내용 카드의 맨 아래 출처 한 줄도 다시 단다 (수정해도 사라지지 않게).
+        if target_slide.slide_type == "content":
+            has_video = bool(slide_data.get("video_id"))
+            rendered = _dr._draw_source_footer(
+                rendered,
+                source_note,
+                (slide_data.get("video_creator") or "") if has_video else None,
+            )
 
         fname = f"card_{target_slide.slide_number:02d}_{target_slide.slide_type}.png"
         fpath = d / fname

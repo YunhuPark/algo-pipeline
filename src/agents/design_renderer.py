@@ -1003,19 +1003,10 @@ def _render_split(
     img = _draw_badge(img, slide.slide_number, total, handle)
     draw = ImageDraw.Draw(img)
 
-    # 영상 URL 오버레이 (썸네일 우하단)
-    if video_url:
-        uf = _font(21, bold=False)
-        url_text = f"▶ {video_url}"
-        uw = int(draw.textlength(url_text, font=uf))
-        ux, uy = W - uw - 14, thumb_h - 34
-        url_layer = Image.new("RGBA", (W, H), (0, 0, 0, 0))
-        ul = ImageDraw.Draw(url_layer)
-        ul.rounded_rectangle([ux - 6, uy - 4, ux + uw + 6, uy + 26],
-                              radius=5, fill=(0, 0, 0, 170))
-        img = Image.alpha_composite(img.convert("RGBA"), url_layer).convert("RGB")
-        draw = ImageDraw.Draw(img)
-        draw.text((ux, uy), url_text, font=uf, fill=(0, 229, 255))
+    # 영상 출처는 여기(썸네일 위)에 그리지 않는다. 영상 합성(video_renderer)이 이
+    # 영역을 통째로 덮어서, 그 위의 표기는 영상이 만들어진 카드에서는 보이지 않는다.
+    # 영상·기사 출처는 카드 맨 아래 한 줄(_draw_source_footer)로 표기한다.
+    # video_url 인자는 호출부 호환을 위해 남겨 둔다.
 
     # 텍스트 영역 (썸네일 아래 55% — 세로 중앙 정렬)
     text_w = W - PAD * 2
@@ -1076,64 +1067,52 @@ def _render_split(
 
 # ── CTA ────────────────────────────────────────────────────
 
-def _source_box_layout(draw: ImageDraw.ImageDraw, source) -> tuple[list, int]:
-    """Rows for the source attribution box and its total height.
+def _draw_source_footer(
+    img: Image.Image,
+    source=None,
+    video_creator: str | None = None,
+) -> Image.Image:
+    """One small credit line along the bottom edge of a content card.
 
-    Each row is (text, font, fill, line_height). The headline wraps to at most
-    two lines; everything is measured before drawing so the closing card can
-    reserve the space and keep its content vertically centered.
+    Names the article the facts come from and, when the card plays a video, the
+    channel it came from. It sits below the video: a credit drawn over the video
+    area is hidden once the clip is composed on top (that is why only cards whose
+    video failed ever showed "youtu.be/..."). `video_creator` is None for a card
+    without a video and "" when the channel is unknown.
     """
 
-    if source is None:
-        return [], 0
-    inner_w = W - PAD * 2 - 120 - 60
-    label_font = _font(22, bold=False)
-    name_font = _font(30, bold=False)
-    title_font = _font(26, bold=False)
-    date_font = _font(22, bold=False)
+    parts: list[str] = []
+    if source is not None and getattr(source, "outlet", ""):
+        label = f"출처 {source.outlet}"
+        if getattr(source, "published", None):
+            label += f" · {source.date_text()}"
+        parts.append(label)
+    if video_creator is not None:
+        parts.append(f"영상 {video_creator.strip() or 'YouTube'}")
+    if not parts:
+        return img
 
-    def height_of(font) -> int:
-        return draw.textbbox((0, 0), "가나다", font=font)[3]
-
-    rows: list[tuple[str, ImageFont.FreeTypeFont, tuple, int]] = [
-        ("출처", label_font, STYLE["accent2"], height_of(label_font))
-    ]
-    if source.outlet:
-        rows.append((source.outlet, name_font, STYLE["text_primary"], height_of(name_font)))
-    if source.title:
-        for line in wrap_text(source.title, title_font, draw, inner_w)[:2]:
-            rows.append((line, title_font, STYLE["text_secondary"], height_of(title_font)))
-    if source.published:
-        rows.append(
-            (f"{source.date_text()} 발행", date_font, STYLE["text_muted"], height_of(date_font))
-        )
-    gap = 10
-    box_h = 22 * 2 + sum(row[3] for row in rows) + gap * (len(rows) - 1)
-    return rows, box_h
-
-
-def _draw_source_box(img: Image.Image, top: int, rows: list, box_h: int) -> Image.Image:
-    """Draw the attribution box centered at `top` (a translucent glass panel)."""
-
-    box_w = W - PAD * 2 - 120
-    left = (W - box_w) // 2
-    layer = Image.new("RGBA", (W, H), (0, 0, 0, 0))
-    ld = ImageDraw.Draw(layer)
-    ld.rounded_rectangle(
-        (left, top, left + box_w, top + box_h), radius=22, fill=(8, 10, 24, 190),
-        outline=(90, 90, 200, 150), width=2,
-    )
-    img = Image.alpha_composite(img.convert("RGBA"), layer).convert("RGB")
+    font = _font(20, bold=False)
     draw = ImageDraw.Draw(img)
-    y = top + 22
-    for text, font, fill, line_h in rows:
-        draw.text((_cx(draw, text, font), y), text, font=font, fill=fill)
-        y += line_h + 10
+    separator = "  |  "
+    max_w = W - PAD * 2
+
+    def composed() -> str:
+        return separator.join(parts)
+
+    # A very long channel name must not run off the card: shorten that part, never
+    # the article credit in front of it.
+    if video_creator is not None:
+        name = video_creator.strip() or "YouTube"
+        while draw.textlength(composed(), font=font) > max_w and len(name) > 4:
+            name = name[:-2].rstrip() + "…" if not name.endswith("…") else name[:-2] + "…"
+            parts[-1] = f"영상 {name}"
+    draw.text((PAD, H - 52), composed(), font=font, fill=STYLE["text_muted"])
     return img
 
 
 def _render_cta(img: Image.Image, slide: Slide, total: int,
-                handle: str, hashtags: list[str], source=None) -> Image.Image:
+                handle: str, hashtags: list[str]) -> Image.Image:
     """
     CTA: 상단+하단 gradient → 배지 → 이모지 → accent bar → 타이틀
          → 본문 → handle pill → 해시태그 pill 배지들
@@ -1173,12 +1152,6 @@ def _render_cta(img: Image.Image, slide: Slide, total: int,
     est_h += sum(int(lh2 * 1.5) for _ in b_lines) + 20   # 본문
     if handle:
         est_h += 52                                      # handle pill
-
-    # 출처 박스 — 높이를 미리 재서 콘텐츠 블록의 세로 중앙 정렬에 포함한다.
-    source_rows, source_h = _source_box_layout(draw, source)
-    source_gap = 30
-    if source_rows:
-        est_h += source_gap + source_h
 
     top_margin = int(H * 0.12)   # 상단 배지와 겹치지 않을 최소 여백
     free_space = (CONTENT_BOTTOM - top_margin) - est_h
@@ -1233,14 +1206,6 @@ def _render_cta(img: Image.Image, slide: Slide, total: int,
         text_h = bb[3] - bb[1]
         text_top = hy + (52 - text_h) // 2
         draw.text((hx + hpad, text_top), handle, font=hf, fill=STYLE["accent2"])
-        y += 52
-
-    # 출처 — 핸들 아래. 공간이 모자라면(est_h에 이미 반영돼 드문 경우) 생략한다.
-    if source_rows:
-        source_top = y + source_gap
-        if source_top + source_h <= CONTENT_BOTTOM + 20:
-            img = _draw_source_box(img, source_top, source_rows, source_h)
-            draw = ImageDraw.Draw(img)
 
     # 해시태그 — pill 배지, 항상 하단에 고정 배치
     if hashtags:
@@ -1285,14 +1250,17 @@ def render_text_card(
     total: int,
     handle: str,
     background: Image.Image,
+    source=None,
 ) -> Path:
     """Re-render a content slide as a plain text card, overwriting `path`.
 
     Used when a slide's video could not be produced, so the card is a text card
-    like the others rather than a still thumbnail with a play button.
+    like the others rather than a still thumbnail with a play button. It carries
+    the article credit only — there is no video to credit.
     """
 
     rendered = _render_content(_apply_background(background), slide, total, handle)
+    rendered = _draw_source_footer(rendered, source)
     rendered.save(str(path), "PNG", optimize=True)
     return path
 
@@ -1415,6 +1383,7 @@ def render_card_set(
     # content 슬라이드 → 썸네일 매핑
     content_slides = [s for s in script.slides if s.slide_type == "content"]
     thumb_map: dict[int, tuple[Image.Image, str]] = {}
+    video_credits: dict[int, str] = {}   # {slide_number: channel name} for the footer
     if video_infos:
         for i, slide in enumerate(content_slides):
             if i < len(video_infos):
@@ -1425,6 +1394,7 @@ def render_card_set(
                     if getattr(vi, "start_seconds", 0) > 0:
                         vid_url_with_t = f"youtu.be/{vi.video_id}?t={vi.start_seconds}"
                     thumb_map[slide.slide_number] = (vi.thumbnail, vid_url_with_t)
+                    video_credits[slide.slide_number] = (getattr(vi, "creator", "") or "")
 
     # 유튜브 매칭이 없는 슬라이드 중, 미리 구해둔 Pexels 스톡 영상이 있으면
     # 그것도 "split" 레이아웃으로 취급한다 (실제 모션이 있는 편이 정적 사진보다
@@ -1436,6 +1406,7 @@ def render_card_set(
             preview = pexels_video_map.get(slide.slide_number)
             if preview is not None:
                 thumb_map[slide.slide_number] = (preview, "Pexels")
+                video_credits[slide.slide_number] = "Pexels"
 
     # 그 나머지(영상도 Pexels 클립도 없는) 슬라이드 → 슬라이드별 개별 Pexels 사진
     slide_bg_map: dict[int, Image.Image] = {}   # {slide_number: bg_image}
@@ -1466,13 +1437,19 @@ def render_card_set(
         if slide.slide_type == "cover":
             rendered = _render_cover(bg_cover, slide, total, active_handle, hook=script.hook)
         elif slide.slide_type == "cta":
-            rendered = _render_cta(bg, slide, total, active_handle, script.hashtags, source=source)
+            rendered = _render_cta(bg, slide, total, active_handle, script.hashtags)
         elif slide.slide_number in thumb_map:
             thumb, vid_url = thumb_map[slide.slide_number]
             print(f"  [Renderer] 슬라이드 {slide.slide_number}: split ({vid_url})")
             rendered = _render_split(slide_bg, slide, total, active_handle, thumb, vid_url)
         else:
             rendered = _render_content(slide_bg, slide, total, active_handle)
+
+        # 내용 카드마다 기사 출처(와 영상이 있으면 채널)를 맨 아래 한 줄로 작게 적는다.
+        if slide.slide_type == "content":
+            rendered = _draw_source_footer(
+                rendered, source, video_credits.get(slide.slide_number)
+            )
 
         fname = f"card_{slide.slide_number:02d}_{slide.slide_type}.png"
         fpath = out_dir / fname
