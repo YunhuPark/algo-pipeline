@@ -827,6 +827,11 @@ class ClaimGenerator:
                 ):
                     raise
 
+                from src.usage_tracker import record_retry
+
+                record_retry(
+                    "claim_generator.response", exc.error_code, str(exc), attempt
+                )
                 if exc.error_code == "CLAIM_ENTITY_UNSUPPORTED":
                     print(
                         "[QualityGate] Claim entity가 인용 근거에 없어 "
