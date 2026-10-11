@@ -508,6 +508,27 @@ def _quick_video_coverage(article_title: str, topic: str) -> int:
 
 # ── 공개 API ──────────────────────────────────────────────
 
+def _drop_stale_items(items: list[NewsItem]) -> list[NewsItem]:
+    """발행일이 허용 기간(SOURCE_MAX_AGE_DAYS)을 넘은 기사를 주제 선택 전에 뺀다.
+
+    어차피 생성 직전 최신성 검사에서 막힐 기사를 LLM에 보여주면, 그 기사가
+    뽑힌 뒤에 버려져 선택 호출 비용과 하루치 후보가 헛되이 쓰인다. 피드가
+    날짜를 준 기사만 거른다(네트워크 없음) — 날짜 미상은 뒤 단계가 판단한다.
+    전부 오래됐다면 그대로 둔다(빈 목록으로 실패하는 것보다 뒤 단계 차단이 낫다).
+    """
+    from src.qa.source_freshness import check_freshness
+
+    fresh = [
+        it for it in items
+        if it.published is None or check_freshness(it.published).ok
+    ]
+    dropped = len(items) - len(fresh)
+    if dropped and fresh:
+        print(f"  [NewsCollector] 발행일이 오래된 기사 {dropped}건 제외 → {len(fresh)}건에서 선택")
+        return fresh
+    return items
+
+
 def collect_and_select(exclude_urls: frozenset[str] = frozenset()) -> NewsSelection:
     """
     뉴스 수집 → GPT-4o 주제 선택 → NewsSelection 반환.
@@ -532,6 +553,8 @@ def collect_and_select(exclude_urls: frozenset[str] = frozenset()) -> NewsSelect
 
     if not all_items:
         raise RuntimeError("수집된 뉴스가 없습니다. 네트워크 연결을 확인하세요.")
+
+    all_items = _drop_stale_items(all_items)
 
     print(f"  [NewsCollector] 총 {len(all_items)}개 기사 → GPT-4o 주제 선택 중...")
     selected = _select_topic_with_gpt(all_items)
