@@ -257,6 +257,11 @@ class ContentCreator:
                 error_repairs += 1
                 repair_counts[exc.error_code] = error_repairs
 
+                from src.usage_tracker import record_retry
+
+                record_retry(
+                    "content_creator.quality_gate", exc.error_code, str(exc), attempt
+                )
                 claim_label = f" (claim_id={exc.claim_id})" if exc.claim_id else ""
                 print(
                     "[QualityGate] Claim 또는 편집 품질 검증에 실패하여 "

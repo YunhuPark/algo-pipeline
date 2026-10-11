@@ -339,3 +339,17 @@ def test_tracking_failures_cannot_break_an_llm_call(monkeypatch):
     monkeypatch.delenv("TRACKING_DB_PATH", raising=False)  # recording will fail
 
     assert _llm().invoke("hello").content == "ok"
+
+
+def test_record_retry_stores_cause_and_detail(tracking):
+    with usage_tracker.usage_scope("generation", "run-x"):
+        usage_tracker.record_retry(
+            "claim_generator.response", "CLAIM_NUMBER_UNSUPPORTED", "number  '24 million'\nbad", 1
+        )
+    conn = sqlite3.connect(tracking)
+    row = conn.execute(
+        "SELECT run_id, stage, error_code, attempt, detail FROM retry_events"
+    ).fetchone()
+    assert row == (
+        "run-x", "claim_generator.response", "CLAIM_NUMBER_UNSUPPORTED", 1, "number '24 million' bad"
+    )

@@ -170,6 +170,16 @@ def _ensure_table(conn, key: str) -> None:
             ok            INTEGER NOT NULL DEFAULT 1,
             error         TEXT NOT NULL DEFAULT ''
         );
+        CREATE TABLE IF NOT EXISTS retry_events (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            created_at  TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+            scope       TEXT NOT NULL DEFAULT '',
+            run_id      TEXT,
+            stage       TEXT NOT NULL DEFAULT '',
+            error_code  TEXT NOT NULL DEFAULT '',
+            attempt     INTEGER,
+            detail      TEXT NOT NULL DEFAULT ''
+        );
         """
     )
     _table_ready.add(key)
@@ -231,6 +241,32 @@ def record_llm_call(
                     1 if ok else 0,
                     error[:200],
                 ),
+            )
+    except Exception:
+        pass
+
+
+def record_retry(stage: str, error_code: str, detail: str = "", attempt: int | None = None) -> None:
+    """Store why a paid generation step is being run again.
+
+    Retries are where most of the claim-generation money goes, but until now only
+    a console line said why. ``detail`` carries the validator's message (which
+    names the offending number/entity), so the causes can be counted later with
+    scripts/cost_report.py. Never raises.
+    """
+
+    if not tracking_enabled():
+        return
+    try:
+        from src.db_tracking import _conn, resolve_tracking_db_path
+
+        scope, run_id = _current_scope()
+        with _conn() as conn:
+            _ensure_table(conn, str(resolve_tracking_db_path()))
+            conn.execute(
+                """INSERT INTO retry_events (scope, run_id, stage, error_code, attempt, detail)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                (scope, run_id, stage, error_code, attempt, " ".join(str(detail).split())[:400]),
             )
     except Exception:
         pass

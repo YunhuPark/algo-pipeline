@@ -170,6 +170,33 @@ def build_report(conn: sqlite3.Connection, days: int) -> None:
             )
         ],
     )
+    has_retries = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='retry_events'"
+    ).fetchone()
+    if has_retries:
+        _table(
+            "why steps were retried (count by cause)",
+            ["stage", "error_code", "times"],
+            [
+                [r["stage"], r["error_code"], r["n"]]
+                for r in conn.execute(
+                    f"""SELECT stage, error_code, COUNT(*) n FROM retry_events
+                        WHERE {where} GROUP BY stage, error_code ORDER BY n DESC""",
+                    (since,),
+                )
+            ],
+        )
+        _table(
+            "latest retry details",
+            ["when", "error_code", "detail"],
+            [
+                [r["created_at"], r["error_code"], r["detail"][:110]]
+                for r in conn.execute(
+                    "SELECT created_at, error_code, detail FROM retry_events "
+                    "ORDER BY id DESC LIMIT 8"
+                )
+            ],
+        )
     print("\n('+' = some calls in that run have no known price, so the cost is a lower bound)")
 
 
