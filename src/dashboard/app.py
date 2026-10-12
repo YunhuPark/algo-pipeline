@@ -1377,6 +1377,9 @@ def queue_generate():
 # 된다), 사람이 승인을 누르면 그제서야 그 렌더링을 그대로 발행한다 —
 # 재생성하지 않으므로 승인한 화면과 실제로 올라가는 카드가 항상 같다.
 
+_PREPARE_LOG = Path(__file__).resolve().parents[2] / "logs" / "prepare_jobs.log"
+
+
 def _run_queue_prepare_job(job_id: str, queue_id: int | None = None) -> None:
     global _ACTIVE_QUEUE_JOB
     _ACTIVE_QUEUE_JOB = {"job_id": job_id, "mode": "prepare"}
@@ -1389,6 +1392,14 @@ def _run_queue_prepare_job(job_id: str, queue_id: int | None = None) -> None:
             if s.strip():
                 job["logs"].append(s.rstrip())
                 _emit(q, "log", s.rstrip().replace("\n", " "))
+                # 화면 로그는 서버가 재시작되면 사라진다. 생성 결과에 문제가
+                # 있을 때 "왜 이 영상/문장이 통과했나"를 나중에 추적할 수 있게
+                # 파일에도 남긴다(실패해도 생성에는 영향 없음).
+                try:
+                    with open(_PREPARE_LOG, "a", encoding="utf-8") as fh:
+                        fh.write(f"[{job_id} q={queue_id}] {s.rstrip()}\n")
+                except OSError:
+                    pass
             return len(s)
         def flush(self): pass
 
