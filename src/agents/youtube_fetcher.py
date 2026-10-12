@@ -1101,21 +1101,13 @@ def find_verified_video_for_slide(
             return False, 0
 
         if not transcript:
-            # 자막 없음 → 엔티티 게이트 먼저
-            if not _entity_gate(vi.title, vi.snippet, "자막없음"):
-                return False, 0
-            # 한국어 주제(엔티티 게이트 비활성) + 자막 없음 = 내용 검증 불가 → 거절
-            # (키워드 2개 매칭만으론 "ChatGPT Plus vs Free" 같은 엉뚱한 영상이 통과됨)
-            if not _entity_gate_active:
-                print(f"  [YouTubeFetcher] ✗ 자막없음+한국어주제(검증불가): '{vi.title[:40]}'")
-                return False, 0
-            # 영어 주제 + 자막 없음: 키워드 매칭 (임계값 3으로 강화)
-            combined = f"{vi.title} {vi.snippet}".lower()
-            core_kws = [k for k in slide_keywords if any(c.isdigit() for c in k) or k.isascii()][:8]
-            hits = sum(1 for k in core_kws if k.lower() in combined)
-            matched = hits >= 3
-            print(f"  [YouTubeFetcher] {'✓' if matched else '✗'} 자막없음·키워드매칭({hits}/{len(core_kws)}): '{vi.title[:40]}'")
-            return matched, 0
+            # 자막 없음 = 영상이 슬라이드를 실제로 다루는지 확인할 방법이 없다.
+            # 제목·스니펫 키워드 매칭으로 통과시키던 예전 방식은 "Unicorn Kingdom
+            # Gameplay" 같은 게임 영상이 칩 기사 카드에 붙는 사고를 냈다(짧은 영어
+            # 토큰이 부분 문자열로 맞아떨어짐). 검증 못 한 영상은 쓰지 않고, 그
+            # 슬라이드는 문장 카드로 둔다.
+            print(f"  [YouTubeFetcher] ✗ 자막없음(내용 검증 불가): '{vi.title[:40]}'")
+            return False, 0
 
         # 자막이 있어도 엔티티 게이트: 기사 핵심 기업/제품명이 자막에 없으면 즉시 탈락
         # (hyperbrowser가 "cloud"를 언급해도 "Cloudflare"가 없으면 탈락)
