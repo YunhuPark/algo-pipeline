@@ -1526,6 +1526,40 @@ def queue_prepare_next():
     return {"job_id": job_id}
 
 
+def _audit_panel_html(out_dir) -> str:
+    """"자동 점검" panel: what the audit fixed, and what the operator must look at."""
+
+    path = Path(out_dir) / "audit.json"
+    if not path.exists():
+        return ""
+    try:
+        report = json.loads(path.read_text(encoding="utf-8"))
+    except ValueError:
+        return ""
+
+    def _items(entries, color):
+        return "".join(
+            f'<li style="color:{color};margin:4px 0">{html.escape(str(e))}</li>' for e in entries
+        )
+
+    parts = []
+    if report.get("fixed"):
+        parts.append('<div class="panel-sub">자동으로 고친 것</div><ul style="margin:6px 0 12px 18px">'
+                     + _items(report["fixed"], "var(--green, #3fb950)") + "</ul>")
+    if report.get("attention"):
+        parts.append('<div class="panel-sub">직접 확인할 것</div><ul style="margin:6px 0 12px 18px">'
+                     + _items(report["attention"], "var(--yellow, #d29922)") + "</ul>")
+    if report.get("checks"):
+        parts.append('<div class="panel-sub">통과한 점검</div><ul style="margin:6px 0 0 18px">'
+                     + _items([f'{c["item"]}: {c["result"]}' for c in report["checks"]], "var(--muted)")
+                     + "</ul>")
+    body = "".join(parts).replace("{", "{{").replace("}", "}}")
+    return (
+        '<div class="panel" style="margin-top:20px"><div class="panel-header">'
+        '<div class="panel-title">자동 점검</div></div>' + body + "</div>"
+    )
+
+
 def _candidate_source_label(row) -> str:
     """Small "TechCrunch · 2026.10.07" line shown under a queued candidate.
 
@@ -2649,6 +2683,8 @@ def preview_page(dir_name: str):
   <pre id="captionText" style="font-size:12px;color:var(--muted);white-space:pre-wrap;line-height:1.7">{cap_safe}</pre>
 </div>''' if cap_txt else ""
 
+    audit_html = _audit_panel_html(d)
+
     reels_html = ""
     reels_path = d / "reels.mp4"
     if reels_path.exists():
@@ -2673,6 +2709,7 @@ def preview_page(dir_name: str):
   </div>
 </div>
 {caption_html}
+{audit_html}
 {reels_html}
 
 <div class="panel" style="margin-top:20px">

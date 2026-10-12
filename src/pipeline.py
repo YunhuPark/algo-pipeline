@@ -619,6 +619,10 @@ def _run_once(
                         script_data["slides"][ci]["video_title"] = v.title
                         # 카드 맨 아래 영상 출처 표기에 쓴다 (슬라이드 수정 때 다시 그릴 수 있게).
                         script_data["slides"][ci]["video_creator"] = getattr(v, "creator", "") or ""
+                        # find_verified_video_for_slide만이 영상을 돌려주고 자막 없는
+                        # 영상은 거절하므로, 여기까지 온 영상은 자막 검증을 통과했다.
+                        # 자동 점검(preview_audit)은 이 기록이 있을 때만 "검증됨"이라 말한다.
+                        script_data["slides"][ci]["video_verified"] = True
                 script_json_path.write_text(
                     _json.dumps(script_data, ensure_ascii=False, indent=2),
                     encoding="utf-8",
@@ -822,6 +826,21 @@ def _run_once(
                     target_idx, result_path = future.result()
                     if result_path:
                         paths[target_idx] = result_path
+
+    # ── Phase 4.4: 미리보기 자동 점검 ─────────────────────
+    # 승인 화면에 올리기 전에 캡션·영상·출처를 점검하고, 안전하게 고칠 수 있는
+    # 것(잘린 캡션 첫 줄)은 고치며, 자동 판단이 불가능한 것(스톡 영상·배경)은
+    # 사람이 볼 곳으로 표시한다. LLM 호출이 없어 비용이 들지 않는다.
+    try:
+        from src.qa.preview_audit import audit_output
+
+        _audit = audit_output(paths[0].parent, script_hook=script.hook)
+        for _msg in _audit["fixed"]:
+            print(f"  [4.4] 자동 수정: {_msg}")
+        for _msg in _audit["attention"]:
+            print(f"  [4.4] 확인 필요: {_msg}")
+    except Exception as e:
+        print(f"  ⚠️ 미리보기 자동 점검 실패({type(e).__name__}) — 건너뜁니다")
 
     # ── Phase 4.5: Reels MP4 생성 ────────────────────────
     if make_reels:
