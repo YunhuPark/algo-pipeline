@@ -22,6 +22,7 @@ from uuid import uuid4
 from src.db import (
     enqueue_v2,
     claim_queue_row,
+    clear_queue_error,
     dequeue_next,
     get_queue_row,
     insert_post,
@@ -549,6 +550,11 @@ def _process_claimed_row(
                 if res.image_paths:
                     set_queue_image_dir(queue_id, str(res.image_paths[0].parent))
                 mark_queue_status(queue_id, "ready")
+                # 이전 시도의 실패 코드(EMPTY_PIPELINE_RESULT 등)가 새로 만든 미리보기에 남지 않게 한다.
+                try:
+                    clear_queue_error(queue_id)
+                except Exception:
+                    pass   # 표시용 정리일 뿐이라 실패해도 미리보기는 그대로 둔다
                 return {"id": queue_id, "topic": topic, "paths": res.image_paths}
         elif type(res) == list and len(res) > 0: # fallback for paths directly
             # shouldn't happen but just in case
