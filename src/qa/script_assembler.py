@@ -175,6 +175,48 @@ def _entities_in_copy(claim: Claim) -> list[str]:
     ]
 
 
+_FIGURE_PHRASE_RE = re.compile(
+    r"(\d[\d,\.]*\s?(?:만|억|조|천)?\s?(?:명|대|개|곳|건|달러|원|%|배|년))"
+    r"(?:\s?(이상|이하|가량|여))?(?:의)?"
+)
+_TRAILING_PARTICLE_RE = re.compile(r"(?:이|가|을|를|은|는|에|도|의)$")
+_WORD_RE = re.compile(r"\s*([가-힣A-Za-z]{1,8})")
+
+
+def _lead_figure_phrase(claims: List[Claim]) -> str:
+    """The first verified figure phrase in the card copy, e.g. "100만 대 이상의 로봇".
+
+    The cover title is the thumbnail, and a concrete figure is what makes people
+    stop. The model was asked to lead with one but often did not ("아마존 로봇
+    혁신" when the cards say 100만 대). The phrase is cut from claim_text, which
+    already passed number verification, so no new figure is introduced.
+    """
+
+    for claim in claims:
+        match = _FIGURE_PHRASE_RE.search(claim.claim_text)
+        if not match:
+            continue
+        words: list[str] = []
+        pos = match.end()
+        for _ in range(2):
+            word_match = _WORD_RE.match(claim.claim_text, pos)
+            if not word_match:
+                break
+            word = word_match.group(1)
+            pos = word_match.end()
+            stripped = _TRAILING_PARTICLE_RE.sub("", word)
+            words.append(stripped)
+            if stripped != word:      # 조사가 붙었으면 명사구가 끝난 것이다
+                break
+        figure = re.sub(r"\s+", " ", match.group(1)).strip()
+        qualifier = match.group(2) or ""
+        if not words:
+            return figure
+        noun_phrase = " ".join(words)
+        return f"{figure} {qualifier}의 {noun_phrase}" if qualifier else f"{figure} {noun_phrase}"
+    return ""
+
+
 def _claim_headline(claim: Claim) -> str:
     """Derive a specific headline without generating any new factual text."""
 
@@ -252,6 +294,10 @@ def _hashtags(topic: str, claims: List[Claim]) -> list[str]:
     candidates = [topic]
     candidates.extend(entity for claim in claims for entity in claim.entities)
     for item in candidates:
+        # "Brian Greenwood"처럼 영문 사람 이름은 해시태그로 쓰지 않는다. 기사 필자가
+        # 해시태그로 올라간 사례가 있었고, 사람 이름 태그는 탐색 효과보다 오해 위험이 크다.
+        if re.fullmatch(r"[A-Z][a-z]+ [A-Z][a-z]+", item.strip()):
+            continue
         normalized = re.sub(r"[^0-9A-Za-z가-힣_]", "", item)
         if normalized and len(normalized) <= 24:
             tag = f"#{normalized}"
@@ -309,6 +355,12 @@ class ScriptAssembler:
             cover_title = _cover_title(topic, 22)
             cover_hook = _ANGLE_HOOKS.get(editorial_angle, _default_hook(topic))
             cta_title, generated_cta_body = _contextual_cta(topic)
+
+        # 표지 제목에 숫자가 없는데 카드에 검증된 숫자가 있으면, 그 숫자를 제목에 쓴다.
+        if not re.search(r"\d", cover_title):
+            lead = _lead_figure_phrase(content_claims[:max_content_slides])
+            if lead:
+                cover_title = _fit_cover_title(lead, 22)
 
         slides = []
 

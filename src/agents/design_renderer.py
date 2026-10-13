@@ -9,6 +9,7 @@ Phase 3: Design Renderer — 중앙 정렬 / 이모지 수정 / 섹션 레이블
 """
 from __future__ import annotations
 
+import os
 import re
 from datetime import datetime
 from pathlib import Path
@@ -1243,6 +1244,10 @@ def _render_cta(img: Image.Image, slide: Slide, total: int,
     free_space = (CONTENT_BOTTOM - top_margin) - est_h
     y = top_margin + max(0, free_space // 2)             # 콘텐츠 블록 세로 중앙 정렬
 
+    # 밝은 배경에서 글자가 묻히지 않게 내용 뒤에 어두운 막을 깐다(배경이 어두우면 거의 없음).
+    img = _text_scrim(img, y - 70, y + est_h + 90)
+    draw = ImageDraw.Draw(img)
+
     # 이모지 — 정확한 중앙 (size 기준으로 계산)
     if slide.emoji:
         img, eh = _paste_emoji(img, slide.emoji, W // 2, y, size=90)
@@ -1254,17 +1259,17 @@ def _render_cta(img: Image.Image, slide: Slide, total: int,
     draw = ImageDraw.Draw(img)
     y += 26
 
-    # 타이틀
+    # 타이틀 (밝은 배경에서도 읽히도록 윤곽선)
     for line in t_lines:
         if y + int(lh) < CONTENT_BOTTOM - 160:   # 본문·handle 공간 남긴 채
-            draw.text((_cx(draw, line, tf), y), line, font=tf, fill=STYLE["text_primary"])
+            _draw_stroked_line(draw, line, tf, y, fill=(255, 255, 255), stroke=5)
         y += int(lh * 1.2)
     y += 16
 
     # 본문
     for line in b_lines:
         if y + int(lh2) < CONTENT_BOTTOM - 80:   # handle 공간 남긴 채
-            draw.text((_cx(draw, line, bf), y), line, font=bf, fill=STYLE["text_secondary"])
+            _draw_stroked_line(draw, line, bf, y, fill=(244, 244, 250), stroke=3)
         y += int(lh2 * 1.5)
     y += 20
 
@@ -1279,7 +1284,7 @@ def _render_cta(img: Image.Image, slide: Slide, total: int,
         hd = ImageDraw.Draw(handle_layer)
         hd.rounded_rectangle(
             [hx, hy, hx + hw + hpad * 2, hy + 52],
-            radius=26, fill=(*STYLE["accent2"], 45),
+            radius=26, fill=(4, 4, 12, 170),
         )
         hd.rounded_rectangle(
             [hx, hy, hx + hw + hpad * 2, hy + 52],
@@ -1295,7 +1300,7 @@ def _render_cta(img: Image.Image, slide: Slide, total: int,
 
     # 해시태그 — pill 배지, 항상 하단에 고정 배치
     if hashtags:
-        tgf = _font(19, bold=False)
+        tgf = _font(21, bold=False)
         pill_h = 32
         gap_x, gap_y = 7, 6
 
@@ -1319,12 +1324,12 @@ def _render_cta(img: Image.Image, slide: Slide, total: int,
             pd.rounded_rectangle(
                 [px, py, px + pw, py + pill_h],
                 radius=pill_h // 2,
-                fill=(*STYLE["accent"], 50),
+                fill=(4, 4, 12, 170),
             )
         img = Image.alpha_composite(img.convert("RGBA"), pill_layer).convert("RGB")
         draw = ImageDraw.Draw(img)
         for tag, px, py, pw in tag_positions:
-            draw.text((px + 10, py + 6), tag, font=tgf, fill=STYLE["accent2"])
+            draw.text((px + 10, py + 6), tag, font=tgf, fill=(235, 240, 255))
 
     _bottom_accent_line(ImageDraw.Draw(img))
     return img
@@ -1497,6 +1502,11 @@ def render_card_set(
     # 그 나머지(영상도 Pexels 클립도 없는) 슬라이드 → 슬라이드별 개별 Pexels 사진
     slide_bg_map: dict[int, Image.Image] = {}   # {slide_number: bg_image}
     no_thumb_content = [s for s in content_slides if s.slide_number not in thumb_map]
+    # 카드마다 다른 사진을 쓰면 한 세트가 파랑·주황·보라로 제각각이 되고(사람 얼굴
+    # 사진이 끼기도 한다) Pexels·검색어 생성 호출도 슬라이드 수만큼 늘어난다. 기본은
+    # 세트 전체가 같은 배경이고, 예전 동작은 PER_SLIDE_BACKGROUNDS=on으로 켠다.
+    if os.getenv("PER_SLIDE_BACKGROUNDS", "").strip().lower() not in {"on", "1", "true", "yes"}:
+        no_thumb_content = []
     if no_thumb_content:
         try:
             from src.agents.image_searcher import search_pexels, _resize_and_crop
