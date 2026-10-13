@@ -21,3 +21,12 @@ def test_color_beats_gray_at_the_same_brightness():
     gray = _photo_score(_flat((120, 120, 120)))[0]
     color = _photo_score(_flat((60, 120, 200)))[0]
     assert color > gray
+
+
+def test_dark_is_the_default_background_style(monkeypatch):
+    from src.agents.image_searcher import _bright_style
+
+    monkeypatch.delenv("BACKGROUND_STYLE", raising=False)
+    assert _bright_style() is False
+    monkeypatch.setenv("BACKGROUND_STYLE", "bright")
+    assert _bright_style() is True

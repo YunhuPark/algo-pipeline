@@ -22,6 +22,16 @@ from src.config import OPENAI_API_KEY, PEXELS_API_KEY, DATA_DIR
 TARGET_W, TARGET_H = 1080, 1350  # Instagram 4:5
 
 
+# ── 배경 스타일 ───────────────────────────────────────────
+# 밝은 배경을 시험해 봤지만 주제와 무관한 화려한 추상 사진이 뽑혀서, 어두운 기술
+# 사진이 더 무난하다는 판단으로 기본을 dark로 되돌렸다. 밝게 쓰려면 BACKGROUND_STYLE=bright.
+
+def _bright_style() -> bool:
+    import os
+
+    return os.getenv("BACKGROUND_STYLE", "dark").strip().lower() == "bright"
+
+
 # ── 쿼리 생성 ─────────────────────────────────────────────
 
 def _generate_pexels_query(topic: str) -> str:
@@ -38,9 +48,13 @@ def _generate_pexels_query(topic: str) -> str:
                     f"Convert this Korean topic to an optimal English Pexels photo search query. "
                     f"Return ONLY the search query (5-8 words), no explanation.\n"
                     f"Topic: '{topic}'\n"
-                    f"Rules: bright, vivid, colorful and clean look (NOT dark or moody), "
-                    f"focused on objects, devices or abstract technology, no people or faces, "
-                    f"works as a card news background under bold text."
+                    + (
+                        "Rules: bright, vivid, colorful and clean look (NOT dark or moody), "
+                        if _bright_style()
+                        else "Rules: dark/moody/cinematic style, "
+                    )
+                    + "focused on objects, devices or abstract technology, no people or faces, "
+                    "works as a card news background under bold text."
                 )
             }]
         )
@@ -106,8 +120,11 @@ def _photo_score(img: Image.Image) -> tuple[float, float, float]:
     return closeness + 0.9 * min(saturation, 0.6), brightness, saturation
 
 
-def _pick_best(photos: list, n: int = 30) -> dict | None:
-    """Pexels 후보를 병렬로 내려받아 _photo_score가 가장 높은 사진을 고른다."""
+def _pick_best(photos: list, n: int = 30, bright: bool = False) -> dict | None:
+    """Pexels 후보를 병렬로 내려받아 고른다.
+
+    bright=False(기본)면 평균 밝기가 가장 낮은 사진, True면 _photo_score가 가장 높은 사진.
+    """
     from concurrent.futures import ThreadPoolExecutor
 
     def _score(photo):
@@ -116,7 +133,8 @@ def _pick_best(photos: list, n: int = 30) -> dict | None:
             if r.status_code != 200:
                 return None
             img = Image.open(io.BytesIO(r.content)).convert("RGB")
-            return (*_photo_score(img), photo)
+            score, brightness, saturation = _photo_score(img)
+            return (score if bright else -brightness, brightness, saturation, photo)
         except Exception:
             return None
 
@@ -126,8 +144,8 @@ def _pick_best(photos: list, n: int = 30) -> dict | None:
         return photos[0] if photos else None
     score, brightness, saturation, chosen = max(scored, key=lambda x: x[0])
     print(
-        f"  [Pexels] 밝기·색감 분석: {len(scored)}장 중 밝기 {brightness:.0f}/255, "
-        f"채도 {saturation:.2f}인 사진 선택"
+        f"  [Pexels] 밝기 분석({'bright' if bright else 'dark'}): {len(scored)}장 중 "
+        f"밝기 {brightness:.0f}/255, 채도 {saturation:.2f}인 사진 선택"
     )
     return chosen
 
@@ -158,8 +176,9 @@ def search_pexels(topic: str, randomize: bool = False, page: int = 1) -> Image.I
                 "query": query,
                 "orientation": "portrait",
                 "size": "large",
-                "per_page": 30,      # 후보를 넉넉히 받아 밝기·색감 점수가 가장 좋은 것 선택
+                "per_page": 30,      # 후보를 넉넉히 받아 스타일에 맞는 것 선택
                 "page": page,
+                **({} if _bright_style() else {"color": "black"}),   # dark: 어두운 톤 우선
             },
             timeout=15,
         )
@@ -173,8 +192,8 @@ def search_pexels(topic: str, randomize: bool = False, page: int = 1) -> Image.I
             # randomize 모드: 상위 5장 중 무작위
             photo = random.choice(photos[:5])
         else:
-            # 기본 모드: 중간 밝기이면서 색감 있는 사진 선택
-            photo = _pick_best(photos, n=30) or photos[0]
+            # dark(기본): 가장 어두운 사진 / bright: 중간 밝기이면서 색감 있는 사진
+            photo = _pick_best(photos, n=30, bright=_bright_style()) or photos[0]
 
         photo_url = photo["src"]["large2x"]
         alt = photo.get("alt", "no description")[:60]
@@ -292,19 +311,26 @@ def generate_dalle_background(topic: str) -> Image.Image:
             messages=[{
                 "role": "user",
                 "content": (
-                    f"Write a DALL-E 3 image generation prompt for a bright, vivid, colorful "
-                    f"background image suitable for a Korean tech card news about '{topic}'. "
-                    f"Style: clean modern look, saturated blue/teal/magenta accents, soft studio "
-                    f"lighting, abstract futuristic, NO text, NO UI, NO people, full-bleed "
-                    f"background. Max 80 words."
+                    + (
+                        f"Write a DALL-E 3 image generation prompt for a bright, vivid, colorful "
+                        f"background image suitable for a Korean tech card news about '{topic}'. "
+                        f"Style: clean modern look, saturated blue/teal/magenta accents, soft studio "
+                        f"lighting, abstract futuristic, NO text, NO UI, NO people, full-bleed "
+                        f"background. Max 80 words."
+                        if _bright_style()
+                        else f"Write a DALL-E 3 image generation prompt for a dark, cinematic background "
+                        f"image suitable for a Korean tech card news about '{topic}'. "
+                        f"Style: dark navy/purple tones, cinematic lighting, abstract futuristic, "
+                        f"NO text, NO UI, NO people, full-bleed background. Max 80 words."
+                    )
                 )
             }]
         )
         prompt = opt.choices[0].message.content.strip()
     except Exception:
         prompt = (
-            f"Bright vivid abstract background for '{topic}' card news. "
-            "Saturated blue, teal and magenta tones, soft clean lighting, "
+            f"Dark cinematic abstract background for '{topic}' card news. "
+            "Deep navy blue and purple tones, cinematic dramatic lighting, "
             "futuristic technology aesthetic, glowing particles, no text, no UI elements."
         )
 
@@ -354,6 +380,8 @@ def get_background_image(
     source = "dalle" if force_dalle or not PEXELS_API_KEY else "pexels"
     # 재시도 시 캐시 키에 페이지 번호 포함 → 다른 이미지 사용
     cache_suffix = f"_p{retry_num}" if retry_num > 0 else ""
+    if _bright_style():
+        cache_suffix = f"_bright{cache_suffix}"
     cache_path = cache_dir / f"{safe}_{source}{cache_suffix}.jpg"
 
     if cache_path.exists() and not force_refresh:
