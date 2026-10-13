@@ -183,6 +183,14 @@ _TRAILING_PARTICLE_RE = re.compile(r"(?:이|가|을|를|은|는|에|도|의)$")
 _WORD_RE = re.compile(r"\s*([가-힣A-Za-z]{1,8})")
 
 
+def _natural_korean_figures(text: str) -> str:
+    """"1백만"→"100만", "2천만"→"2000만"처럼 같은 값을 자연스러운 표기로 바꾼다."""
+
+    text = re.sub(r"(\d+)십만", lambda m: f"{m.group(1)}0만", text)
+    text = re.sub(r"(\d+)백만", lambda m: f"{m.group(1)}00만", text)
+    return re.sub(r"(\d+)천만", lambda m: f"{m.group(1)}000만", text)
+
+
 def _lead_figure_phrase(claims: List[Claim]) -> str:
     """The first verified figure phrase in the card copy, e.g. "100만 대 이상의 로봇".
 
@@ -355,6 +363,9 @@ class ScriptAssembler:
             cover_title = _cover_title(topic, 22)
             cover_hook = _ANGLE_HOOKS.get(editorial_angle, _default_hook(topic))
             cta_title, generated_cta_body = _contextual_cta(topic)
+
+        # "1백만 대" 같은 어색한 표기는 "100만 대"로 바로잡는다(값은 같다).
+        cover_title = _natural_korean_figures(cover_title)
 
         # 표지 제목에 숫자가 없는데 카드에 검증된 숫자가 있으면, 그 숫자를 제목에 쓴다.
         if not re.search(r"\d", cover_title):
