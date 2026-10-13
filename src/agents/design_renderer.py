@@ -170,7 +170,7 @@ def _apply_background(base: Image.Image, for_cover: bool = False) -> Image.Image
         # 커버는 배경이 유일한 그래픽이다. 하단 그라디언트가 또 덮기 때문에
         # 기본 오버레이까지 진하면 배경 이미지가 사실상 사라져 카드가 검은
         # 여백으로만 읽힌다. 본문 카드보다 확실히 연하게 둔다.
-        alpha = max(60, STYLE["overlay_alpha"] - 70)
+        alpha = max(40, STYLE["overlay_alpha"] - 110)
     else:
         img = img.filter(ImageFilter.GaussianBlur(radius=2))
         img = ImageEnhance.Contrast(img).enhance(0.80)
@@ -777,38 +777,55 @@ def _bottom_accent_line(draw: ImageDraw.ImageDraw) -> None:
 
 # ── 커버 ───────────────────────────────────────────────────
 
+_HIGHLIGHT = (255, 225, 60)
+_FIGURE_RE = re.compile(
+    r"\d[\d,\.]*\s?(?:%|억|조|만|천|배|달러|원|명|개|년|월|일|[A-Za-z]{1,3}\b)?"
+)
+
+
+def _draw_stroked_line(draw: ImageDraw.ImageDraw, line: str, font, y: int,
+                       *, fill, stroke: int, highlight=None) -> None:
+    """한 줄을 가운데 정렬로 그린다. 두꺼운 검은 윤곽선으로 어떤 배경에서도 읽히게 하고,
+    highlight 색이 주어지면 숫자 표현(40%, 1.5억 등)만 그 색으로 강조한다."""
+    pieces: list[tuple[str, tuple[int, int, int]]] = []
+    if highlight is None:
+        pieces = [(line, fill)]
+    else:
+        pos = 0
+        for m in _FIGURE_RE.finditer(line):
+            if m.start() > pos:
+                pieces.append((line[pos:m.start()], fill))
+            pieces.append((m.group(0), highlight))
+            pos = m.end()
+        if pos < len(line):
+            pieces.append((line[pos:], fill))
+    total_w = sum(int(draw.textlength(t, font=font)) for t, _ in pieces)
+    x = (W - total_w) // 2
+    for text, color in pieces:
+        draw.text((x, y), text, font=font, fill=color,
+                  stroke_width=stroke, stroke_fill=(0, 0, 0))
+        x += int(draw.textlength(text, font=font))
+
+
 def _render_cover(img: Image.Image, slide: Slide, total: int,
                    handle: str, hook: str = "") -> Image.Image:
     """
-    커버 (리뉴얼):
-      상단 그라디언트 → 브랜드 pill → 이모지
-      → accent bar → 대형 타이틀 → hook 문장
-      → accent 수치 박스 (있을 때)
-      → 하단: 날짜(좌) + 핸들(우) + 스와이프 힌트 + accent line
+    커버: 피드에서 썸네일로 보여도 한눈에 읽히는 것이 목적이다.
+      큼직한 굵은 제목(숫자는 노랑 강조) + 두꺼운 윤곽선 + 한 줄 후크.
+      날짜·카테고리 pill 같은 작은 글자는 썸네일에서 읽히지 않아 뺐다.
     """
-    # 타이틀이 카드 중앙에 놓이므로 하단을 245까지 덮을 이유가 없다.
-    # 강하게 덮으면 배경 하단이 통째로 검정이 된다.
-    img = _draw_gradient_bottom(img.copy(), strength=190)
-    img = _draw_gradient_top(img, strength=130)
+    img = _draw_gradient_bottom(img.copy(), strength=170)
+    img = _draw_gradient_top(img, strength=110)
 
     # ── 상단: 슬라이드 번호 배지 + 핸들 ──────────────────
     img = _draw_badge(img, 1, total, handle)
 
-    # ── 브랜드 카테고리 pill (배지 아래) ─────────────────
-    now_str = datetime.now().strftime("%Y.%m.%d")
-    pill_text = f"AI 인사이트  ·  {now_str}"
-    img = _draw_brand_pill(img, pill_text, y=110)
-
     draw = ImageDraw.Draw(img)
     text_w = W - PAD * 2
 
-    # ── 본문 블록 높이를 먼저 재고 수직 중앙에 배치 ──────
-    # 예전에는 시작 y를 H*0.35로 고정했다. 내용 높이와 무관한 값이라 브랜드
-    # pill 아래로 약 360px, 스와이프 힌트 위로 약 400px이 비어 보였다.
-    # 컨텐츠·split 카드가 이미 쓰는 "높이를 재고 중앙에 두기"와 같게 맞춘다.
     clean_title = _clean(slide.title)
-    tf = _auto_font(clean_title, 84, bold=True,
-                    steps=((12, 1.0), (18, 0.88), (26, 0.76), (36, 0.65)))
+    tf = _auto_font(clean_title, 132, bold=True,
+                    steps=((8, 1.0), (13, 0.9), (18, 0.78), (24, 0.68)))
     t_lines = wrap_text(clean_title, tf, draw, text_w)
     _, _, _, lh = draw.textbbox((0, 0), "가나다", font=tf)
 
@@ -817,44 +834,39 @@ def _render_cover(img: Image.Image, slide: Slide, total: int,
     b_lines: list[str] = []
     lh2 = 0
     if sub:
-        bf = _auto_font(sub, 38, bold=False,
-                        steps=((20, 1.0), (35, 0.87), (50, 0.76)))
+        bf = _auto_font(sub, 46, bold=True,
+                        steps=((18, 1.0), (28, 0.86), (40, 0.74)))
         b_lines = wrap_text(sub, bf, draw, text_w)
         _, _, _, lh2 = draw.textbbox((0, 0), "가나다", font=bf)
 
-    content_h = 5 + 24 + len(t_lines) * int(lh * 1.18) + 18
+    content_h = 5 + 28 + len(t_lines) * int(lh * 1.2) + 26
     if b_lines:
         content_h += len(b_lines) * int(lh2 * 1.4) + 16
 
-    zone_top = 110 + 38 + 40    # 브랜드 pill 아래
+    zone_top = 130
     zone_bot = H - 52 - 24      # 스와이프 힌트 위
     y = zone_top + max(0, (zone_bot - zone_top - content_h) // 2)
 
-    # ── accent bar (구분선 대신) ──────────────────────────
-    img = _draw_accent_bar(img, y, width=56, height=5)
+    img = _draw_accent_bar(img, y, width=72, height=8)
     draw = ImageDraw.Draw(img)
-    y += 24
+    y += 28
 
-    # ── 타이틀 — 가장 크고 임팩트 있게 ──────────────────
     for line in t_lines:
-        draw.text((_cx(draw, line, tf), y), line, font=tf, fill=STYLE["text_primary"])
-        y += int(lh * 1.18)
-    y += 18
+        _draw_stroked_line(draw, line, tf, y, fill=(255, 255, 255), stroke=7,
+                           highlight=_HIGHLIGHT)
+        y += int(lh * 1.2)
+    y += 26
 
-    # ── hook 문장 ─────────────────────────────────────────
     if b_lines and bf is not None:
         for line in b_lines:
-            draw.text((_cx(draw, line, bf), y), line, font=bf,
-                      fill=STYLE["text_secondary"])
+            _draw_stroked_line(draw, line, bf, y, fill=(235, 235, 245), stroke=4)
             y += int(lh2 * 1.4)
         y += 16
 
-    # ── accent 수치 강조 박스 (있을 때) ──────────────────
     if slide.accent:
         img, y = _draw_accent_box(img, _clean(slide.accent), W // 2, y)
         draw = ImageDraw.Draw(img)
 
-    # ── 하단 스와이프 힌트 ────────────────────────────────
     img = _draw_swipe_hint(img)
     _bottom_accent_line(ImageDraw.Draw(img))
     return img
