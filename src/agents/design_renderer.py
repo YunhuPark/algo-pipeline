@@ -176,13 +176,13 @@ def _apply_background(base: Image.Image, for_cover: bool = False) -> Image.Image
         # 여백으로만 읽힌다. 본문 카드보다 확실히 연하게 둔다.
         alpha = max(40, STYLE["overlay_alpha"] - 110)
     else:
-        img = img.filter(ImageFilter.GaussianBlur(radius=2))
+        img = img.filter(ImageFilter.GaussianBlur(radius=4))
         img = ImageEnhance.Contrast(img).enhance(0.80)
         img = ImageEnhance.Color(img).enhance(0.85)
         # 본문 카드는 글자 뒤에 패널이 깔리므로 배경 자체는 덜 눌러도 읽힌다.
         # 예전에는 거의 검정이라 카드 전체가 어둡게 보였다.
-        img = ImageEnhance.Brightness(img).enhance(1.6)
-        alpha = max(55, STYLE["overlay_alpha"] - 85)
+        img = ImageEnhance.Brightness(img).enhance(1.15)
+        alpha = max(100, STYLE["overlay_alpha"] - 40)
     overlay = Image.new("RGBA", (W, H), (*STYLE["overlay_color"], alpha))
     return Image.alpha_composite(img.convert("RGBA"), overlay).convert("RGB")
 
@@ -354,6 +354,13 @@ def _draw_glass_panel(
 
 OPTICAL_CENTER_SHIFT = -70   # 본문이 너무 아래로 처져 보인다는 피드백 → 가운데보다 약간 위
 
+# 모든 내용 카드의 본문 상자는 같은 높이(BODY_TOP)에서 시작한다. 카드마다 본문이
+# 위아래로 달라지면 넘겨 읽을 때 시선이 계속 움직여 읽기 불편하다. 영상 카드의
+# 영상 영역(H의 절반)이 끝나는 지점과도 맞춘다.
+BODY_TOP = 720
+BODY_BOTTOM_LIMIT = H - 92
+_BODY_TOP_PROBE: list[int] = []   # 테스트용: 그려진 본문 상자의 시작 y를 기록한다
+
 
 def _balanced_top(group_h: int, floor: int, bottom: int = H - 92) -> int:
     """Top y that puts a block of `group_h` at the card's optical center.
@@ -406,6 +413,7 @@ def _draw_body_panel(
 
     draw = ImageDraw.Draw(img)
     body_font, lines, line_h, panel_h = _body_panel_layout(body, draw)
+    _BODY_TOP_PROBE.append(top)
     box = (PAD, top, W - PAD, top + panel_h if fit else H - 92)
     img = _draw_glass_panel(img, box, fill_alpha=185, outline_alpha=65)
     draw = ImageDraw.Draw(img)
@@ -438,7 +446,7 @@ def _draw_statement_body(img: Image.Image, body: str, *, top: int) -> Image.Imag
         bold=False,
         steps=((45, 1.0), (70, 0.88), (100, 0.76), (130, 0.66)),
     )
-    lines = wrap_text(cleaned, body_font, measure, W - PAD * 2 - 68)[:7]
+    lines = wrap_text(cleaned, body_font, measure, W - PAD * 2 - 68)[:6]
     _, _, _, line_h = measure.textbbox((0, 0), "가나다", font=body_font)
     _, _, _, label_h = measure.textbbox((0, 0), label, font=label_font)
 
@@ -447,8 +455,9 @@ def _draw_statement_body(img: Image.Image, body: str, *, top: int) -> Image.Imag
     pad_top, gap, pad_bottom = 34, 26, 42
     block_h = len(lines) * int(line_h * 1.34)
     panel_h = pad_top + label_h + gap + block_h + pad_bottom
-    panel_top = _balanced_top(panel_h, top)
-    panel_bot = panel_top + panel_h
+    panel_top = BODY_TOP   # 모든 카드가 같은 높이에서 시작한다(위의 BODY_TOP 설명 참고)
+    _BODY_TOP_PROBE.append(panel_top)
+    panel_bot = min(panel_top + panel_h, BODY_BOTTOM_LIMIT)
 
     img = _draw_glass_panel(
         img, (PAD, panel_top, W - PAD, panel_bot), fill_alpha=170, outline_alpha=60
@@ -486,6 +495,28 @@ def _draw_infographic_title(img: Image.Image, title: str) -> tuple[Image.Image, 
     for line in lines[:2]:
         draw.text((PAD + 26, y), line, font=title_font, fill=STYLE["text_primary"])
         y += int(line_h * 1.18)
+    return img, y
+
+
+def _draw_statement_title(img: Image.Image, title: str) -> tuple[Image.Image, int]:
+    """수치 없는 카드의 제목: 본문 상자(BODY_TOP) 위 빈 공간 가운데에 크게."""
+
+    draw = ImageDraw.Draw(img)
+    clean_title = _clean(title)
+    font = _auto_font(
+        clean_title, 78, bold=True,
+        steps=((10, 1.0), (14, 0.9), (20, 0.78), (28, 0.66)),
+    )
+    lines = wrap_text(clean_title, font, draw, W - PAD * 2)[:3]
+    _, _, _, line_h = draw.textbbox((0, 0), "가나다", font=font)
+    block_h = len(lines) * int(line_h * 1.2)
+    zone_top, zone_bottom = 150, BODY_TOP - 70
+    y = zone_top + max(0, (zone_bottom - zone_top - block_h) // 2)
+    img = _draw_accent_bar(img, y - 34, width=72, height=7)
+    draw = ImageDraw.Draw(img)
+    for line in lines:
+        _draw_stroked_line(draw, line, font, y, fill=(255, 255, 255), stroke=4)
+        y += int(line_h * 1.2)
     return img, y
 
 
@@ -581,11 +612,10 @@ def _render_infographic_content(
     overlay = Image.new(
         "RGBA",
         (W, H),
-        (*STYLE["overlay_color"], max(35, STYLE["overlay_alpha"] - 55)),
+        (*STYLE["overlay_color"], max(60, STYLE["overlay_alpha"] - 45)),
     )
     img = Image.alpha_composite(img.convert("RGBA"), overlay).convert("RGB")
     img = _draw_badge(img, slide.slide_number, total, handle)
-    img, title_bottom = _draw_infographic_title(img, slide.title)
 
     visual_type = slide.visual_type
     values = [_clean(value) for value in slide.visual_values if _clean(value)]
@@ -593,6 +623,13 @@ def _render_infographic_content(
     if not values and slide.accent:
         values = [_clean(slide.accent)]
     visual_type, values, labels = _resolve_visual_layout(slide, values, labels)
+
+    if visual_type in {"hero_stat", "comparison"}:
+        img, title_bottom = _draw_infographic_title(img, slide.title)
+    else:
+        # 수치 없는 카드는 제목을 위쪽 빈 공간에 크게 가운데로 놓는다. 본문 상자는
+        # 다른 카드와 같은 높이에 고정이라, 위쪽 절반이 제목을 위한 자리가 된다.
+        img, title_bottom = _draw_statement_title(img, slide.title)
 
     # 제목 바로 아래를 바닥선으로 두고, 그 아래 콘텐츠 덩어리는 카드 중앙에 둔다.
     content_floor = title_bottom + 40
@@ -607,14 +644,14 @@ def _render_infographic_content(
         return img
 
     if visual_type == "process":
-        clauses = _split_verified_clauses(slide.body)
+        # 본문(단계 목록)도 다른 카드와 같은 높이(BODY_TOP)에서 시작한다. 그 아래
+        # 공간이 3칸까지만 들어가므로 단계는 최대 3개로 자른다.
+        clauses = _split_verified_clauses(slide.body)[:3]
         card_gap = 18
+        visual_top = BODY_TOP
+        _BODY_TOP_PROBE.append(visual_top)
         card_h = min(235, (H - 120 - visual_top - card_gap * (len(clauses) - 1)) // len(clauses))
-        # 항목 수가 적으면(예: 2개) card_h가 235로 캡되면서 블록 아래에
-        # 큰 여백이 남는다 — 블록 전체를 예약 영역 안에서 세로 중앙 정렬한다.
-        block_h = card_h * len(clauses) + card_gap * (len(clauses) - 1)
-        avail_h = (H - 120) - visual_top
-        y = visual_top + max(0, (avail_h - block_h) // 2)
+        y = visual_top
         for index, clause in enumerate(clauses, start=1):
             box = (PAD, y, W - PAD, y + card_h)
             img = _draw_glass_panel(img, box, fill_alpha=178, outline_alpha=80)
@@ -642,9 +679,9 @@ def _render_infographic_content(
     else:
         # 수치 박스 + 근거 패널을 한 덩어리로 보고 카드 중앙에 맞춘다. 패널은
         # 글 높이에 맞춰 줄인다 (예전에는 바닥까지 늘어 글이 위쪽에만 몰렸다).
-        visual_h, panel_gap = 400, 44
-        panel_h = _body_panel_height(slide.body)
-        visual_top = _balanced_top(visual_h + panel_gap + panel_h, content_floor)
+        panel_gap = 44
+        visual_top = max(300, title_bottom + 25)
+        visual_h = max(260, BODY_TOP - panel_gap - visual_top)
         visual_bottom = visual_top + visual_h
         visual_box = (PAD, visual_top, W - PAD, visual_bottom)
         img = _draw_glass_panel(img, visual_box, fill_alpha=145, outline_alpha=95)
@@ -765,9 +802,7 @@ def _render_infographic_content(
                 draw.text((center_x - value_w // 2, vy), line, font=value_font, fill=STYLE["text_primary"])
                 vy += int(value_h * 1.04)
 
-        img = _draw_body_panel(
-            img, slide.body, top=visual_bottom + panel_gap, fit=True
-        )
+        img = _draw_body_panel(img, slide.body, top=BODY_TOP, fit=True)
 
     _bottom_accent_line(ImageDraw.Draw(img))
     return img
@@ -1117,7 +1152,9 @@ def _render_split(
         + accent_h
     )
     # 세로 중앙 시작점
-    y = text_zone_top + max(0, (text_zone_bot - text_zone_top - total_h) // 2)
+    # 본문 상자는 다른 카드와 같은 높이(BODY_TOP)에서 시작한다. 영상은 위쪽 절반이다.
+    y = BODY_TOP + 20
+    _BODY_TOP_PROBE.append(y - 20)
 
     # 사진 배경이 밝거나 디테일이 많으면(예: 사람·창문·좌석 등) 본문이 묻혀
     # 안 읽힌다 — 텍스트 블록 뒤에 반투명 패널을 깔아 사진과 무관하게 항상

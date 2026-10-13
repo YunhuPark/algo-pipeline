@@ -218,3 +218,11 @@ def test_the_safe_caption_uses_only_verified_text():
     assert lines[0] == "⚡ 비즈니스 AI의 새로운 시대가 열렸다"
     assert "@algo__kr" in lines
     assert caption.rstrip().endswith("#알고 #카드뉴스")
+
+
+def test_invented_public_reaction_is_flagged():
+    from src.qa.caption_guard import unsupported_hype
+
+    cards = ["노동 단체는 자동화가 긍정적이지 않을 수 있다고 지적합니다."]
+    assert "팽팽" in unsupported_hype("여러 의견이 팽팽해!", cards)
+    assert unsupported_hype("노동 단체가 우려를 나타냈어", cards) == []
