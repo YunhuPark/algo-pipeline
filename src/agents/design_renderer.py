@@ -166,7 +166,10 @@ def _apply_background(base: Image.Image, for_cover: bool = False) -> Image.Image
         # 커버: 블러 최소화 + 채도 유지 → 배경이 더 생생하게 보임
         img = img.filter(ImageFilter.GaussianBlur(radius=1))
         img = ImageEnhance.Contrast(img).enhance(0.90)
-        img = ImageEnhance.Color(img).enhance(0.85)
+        img = ImageEnhance.Color(img).enhance(1.05)
+        # 대부분 어두운 기술 사진이라 오버레이를 줄여도 여전히 칠흑에 가까웠다.
+        # 썸네일에서 배경이 보이도록 밝기를 끌어올린다.
+        img = ImageEnhance.Brightness(img).enhance(1.45)
         # 커버는 배경이 유일한 그래픽이다. 하단 그라디언트가 또 덮기 때문에
         # 기본 오버레이까지 진하면 배경 이미지가 사실상 사라져 카드가 검은
         # 여백으로만 읽힌다. 본문 카드보다 확실히 연하게 둔다.
@@ -777,14 +780,45 @@ def _bottom_accent_line(draw: ImageDraw.ImageDraw) -> None:
 
 # ── 커버 ───────────────────────────────────────────────────
 
-_HIGHLIGHT = (255, 225, 60)
+def _cover_palette(img: Image.Image) -> tuple[tuple[int, int, int], tuple[int, int, int]]:
+    """(강조색, 윤곽선색)을 배경 사진의 지배적인 색조에서 뽑는다.
+
+    고정된 노랑은 푸른 칩 사진 위에서 따로 노는 느낌이었다. 사진에서 채도 있는
+    픽셀들의 색조를 모아 가장 많은 색조를 고르고, 강조색은 그 색조의 밝은 파스텔,
+    윤곽선은 같은 색조의 아주 어두운 색으로 해서 글자가 배경과 한 팔레트로 보이게
+    한다. 사진이 거의 무채색이면 브랜드 보조색을 쓴다.
+    """
+    import colorsys
+
+    small = img.convert("RGB").resize((64, 64))
+    weights = [0.0] * 36
+    total = 0.0
+    for r, g, b in small.getdata():
+        h, sat, val = colorsys.rgb_to_hsv(r / 255, g / 255, b / 255)
+        if sat < 0.25 or val < 0.2:
+            continue
+        weight = sat * val
+        weights[int(h * 36) % 36] += weight
+        total += weight
+    if total < 25:
+        base = STYLE["accent2"]
+        h = colorsys.rgb_to_hsv(*(c / 255 for c in base))[0]
+    else:
+        best = max(range(36), key=lambda i: weights[i] + 0.5 * (weights[i - 1] + weights[(i + 1) % 36]))
+        h = (best + 0.5) / 36
+    light = tuple(int(c * 255) for c in colorsys.hsv_to_rgb(h, 0.42, 1.0))
+    dark = tuple(int(c * 255) for c in colorsys.hsv_to_rgb(h, 0.75, 0.14))
+    return light, dark  # type: ignore[return-value]
+
+
 _FIGURE_RE = re.compile(
     r"\d[\d,\.]*\s?(?:%|억|조|만|천|배|달러|원|명|개|년|월|일|[A-Za-z]{1,3}\b)?"
 )
 
 
 def _draw_stroked_line(draw: ImageDraw.ImageDraw, line: str, font, y: int,
-                       *, fill, stroke: int, highlight=None) -> None:
+                       *, fill, stroke: int, highlight=None,
+                       stroke_fill=(0, 0, 0)) -> None:
     """한 줄을 가운데 정렬로 그린다. 두꺼운 검은 윤곽선으로 어떤 배경에서도 읽히게 하고,
     highlight 색이 주어지면 숫자 표현(40%, 1.5억 등)만 그 색으로 강조한다."""
     pieces: list[tuple[str, tuple[int, int, int]]] = []
@@ -803,7 +837,7 @@ def _draw_stroked_line(draw: ImageDraw.ImageDraw, line: str, font, y: int,
     x = (W - total_w) // 2
     for text, color in pieces:
         draw.text((x, y), text, font=font, fill=color,
-                  stroke_width=stroke, stroke_fill=(0, 0, 0))
+                  stroke_width=stroke, stroke_fill=stroke_fill)
         x += int(draw.textlength(text, font=font))
 
 
@@ -814,8 +848,9 @@ def _render_cover(img: Image.Image, slide: Slide, total: int,
       큼직한 굵은 제목(숫자는 노랑 강조) + 두꺼운 윤곽선 + 한 줄 후크.
       날짜·카테고리 pill 같은 작은 글자는 썸네일에서 읽히지 않아 뺐다.
     """
-    img = _draw_gradient_bottom(img.copy(), strength=170)
-    img = _draw_gradient_top(img, strength=110)
+    highlight, outline = _cover_palette(img)
+    img = _draw_gradient_bottom(img.copy(), strength=140)
+    img = _draw_gradient_top(img, strength=90)
 
     # ── 상단: 슬라이드 번호 배지 + 핸들 ──────────────────
     img = _draw_badge(img, 1, total, handle)
@@ -853,13 +888,14 @@ def _render_cover(img: Image.Image, slide: Slide, total: int,
 
     for line in t_lines:
         _draw_stroked_line(draw, line, tf, y, fill=(255, 255, 255), stroke=7,
-                           highlight=_HIGHLIGHT)
+                           highlight=highlight, stroke_fill=outline)
         y += int(lh * 1.2)
     y += 26
 
     if b_lines and bf is not None:
         for line in b_lines:
-            _draw_stroked_line(draw, line, bf, y, fill=(235, 235, 245), stroke=4)
+            _draw_stroked_line(draw, line, bf, y, fill=(240, 240, 248), stroke=4,
+                               stroke_fill=outline)
             y += int(lh2 * 1.4)
         y += 16
 
