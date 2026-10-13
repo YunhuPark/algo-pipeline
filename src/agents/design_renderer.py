@@ -88,7 +88,15 @@ def _find_emoji_font() -> str | None:
 
 
 def _font(size: int, bold: bool = True) -> ImageFont.FreeTypeFont:
-    return ImageFont.truetype(_find_font("bold" if bold else "regular"), size)
+    font = ImageFont.truetype(_find_font("bold" if bold else "regular"), size)
+    # NotoSansKR-VF는 가변 폰트라 굵기를 고르지 않으면 기본값인 Thin(100)으로 그려진다.
+    # "bold"로 불러도 모든 글자가 가늘게 나오던 원인이다. 정적 폰트(malgunbd 등)에는
+    # 변형 축이 없어 예외가 나므로 그대로 둔다.
+    try:
+        font.set_variation_by_name("Black" if bold else "Medium")
+    except (OSError, AttributeError):
+        pass
+    return font
 
 
 def _auto_font(text: str, base_size: int, bold: bool = True,
