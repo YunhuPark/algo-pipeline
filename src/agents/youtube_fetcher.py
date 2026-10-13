@@ -1050,6 +1050,10 @@ def find_verified_video_for_slide(
         "ground", "based", "level", "type", "data", "model",
         "korean", "english", "chinese", "japanese", "global",
         "agent", "agents", "system", "platform", "solution",
+        # 기사 제목 첫 단어로 흔한 일반어. "Inside Amazon's ..."에서 'Inside'가 엔티티로
+        # 잡혀, 아마존과 무관한 "Inside the robot ..." 영상이 엔티티 게이트를 통과했다.
+        "inside", "behind", "meet", "exclusive", "breaking", "watch", "report",
+        "reports", "report:", "explained", "revealed", "reveals", "inside:",
         "demo", "tutorial", "guide", "review", "update",
         "part", "step", "time", "year", "month", "week",
     }

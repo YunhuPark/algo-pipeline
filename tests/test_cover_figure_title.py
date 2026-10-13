@@ -27,3 +27,11 @@ def test_person_name_is_not_a_hashtag():
     tags = _hashtags("아마존 로봇", [claim])
     assert "#BrianGreenwood" not in tags
     assert "#Amazon" in tags
+
+
+def test_unnatural_korean_figures_are_normalized():
+    from src.qa.script_assembler import _natural_korean_figures
+
+    assert _natural_korean_figures("아마존 로봇 1백만 대") == "아마존 로봇 100만 대"
+    assert _natural_korean_figures("2천만 명") == "2000만 명"
+    assert _natural_korean_figures("100만 대") == "100만 대"
