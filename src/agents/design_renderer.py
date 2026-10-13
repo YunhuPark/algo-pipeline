@@ -29,7 +29,7 @@ PAD = 96
 # 0.45일 때는 텍스트 블록(약 230px)이 700px 영역 한가운데 놓여 위아래로
 # 240px씩 비었다. 영상 쪽에 그 여백을 주면 빈 공간이 줄고 클립이 카드를
 # 주도한다. 본문 상한(130자)이 3~4줄로 들어가고도 여유가 남는 값이다.
-SPLIT_THUMB_RATIO = 0.56
+SPLIT_THUMB_RATIO = 0.50   # 영상 : 본문 = 50 : 50
 
 
 # ── 색상/스타일 ────────────────────────────────────────────
@@ -177,8 +177,11 @@ def _apply_background(base: Image.Image, for_cover: bool = False) -> Image.Image
     else:
         img = img.filter(ImageFilter.GaussianBlur(radius=2))
         img = ImageEnhance.Contrast(img).enhance(0.80)
-        img = ImageEnhance.Color(img).enhance(0.65)
-        alpha = STYLE["overlay_alpha"]
+        img = ImageEnhance.Color(img).enhance(0.85)
+        # 본문 카드는 글자 뒤에 패널이 깔리므로 배경 자체는 덜 눌러도 읽힌다.
+        # 예전에는 거의 검정이라 카드 전체가 어둡게 보였다.
+        img = ImageEnhance.Brightness(img).enhance(1.6)
+        alpha = max(55, STYLE["overlay_alpha"] - 85)
     overlay = Image.new("RGBA", (W, H), (*STYLE["overlay_color"], alpha))
     return Image.alpha_composite(img.convert("RGBA"), overlay).convert("RGB")
 
@@ -348,7 +351,7 @@ def _draw_glass_panel(
     return Image.alpha_composite(img.convert("RGBA"), layer).convert("RGB")
 
 
-OPTICAL_CENTER_SHIFT = 52
+OPTICAL_CENTER_SHIFT = -70   # 본문이 너무 아래로 처져 보인다는 피드백 → 가운데보다 약간 위
 
 
 def _balanced_top(group_h: int, floor: int, bottom: int = H - 92) -> int:
@@ -371,9 +374,9 @@ def _body_panel_layout(body: str, draw: ImageDraw.ImageDraw):
     cleaned = _clean(body)
     body_font = _auto_font(
         cleaned,
-        34,
+        38,
         bold=False,
-        steps=((55, 1.0), (85, 0.91), (115, 0.82)),
+        steps=((50, 1.0), (75, 0.9), (105, 0.8)),
     )
     lines = wrap_text(cleaned, body_font, draw, W - PAD * 2 - 68)[:5]
     _, _, _, line_h = draw.textbbox((0, 0), "가나다", font=body_font)
@@ -1009,8 +1012,7 @@ def _render_split(
     video_url: str = "",
 ) -> Image.Image:
     """
-    상단 45% = YouTube 썸네일 (재생버튼 + URL 오버레이)
-    하단 55% = 텍스트 중앙 정렬
+    상단 50% = 영상(썸네일), 하단 50% = 텍스트 중앙 정렬
     """
     img = img.copy().convert("RGB")
     thumb_h = int(H * SPLIT_THUMB_RATIO)
@@ -1070,8 +1072,8 @@ def _render_split(
     text_zone_bot = H - 30   # 하단 여백 확보
 
     _split_title = _clean(slide.title)
-    tf = _auto_font(_split_title, 52, bold=True)
-    bf = _font(33, bold=False)
+    tf = _auto_font(_split_title, 58, bold=True)
+    bf = _font(38, bold=False)
     t_lines = wrap_text(_split_title, tf, draw, text_w)
     b_lines = wrap_text(_clean(slide.body), bf, draw, text_w)
     _, _, _, tlh = draw.textbbox((0, 0), "가나다", font=tf)
