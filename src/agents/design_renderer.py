@@ -844,6 +844,33 @@ def _draw_stroked_line(draw: ImageDraw.ImageDraw, line: str, font, y: int,
         x += int(draw.textlength(text, font=font))
 
 
+def _text_scrim(img: Image.Image, top: int, bottom: int) -> Image.Image:
+    """글자 뒤 띠에 깔리는 어두운 막. 배경이 밝을수록 진해진다.
+
+    배경을 밝게 바꾼 뒤 흰 글자가 하늘·흰 종이 위에서 묻히는 문제를 막는다.
+    어두운 배경에서는 거의 그려지지 않아 사진을 그대로 살리고, 위아래 가장자리는
+    부드럽게 사라져 띠 모양이 티 나지 않는다.
+    """
+    top, bottom = max(0, top), min(H, bottom)
+    if bottom <= top:
+        return img
+    band = img.crop((0, top, W, bottom)).convert("L").resize((32, 32))
+    pixels = list(band.getdata())
+    brightness = sum(pixels) / len(pixels)
+    peak = int(max(0, min(150, (brightness - 60) * 1.7)))
+    if peak < 12:
+        return img
+    layer = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+    ld = ImageDraw.Draw(layer)
+    span = bottom - top
+    feather = max(1, int(span * 0.28))
+    for row in range(top, bottom):
+        edge = min(row - top, bottom - row)
+        a = peak if edge >= feather else int(peak * (edge / feather))
+        ld.line([(0, row), (W, row)], fill=(*STYLE["overlay_color"], a))
+    return Image.alpha_composite(img.convert("RGBA"), layer).convert("RGB")
+
+
 def _render_cover(img: Image.Image, slide: Slide, total: int,
                    handle: str, hook: str = "") -> Image.Image:
     """
@@ -885,6 +912,7 @@ def _render_cover(img: Image.Image, slide: Slide, total: int,
     zone_bot = H - 52 - 24      # 스와이프 힌트 위
     y = zone_top + max(0, (zone_bot - zone_top - content_h) // 2)
 
+    img = _text_scrim(img, y - 90, y + content_h + 90)
     img = _draw_accent_bar(img, y, width=72, height=8)
     draw = ImageDraw.Draw(img)
     y += 28
