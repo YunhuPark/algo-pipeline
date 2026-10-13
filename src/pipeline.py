@@ -538,9 +538,14 @@ def _run_once(
     _CONCRETE_VISUAL_TYPES = {"hero_stat", "comparison", "process"}
     pexels_preview_map: dict[int, "Image.Image"] = {}
     pexels_video_paths: dict[int, Path] = {}
+    # 스톡 영상은 주제와 어울리는지 검증할 방법이 없어서(카드에 무관한 회로 영상이
+    # 붙은 사례) 기본으로 끈다. 결정은 "자막이 검증된 영상이거나, 아니면 문장 카드".
+    # 다시 쓰려면 환경변수 STOCK_VIDEO_FALLBACK=on.
+    _stock_enabled = os.getenv("STOCK_VIDEO_FALLBACK", "").strip().lower() in {"on", "1", "true", "yes"}
     no_video_slides = [
         s for i, s in enumerate(content_slides_list)
-        if (i >= len(video_infos) or video_infos[i] is None)
+        if _stock_enabled
+        and (i >= len(video_infos) or video_infos[i] is None)
         and s.visual_type in _CONCRETE_VISUAL_TYPES
     ]
     if no_video_slides:
