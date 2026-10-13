@@ -579,10 +579,42 @@ def _number_supported_by_evidence(num_obj, evidence_text: str) -> bool:
         value = num_obj.normalized_value
         qual = declared_unit
 
-    return any(
+    if any(
         value == evidence_value and qual == evidence_unit
         for evidence_value, evidence_unit in _extract_number_mentions(evidence_text)
-    )
+    ):
+        return True
+    # "1.5 million full-time and part-time human workers"처럼 사람 명사가 수식어
+    # 뒤에 오면 위 추출은 단위를 못 읽어서 "150만 명"을 근거 없는 숫자로 거부했다.
+    # 값이 정확히 같고 바로 뒤(수식어 몇 단어 안)에 사람 명사가 있을 때만 "명"으로 인정한다.
+    return qual == "people" and _count_followed_by_people_noun(value, evidence_text)
+
+
+_PEOPLE_NOUNS = frozenset({
+    "workers", "worker", "employees", "employee", "staff", "people", "persons",
+    "users", "customers", "residents", "members", "citizens", "students",
+    "workforce", "jobs",
+})
+_PEOPLE_NOUN_MAX_GAP_WORDS = 6
+
+
+def _count_followed_by_people_noun(value: Decimal, evidence_text: str) -> bool:
+    """True if `value` appears in the evidence with a people noun within a few words after it."""
+
+    normalized = unicodedata.normalize("NFKC", evidence_text or "")
+    for match in _NUMBER_MENTION_RE.finditer(normalized):
+        if match.group("unit"):
+            continue
+        number = _to_decimal(match.group("number"))
+        if number is None:
+            continue
+        scale = (match.group("scale") or "").lower()
+        if number * _SCALE_FACTORS.get(scale, Decimal("1")) != value:
+            continue
+        words = re.findall(r"[A-Za-z]+(?:-[A-Za-z]+)*", normalized[match.end():match.end() + 90])
+        if any(word.lower() in _PEOPLE_NOUNS for word in words[:_PEOPLE_NOUN_MAX_GAP_WORDS]):
+            return True
+    return False
 
 
 def _plain_decimal(value: Decimal) -> str:
