@@ -53,3 +53,22 @@ def test_content_background_is_dimmed_and_blurred_not_brightened():
     out = renderer._apply_background(base)
     mean = sum(out.convert("L").resize((16, 16)).getdata()) / 256
     assert mean < 130, mean   # a bright photo must not stay bright behind the text
+
+
+def test_title_and_body_type_is_the_same_on_every_card(monkeypatch):
+    """Regression: titles and body text came out in different sizes and shapes
+    depending on the card type. Short and typical cards must share one size."""
+
+    _use_test_fonts(monkeypatch)
+    from PIL import ImageDraw
+
+    draw = ImageDraw.Draw(Image.new("RGB", (10, 10)))
+    sizes = set()
+    for title, body in (
+        ("짧은 제목", "짧은 본문입니다."),
+        ("조금 더 긴 제목 예시입니다", "근거로 확인된 문장입니다. " * 4),
+        ("제목", "중간 길이의 본문 문장입니다. " * 3),
+    ):
+        title_font, _, _, body_font, _, _, _ = renderer._text_panel_layout(title, body, draw)
+        sizes.add((title_font.size, body_font.size))
+    assert sizes == {(renderer.TITLE_FONT_SIZE, renderer.BODY_FONT_SIZE)}, sizes
