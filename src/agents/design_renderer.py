@@ -432,33 +432,36 @@ TITLE_FONT_SIZE = 56    # 모든 내용 카드의 제목 크기·굵기는 같�
 BODY_FONT_SIZE = 40     # 모든 내용 카드의 본문 크기·굵기도 같다
 
 
-def _text_panel_layout(title: str, body: str, draw: ImageDraw.ImageDraw):
+def _text_panel_layout(title: str, body: str, draw: ImageDraw.ImageDraw, with_title: bool = True):
     """제목+본문 패널의 줄바꿈과 높이. 글자 크기는 고정이고, 본문이 너무 길어
     바닥을 넘을 때만 본문을 한 단계씩 줄인다(그래도 모든 카드가 같은 규칙)."""
 
     clean_title, clean_body = _clean(title), _clean(body)
     title_font = _font(TITLE_FONT_SIZE, bold=True)
     inner_w = W - PAD * 2 - 68
-    t_lines = wrap_text(clean_title, title_font, draw, inner_w)[:2]
+    t_lines = wrap_text(clean_title, title_font, draw, inner_w)[:2] if with_title else []
     _, _, _, t_h = draw.textbbox((0, 0), "가나다", font=title_font)
     for size in (BODY_FONT_SIZE, 36, 33, 30):
         body_font = _font(size, bold=False)
         b_lines = wrap_text(clean_body, body_font, draw, inner_w)
         _, _, _, b_h = draw.textbbox((0, 0), "가나다", font=body_font)
-        height = 70 + len(t_lines) * int(t_h * 1.18) + 30 + len(b_lines) * int(b_h * 1.42) + 34
+        title_h = (len(t_lines) * int(t_h * 1.18) + 30) if with_title else 0
+        height = 70 + title_h + len(b_lines) * int(b_h * 1.42) + 34
         if BODY_TOP + height <= BODY_BOTTOM_LIMIT or size == 30:
             break
     return title_font, t_lines, t_h, body_font, b_lines[:6], b_h, height
 
 
-def _draw_text_panel(img: Image.Image, title: str, body: str) -> Image.Image:
+def _draw_text_panel(img: Image.Image, title: str, body: str, with_title: bool = True) -> Image.Image:
     """영상·수치·문장 카드가 모두 쓰는 아래쪽 패널: 라벨, 제목, 본문.
 
     패널은 항상 BODY_TOP에서 시작하고 제목·본문의 크기와 모양이 같아서, 카드를
     넘겨도 글이 같은 자리에 같은 모양으로 나온다."""
 
     draw = ImageDraw.Draw(img)
-    title_font, t_lines, t_h, body_font, b_lines, b_h, height = _text_panel_layout(title, body, draw)
+    title_font, t_lines, t_h, body_font, b_lines, b_h, height = _text_panel_layout(
+        title, body, draw, with_title
+    )
     top = BODY_TOP
     _BODY_TOP_PROBE.append(top)
     img = _draw_glass_panel(
@@ -468,12 +471,13 @@ def _draw_text_panel(img: Image.Image, title: str, body: str) -> Image.Image:
     draw = ImageDraw.Draw(img)
     draw.text((PAD + 34, top + 26), "근거로 확인된 내용", font=_font(21, bold=True), fill=STYLE["accent2"])
     y = top + 66
-    for line in t_lines:
-        draw.text((PAD + 34, y), line, font=title_font, fill=(255, 255, 255))
-        y += int(t_h * 1.18)
-    y += 8
-    draw.rounded_rectangle((PAD + 34, y, PAD + 34 + 56, y + 5), radius=2, fill=STYLE["accent"])
-    y += 22
+    if with_title:
+        for line in t_lines:
+            draw.text((PAD + 34, y), line, font=title_font, fill=(255, 255, 255))
+            y += int(t_h * 1.18)
+        y += 8
+        draw.rounded_rectangle((PAD + 34, y, PAD + 34 + 56, y + 5), radius=2, fill=STYLE["accent"])
+        y += 22
     for line in b_lines:
         draw.text((PAD + 34, y), line, font=body_font, fill=(240, 240, 248))
         y += int(b_h * 1.42)
@@ -529,12 +533,7 @@ def _draw_infographic_title(img: Image.Image, title: str) -> tuple[Image.Image, 
 
     draw = ImageDraw.Draw(img)
     clean_title = _clean(title)
-    title_font = _auto_font(
-        clean_title,
-        58,
-        bold=True,
-        steps=((14, 1.0), (20, 0.9), (28, 0.79), (36, 0.7)),
-    )
+    title_font = _font(TITLE_FONT_SIZE, bold=True)   # 영상 카드 패널 제목과 같은 크기
     lines = wrap_text(clean_title, title_font, draw, W - PAD * 2 - 24)
     _, _, _, line_h = draw.textbbox((0, 0), "가나다", font=title_font)
     y = 138
@@ -679,14 +678,17 @@ def _render_infographic_content(
     # 모양의 글 패널이다. 수치가 없는 카드(그리고 단계 목록이던 process)는 위쪽을
     # 배경 사진 그대로 두고 글 패널만 그린다 — 카드마다 글자 크기·모양이 달라지던
     # 문제를 없애려고 레이아웃을 이 하나로 통일했다.
+    # 영상이 없는 카드는 소제목을 위쪽에 따로 보여주고, 아래 패널에는 본문만 둔다.
+    img, title_bottom = _draw_infographic_title(img, slide.title)
+
     if visual_type not in {"hero_stat", "comparison"}:
-        img = _draw_text_panel(img, slide.title, slide.body)
+        img = _draw_text_panel(img, slide.title, slide.body, with_title=False)
         _bottom_accent_line(ImageDraw.Draw(img))
         return img
 
     panel_gap = 44
-    visual_top = 175
-    visual_h = min(440, BODY_TOP - panel_gap - visual_top)
+    visual_top = max(300, title_bottom + 25)
+    visual_h = max(260, BODY_TOP - panel_gap - visual_top)
     visual_bottom = visual_top + visual_h
     visual_box = (PAD, visual_top, W - PAD, visual_bottom)
     img = _draw_glass_panel(img, visual_box, fill_alpha=145, outline_alpha=95)
@@ -807,7 +809,7 @@ def _render_infographic_content(
             draw.text((center_x - value_w // 2, vy), line, font=value_font, fill=STYLE["text_primary"])
             vy += int(value_h * 1.04)
 
-    img = _draw_text_panel(img, slide.title, slide.body)
+    img = _draw_text_panel(img, slide.title, slide.body, with_title=False)
 
     _bottom_accent_line(ImageDraw.Draw(img))
     return img
