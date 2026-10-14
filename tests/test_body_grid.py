@@ -45,7 +45,9 @@ def test_every_card_layout_starts_its_body_at_the_same_height(monkeypatch):
                           body="첫째 단계입니다. 둘째 단계입니다. 셋째 단계입니다. 넷째 단계입니다."), 6, "@h")),
         "split (video)": _top_of(lambda: renderer._render_split(_bg(), _slide("auto"), 6, "@h", thumb)),
     }
-    assert set(tops.values()) == {renderer.BODY_TOP}, tops
+    video = tops.pop("split (video)")
+    assert video == renderer.BODY_TOP, video               # 영상 카드: 영상 아래
+    assert set(tops.values()) == {renderer.TEXT_BODY_TOP}, tops   # 영상 없는 카드는 모두 같은 줄
 
 
 def test_content_background_is_dimmed_and_blurred_not_brightened():
