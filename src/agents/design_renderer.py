@@ -30,7 +30,7 @@ PAD = 96
 # 0.45일 때는 텍스트 블록(약 230px)이 700px 영역 한가운데 놓여 위아래로
 # 240px씩 비었다. 영상 쪽에 그 여백을 주면 빈 공간이 줄고 클립이 카드를
 # 주도한다. 본문 상한(130자)이 3~4줄로 들어가고도 여유가 남는 값이다.
-SPLIT_THUMB_RATIO = 0.50   # 영상 : 본문 = 50 : 50
+SPLIT_THUMB_RATIO = 0.56   # 영상 : 본문 = 56 : 44 (50:50으로 줄였더니 영상이 너무 작아 되돌림)
 
 
 # ── 색상/스타일 ────────────────────────────────────────────
@@ -357,7 +357,7 @@ OPTICAL_CENTER_SHIFT = -70   # 본문이 너무 아래로 처져 보인다는 �
 # 모든 내용 카드의 본문 상자는 같은 높이(BODY_TOP)에서 시작한다. 카드마다 본문이
 # 위아래로 달라지면 넘겨 읽을 때 시선이 계속 움직여 읽기 불편하다. 영상 카드의
 # 영상 영역(H의 절반)이 끝나는 지점과도 맞춘다.
-BODY_TOP = 720            # 영상 카드: 위쪽 절반이 영상이라 패널은 그 아래
+BODY_TOP = int(H * SPLIT_THUMB_RATIO) + 30   # 영상 카드: 패널은 영상 바로 아래
 TEXT_BODY_TOP = 580       # 영상 없는 카드: 패널이 카드 가운데쯤(3줄 기준 중심 약 y=715)에 오도록
 BODY_BOTTOM_LIMIT = H - 92
 _BODY_TOP_PROBE: list[int] = []   # 테스트용: 그려진 본문 상자의 시작 y를 기록한다
@@ -1143,7 +1143,11 @@ def _render_split(
     if slide.accent:
         draw = ImageDraw.Draw(img)
         _, _, _, _, _, _, panel_h = _text_panel_layout(slide.title, slide.body, draw)
-        img, _ = _draw_accent_box(img, _clean(slide.accent), W // 2, min(BODY_TOP + panel_h + 18, H - 170))
+        pill_y = BODY_TOP + panel_h + 18
+        # 본문이 길어 패널이 바닥 가까이 내려오면 수치 상자는 그리지 않는다(패널과 겹치므로).
+        # 수치는 본문에 이미 쓰여 있다.
+        if pill_y + 62 <= H - 100:
+            img, _ = _draw_accent_box(img, _clean(slide.accent), W // 2, pill_y)
 
     _bottom_accent_line(ImageDraw.Draw(img))
     return img
