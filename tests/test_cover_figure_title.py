@@ -35,3 +35,10 @@ def test_unnatural_korean_figures_are_normalized():
     assert _natural_korean_figures("아마존 로봇 1백만 대") == "아마존 로봇 100만 대"
     assert _natural_korean_figures("2천만 명") == "2000만 명"
     assert _natural_korean_figures("100만 대") == "100만 대"
+
+
+def test_a_bare_number_without_its_unit_is_not_a_figure_phrase():
+    from src.qa.script_assembler import _FIGURE_PHRASE_RE
+
+    assert not _FIGURE_PHRASE_RE.search("로봇 운영 규모 100만")
+    assert _FIGURE_PHRASE_RE.search("100만 대 이상의 로봇")
