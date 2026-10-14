@@ -361,6 +361,7 @@ BODY_TOP = int(H * SPLIT_THUMB_RATIO) + 30   # 영상 카드: 패널은 영상 �
 TEXT_BODY_TOP = 580       # 영상 없는 카드: 패널이 카드 가운데쯤(3줄 기준 중심 약 y=715)에 오도록
 BODY_BOTTOM_LIMIT = H - 92
 _BODY_TOP_PROBE: list[int] = []   # 테스트용: 그려진 본문 상자의 시작 y를 기록한다
+_PANEL_PROBE: list[dict] = []     # 그려진 글 패널의 실제 값(위치·글자 크기). layout.json과 출력 기준 점검이 쓴다
 
 
 def _balanced_top(group_h: int, floor: int, bottom: int = H - 92) -> int:
@@ -466,6 +467,11 @@ def _draw_text_panel(img: Image.Image, title: str, body: str, with_title: bool =
         title, body, draw, with_title, top
     )
     _BODY_TOP_PROBE.append(top)
+    _PANEL_PROBE.append({
+        "top": top, "with_title": with_title,
+        "title_px": title_font.size if with_title else None,
+        "body_px": body_font.size, "body_lines": len(b_lines),
+    })
     img = _draw_glass_panel(
         img, (PAD, top, W - PAD, min(top + height, BODY_BOTTOM_LIMIT)),
         fill_alpha=185, outline_alpha=65,
@@ -1351,10 +1357,31 @@ def render_text_card(
     the article credit only — there is no video to credit.
     """
 
+    _PANEL_PROBE.clear()
     rendered = _render_content(_apply_background(background), slide, total, handle)
     rendered = _draw_source_footer(rendered, source)
     rendered.save(str(path), "PNG", optimize=True)
+    _update_layout_record(path.parent, slide.slide_number)
     return path
+
+
+def _update_layout_record(out_dir: Path, slide_number: int) -> None:
+    """영상이 끝내 붙지 못해 문장 카드로 다시 그린 슬라이드의 layout.json 기록을 고친다."""
+
+    import json as _json
+
+    layout_path = Path(out_dir) / "layout.json"
+    if not layout_path.exists():
+        return
+    try:
+        records = _json.loads(layout_path.read_text(encoding="utf-8"))
+        for record in records:
+            if record.get("slide") == slide_number:
+                record["video"] = False
+                record["panel"] = dict(_PANEL_PROBE[-1]) if _PANEL_PROBE else None
+        layout_path.write_text(_json.dumps(records, ensure_ascii=False, indent=2), encoding="utf-8")
+    except (OSError, ValueError):
+        pass
 
 
 # ── 캡션 생성 ─────────────────────────────────────────────
@@ -1526,10 +1553,12 @@ def render_card_set(
 
     total = len(script.slides)
     paths: list[Path] = []
+    layout_records: list[dict] = []
 
     for slide in script.slides:
         # 슬라이드별 배경 선택 (개별 > 공통)
         slide_bg = slide_bg_map.get(slide.slide_number, bg)
+        _PANEL_PROBE.clear()
 
         if slide.slide_type == "cover":
             rendered = _render_cover(bg_cover, slide, total, active_handle, hook=script.hook)
@@ -1548,6 +1577,12 @@ def render_card_set(
                 rendered, source, video_credits.get(slide.slide_number)
             )
 
+        layout_records.append({
+            "slide": slide.slide_number,
+            "type": slide.slide_type,
+            "video": slide.slide_number in thumb_map,
+            "panel": dict(_PANEL_PROBE[-1]) if _PANEL_PROBE else None,
+        })
         fname = f"card_{slide.slide_number:02d}_{slide.slide_type}.png"
         fpath = out_dir / fname
         rendered.save(str(fpath), "PNG", optimize=True)
@@ -1558,6 +1593,10 @@ def render_card_set(
     bg_save = background.convert("RGB") if background.mode != "RGB" else background.copy()
     bg_save.save(str(out_dir / "background.png"), "PNG")
 
+    import json as _layout_json
+    (out_dir / "layout.json").write_text(
+        _layout_json.dumps(layout_records, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
     (out_dir / "hashtags.txt").write_text(" ".join(script.hashtags), encoding="utf-8")
     caption = _generate_caption(script, active_handle)
     if source is not None:
