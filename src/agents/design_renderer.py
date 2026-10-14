@@ -357,7 +357,8 @@ OPTICAL_CENTER_SHIFT = -70   # 본문이 너무 아래로 처져 보인다는 �
 # 모든 내용 카드의 본문 상자는 같은 높이(BODY_TOP)에서 시작한다. 카드마다 본문이
 # 위아래로 달라지면 넘겨 읽을 때 시선이 계속 움직여 읽기 불편하다. 영상 카드의
 # 영상 영역(H의 절반)이 끝나는 지점과도 맞춘다.
-BODY_TOP = 720
+BODY_TOP = 720            # 영상 카드: 위쪽 절반이 영상이라 패널은 그 아래
+TEXT_BODY_TOP = 580       # 영상 없는 카드: 패널이 카드 가운데쯤(3줄 기준 중심 약 y=715)에 오도록
 BODY_BOTTOM_LIMIT = H - 92
 _BODY_TOP_PROBE: list[int] = []   # 테스트용: 그려진 본문 상자의 시작 y를 기록한다
 
@@ -432,7 +433,8 @@ TITLE_FONT_SIZE = 56    # 모든 내용 카드의 제목 크기·굵기는 같�
 BODY_FONT_SIZE = 40     # 모든 내용 카드의 본문 크기·굵기도 같다
 
 
-def _text_panel_layout(title: str, body: str, draw: ImageDraw.ImageDraw, with_title: bool = True):
+def _text_panel_layout(title: str, body: str, draw: ImageDraw.ImageDraw, with_title: bool = True,
+                       top: int = BODY_TOP):
     """제목+본문 패널의 줄바꿈과 높이. 글자 크기는 고정이고, 본문이 너무 길어
     바닥을 넘을 때만 본문을 한 단계씩 줄인다(그래도 모든 카드가 같은 규칙)."""
 
@@ -447,12 +449,13 @@ def _text_panel_layout(title: str, body: str, draw: ImageDraw.ImageDraw, with_ti
         _, _, _, b_h = draw.textbbox((0, 0), "가나다", font=body_font)
         title_h = (len(t_lines) * int(t_h * 1.18) + 30) if with_title else 0
         height = 70 + title_h + len(b_lines) * int(b_h * 1.42) + 34
-        if BODY_TOP + height <= BODY_BOTTOM_LIMIT or size == 30:
+        if top + height <= BODY_BOTTOM_LIMIT or size == 30:
             break
     return title_font, t_lines, t_h, body_font, b_lines[:6], b_h, height
 
 
-def _draw_text_panel(img: Image.Image, title: str, body: str, with_title: bool = True) -> Image.Image:
+def _draw_text_panel(img: Image.Image, title: str, body: str, with_title: bool = True,
+                     top: int = BODY_TOP) -> Image.Image:
     """영상·수치·문장 카드가 모두 쓰는 아래쪽 패널: 라벨, 제목, 본문.
 
     패널은 항상 BODY_TOP에서 시작하고 제목·본문의 크기와 모양이 같아서, 카드를
@@ -460,9 +463,8 @@ def _draw_text_panel(img: Image.Image, title: str, body: str, with_title: bool =
 
     draw = ImageDraw.Draw(img)
     title_font, t_lines, t_h, body_font, b_lines, b_h, height = _text_panel_layout(
-        title, body, draw, with_title
+        title, body, draw, with_title, top
     )
-    top = BODY_TOP
     _BODY_TOP_PROBE.append(top)
     img = _draw_glass_panel(
         img, (PAD, top, W - PAD, min(top + height, BODY_BOTTOM_LIMIT)),
@@ -682,13 +684,13 @@ def _render_infographic_content(
     img, title_bottom = _draw_infographic_title(img, slide.title)
 
     if visual_type not in {"hero_stat", "comparison"}:
-        img = _draw_text_panel(img, slide.title, slide.body, with_title=False)
+        img = _draw_text_panel(img, slide.title, slide.body, with_title=False, top=TEXT_BODY_TOP)
         _bottom_accent_line(ImageDraw.Draw(img))
         return img
 
     panel_gap = 44
-    visual_top = max(300, title_bottom + 25)
-    visual_h = max(260, BODY_TOP - panel_gap - visual_top)
+    visual_top = max(285, title_bottom + 20)
+    visual_h = max(230, TEXT_BODY_TOP - panel_gap - visual_top)
     visual_bottom = visual_top + visual_h
     visual_box = (PAD, visual_top, W - PAD, visual_bottom)
     img = _draw_glass_panel(img, visual_box, fill_alpha=145, outline_alpha=95)
@@ -809,7 +811,7 @@ def _render_infographic_content(
             draw.text((center_x - value_w // 2, vy), line, font=value_font, fill=STYLE["text_primary"])
             vy += int(value_h * 1.04)
 
-    img = _draw_text_panel(img, slide.title, slide.body, with_title=False)
+    img = _draw_text_panel(img, slide.title, slide.body, with_title=False, top=TEXT_BODY_TOP)
 
     _bottom_accent_line(ImageDraw.Draw(img))
     return img
