@@ -42,3 +42,22 @@ def test_a_bare_number_without_its_unit_is_not_a_figure_phrase():
 
     assert not _FIGURE_PHRASE_RE.search("로봇 운영 규모 100만")
     assert _FIGURE_PHRASE_RE.search("100만 대 이상의 로봇")
+
+
+def test_stat_box_uses_the_same_korean_notation_as_the_body():
+    from types import SimpleNamespace as N
+
+    from src.qa.script_assembler import _localized_stat
+
+    number = N(raw_text="1 million", normalized_value=1000000, subject="robots", unit="")
+    body = "아마존은 100만 대 이상의 로봇을 운영하며 매일 배송을 처리합니다."
+    assert _localized_stat(number, body) == ("100만 대", "로봇")
+
+
+def test_stat_box_keeps_the_source_notation_when_the_body_has_no_matching_figure():
+    from types import SimpleNamespace as N
+
+    from src.qa.script_assembler import _localized_stat
+
+    number = N(raw_text="1 million", normalized_value=1000000, subject="robots", unit="")
+    assert _localized_stat(number, "로봇을 운영합니다.") == ("1 million", "robots")

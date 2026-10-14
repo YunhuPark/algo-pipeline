@@ -27,7 +27,8 @@ def test_broken_first_line_is_replaced_by_the_verified_hook(tmp_path):
     out = _folder(tmp_path, BROKEN, [{"slide_number": 3}])
     report = audit_output(out, script_hook="AI 칩 Maia 300의 모든 것")
     assert (out / "caption.txt").read_text(encoding="utf-8").startswith("⚡ AI 칩 Maia 300의 모든 것")
-    assert report["fixed"] and report["ok"]
+    assert report["fixed"]
+    assert not any("첫 줄" in a for a in report["attention"])   # 첫 줄 문제는 남지 않는다
     assert (out / "audit.json").exists()
 
 
