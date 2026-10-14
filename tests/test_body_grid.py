@@ -46,7 +46,7 @@ def test_every_card_layout_starts_its_body_at_the_same_height(monkeypatch):
         "split (video)": _top_of(lambda: renderer._render_split(_bg(), _slide("auto"), 6, "@h", thumb)),
     }
     video = tops.pop("split (video)")
-    assert video == renderer.BODY_TOP, video               # 영상 카드: 영상 아래
+    assert video == renderer.BODY_TOP, video               # 영상 카드: 영상(56%) 바로 아래
     assert set(tops.values()) == {renderer.TEXT_BODY_TOP}, tops   # 영상 없는 카드는 모두 같은 줄
 
 
