@@ -191,6 +191,48 @@ def _natural_korean_figures(text: str) -> str:
     return re.sub(r"(\d+)천만", lambda m: f"{m.group(1)}000만", text)
 
 
+_ENGLISH_WORD_RE = re.compile(r"[A-Za-z]{3,}")
+
+
+def _localized_stat(number: NormalizedNumber, claim_text: str) -> tuple[str, str]:
+    """수치 상자에 쓸 (값, 라벨)을 본문 표기에 맞춘다.
+
+    근거 숫자의 raw_text는 기사 원문 표기("1 million", 라벨 "robots")라서, 본문이 "100만 대"라고
+    쓴 카드에서도 상자만 영어로 나왔다. 본문(claim_text) 안에서 같은 값을 가진 한국어 숫자
+    구절을 찾아 그 표기와 바로 뒤 명사를 쓰면 본문과 상자가 항상 같은 표기가 된다. 찾지 못하면
+    기존 표기를 그대로 둔다.
+    """
+
+    display, label = _display_number(number), number.subject.strip()
+    if not (_ENGLISH_WORD_RE.search(display) and re.search(r"[가-힣]", claim_text)):
+        return display, label
+    from decimal import Decimal
+
+    from src.qa.deterministic_verifier import _extract_number_mentions
+
+    target = Decimal(str(number.normalized_value))
+    for match in _FIGURE_PHRASE_RE.finditer(claim_text):
+        figure = re.sub(r"\s+", " ", match.group(1)).strip()
+        if any(value == target for value, _unit in _extract_number_mentions(figure)):
+            localized_label = label
+            if _ENGLISH_WORD_RE.search(label) or not label:
+                words = []
+                pos = match.end()
+                for _ in range(2):
+                    word_match = _WORD_RE.match(claim_text, pos)
+                    if not word_match:
+                        break
+                    word = word_match.group(1)
+                    pos = word_match.end()
+                    stripped = _TRAILING_PARTICLE_RE.sub("", word)
+                    words.append(stripped)
+                    if stripped != word:
+                        break
+                localized_label = " ".join(words)
+            return figure, localized_label
+    return display, label
+
+
 def _lead_figure_phrase(claims: List[Claim]) -> str:
     """The first verified figure phrase in the card copy, e.g. "100만 대 이상의 로봇".
 
@@ -397,15 +439,16 @@ class ScriptAssembler:
             # 지목하지 않은 주체를 시각적으로 지목해서는 안 된다.
             mentioned = _entities_in_copy(c)
             primary_number = _primary_number(c)
-            accent = _display_number(primary_number) if primary_number else ""
+            accent = _localized_stat(primary_number, c.claim_text)[0] if primary_number else ""
             if not accent and mentioned:
                 accent = mentioned[0]
             visual_numbers = sorted(
                 c.numbers,
                 key=lambda item: item is not primary_number,
             )[:3]
-            visual_values = [_display_number(item) for item in visual_numbers]
-            visual_labels = [item.subject.strip() for item in visual_numbers]
+            localized = [_localized_stat(item, c.claim_text) for item in visual_numbers]
+            visual_values = [value for value, _label in localized]
+            visual_labels = [label for _value, label in localized]
             if not visual_values and mentioned:
                 visual_values = [mentioned[0]]
 

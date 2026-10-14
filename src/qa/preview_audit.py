@@ -127,11 +127,29 @@ def audit_output(out_dir: Path, script_hook: str = "") -> dict[str, Any]:
     # ── what cannot be judged automatically ─────────────
     attention.append("배경 이미지는 자동으로 판단할 수 없습니다 — 주제와 어울리는지 눈으로 확인하세요")
 
+    # ── 파이프라인 전체 출력 기준(src/qa/output_standard.py) ──
+    from src.qa.output_standard import blocking, check_output
+
+    violations = []
+    try:
+        violations = check_output(out_dir)
+    except Exception as exc:   # 점검 실패가 생성을 막으면 안 된다
+        attention.append(f"출력 기준 점검 실패({type(exc).__name__}) — 직접 확인하세요")
+    for v in violations:
+        label = "승인 차단" if v.severity == "block" else "확인 필요"
+        attention.append(f"[기준 {v.rule}] {label}: {v.message}")
+    if not violations and not any(a.startswith("출력 기준") for a in attention):
+        checks.append({"item": "출력 기준", "result": "모든 기준 통과"})
+
     report = {
         "ok": not any(not a.startswith("배경 이미지") for a in attention),
         "fixed": fixed,
         "attention": attention,
         "checks": checks,
+        "violations": [
+            {"rule": v.rule, "severity": v.severity, "message": v.message} for v in violations
+        ],
+        "blocked": bool(blocking(violations)),
     }
     try:
         (out_dir / "audit.json").write_text(

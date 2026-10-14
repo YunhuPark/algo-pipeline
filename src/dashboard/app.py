@@ -1740,6 +1740,21 @@ def queue_approve_publish():
     except (TypeError, ValueError):
         return {"error": "발행할 항목을 확인하지 못했습니다. 미리보기를 다시 생성해 주세요."}, 400
 
+    # 출력 기준(src/qa/output_standard.py)의 block 항목이 남은 세트는 게시하지 않는다.
+    try:
+        from src.db import get_queue_row
+        from src.qa.output_standard import blocking, check_output
+
+        row = get_queue_row(queue_id)
+        image_dir = (row["image_dir"] if row is not None else "") or ""
+        if image_dir and Path(image_dir).is_dir():
+            blockers = blocking(check_output(Path(image_dir)))
+            if blockers:
+                lines = "; ".join(f"[{v.rule}] {v.message}" for v in blockers[:4])
+                return {"error": f"출력 기준을 통과하지 못해 게시할 수 없습니다 — {lines}"}, 422
+    except Exception:
+        pass   # 점검 자체의 오류로 정상 게시까지 막지는 않는다(점검은 생성 단계에서도 표시된다)
+
     if not _GENERATION_LOCK.acquire(blocking=False):
         return {"error": "이미 다른 작업이 진행 중입니다. 완료 후 다시 시도해 주세요."}, 409
 

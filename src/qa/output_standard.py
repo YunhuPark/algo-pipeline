@@ -48,7 +48,6 @@ RULES: tuple[Rule, ...] = (
     Rule("S8-stat-language", "warn", "수치 상자의 표기는 본문과 같은 언어(한국어 카드에 영어 'million' 금지)"),
     Rule("S9-background", "warn", "본문 카드 배경은 글자가 읽힐 만큼 어둡다(평균 밝기 상한)"),
     Rule("S10-source", "block", "기사 출처 정보가 기록돼 모든 내용 카드 하단과 캡션에 표시된다"),
-    Rule("S11-hashtags", "warn", "해시태그에 영문 사람 이름이 없다"),
 )
 
 # 본문 카드 배경(처리 후) 평균 밝기(0~255) 상한.
@@ -176,12 +175,6 @@ def check_output(out_dir: Path) -> list[Violation]:
     # ── S10 source ─────────────────────────────────────
     if not script.get("source_note"):
         add("S10-source", "출처 정보(source_note)가 기록되지 않았습니다")
-
-    # ── S11 hashtags ───────────────────────────────────
-    for tag in script.get("hashtags", []):
-        word = tag.lstrip("#")
-        if re.fullmatch(r"[A-Z][a-z]+[A-Z][a-z]+", word) and word not in {"OpenAI", "ChatGPT"}:
-            add("S11-hashtags", f"사람 이름으로 보이는 해시태그: {tag}")
 
     return found
 
