@@ -991,6 +991,32 @@ def match_videos_to_slides(slides: list, candidates: list[VideoInfo]) -> list[Vi
                 for i in range(len(content_slides))]
 
 
+def _clip_start_for(vi, start: int, slide_title: str, slide_body: str) -> int:
+    """검증 단계에서 시작 시점이 0이면 합성 단계와 똑같이 다시 찾는다(0초는 보통 인트로)."""
+
+    if start > 0:
+        return start
+    try:
+        start = int(find_best_start_time(vi.video_id, slide_title, slide_body, vi.title) or 0)
+    except Exception:
+        start = 0
+    if start == 0 and getattr(vi, "duration", 0) and vi.duration > 60:
+        start = 30   # 합성 단계의 "인트로 스킵"과 같은 값
+    return start
+
+
+def _has_motion_at(video_id: str, start: int) -> bool:
+    """그 구간 15초가 실제로 움직이는지. 확인이 실패하면(다운로드 등) 통과로 본다."""
+
+    try:
+        clip = download_video_snippet(video_id, duration=15, start_time=start)
+    except Exception:
+        return True
+    if not clip:
+        return True
+    return has_visible_motion(clip)
+
+
 def find_verified_video_for_slide(
     slide_title: str,
     slide_body: str,
@@ -1163,6 +1189,15 @@ def find_verified_video_for_slide(
             reason   = str(data.get("reason", ""))[:60]
             mark = "✓ 매칭" if matched else "✗ 불일치"
             print(f"  [YouTubeFetcher] {mark}: '{vi.title[:35]}' → {reason} (→{start}초)")
+            if matched:
+                # 자막이 슬라이드와 맞아도 화면이 멈춘 영상(슬라이드쇼·타이틀 카드)이면
+                # 카드에 붙일 수 없다. 이 판단을 합성 단계(4.1)까지 미루면 이 영상 하나 때문에
+                # 슬라이드가 영상 없이 끝나므로, 여기서 움직임까지 확인해 정지 화면이면
+                # 다음 후보로 넘어가게 한다. 합성 단계가 쓸 시작 시점과 같은 값을 쓴다.
+                start = _clip_start_for(vi, start, slide_title, slide_body)
+                if not _has_motion_at(vi.video_id, start):
+                    print(f"  [YouTubeFetcher] ✗ 정지 화면 영상이라 제외: '{vi.title[:35]}' ({start}초 부근)")
+                    return False, 0
             return matched, start
         except Exception as e:
             print(f"  [YouTubeFetcher] 자막 판단 실패({e}): '{vi.title[:30]}'")

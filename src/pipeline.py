@@ -628,6 +628,8 @@ def _run_once(
                         # 영상은 거절하므로, 여기까지 온 영상은 자막 검증을 통과했다.
                         # 자동 점검(preview_audit)은 이 기록이 있을 때만 "검증됨"이라 말한다.
                         script_data["slides"][ci]["video_verified"] = True
+                        # 검증 단계에서 화면이 실제로 움직이는지도 확인한다(정지 화면 영상은 후보에서 제외).
+                        script_data["slides"][ci]["video_motion_checked"] = True
                 script_json_path.write_text(
                     _json.dumps(script_data, ensure_ascii=False, indent=2),
                     encoding="utf-8",
