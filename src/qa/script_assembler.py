@@ -368,7 +368,8 @@ class ScriptAssembler:
         cover_title = _natural_korean_figures(cover_title)
 
         # 표지 제목에 숫자가 없는데 카드에 검증된 숫자가 있으면, 그 숫자를 제목에 쓴다.
-        if not re.search(r"\d", cover_title):
+        # 숫자만 있고 단위가 빠진 제목("로봇 운영 규모 100만")도 숫자 구절로 보지 않는다.
+        if not _FIGURE_PHRASE_RE.search(cover_title):
             lead = _lead_figure_phrase(content_claims[:max_content_slides])
             if lead:
                 cover_title = _fit_cover_title(lead, 22)
