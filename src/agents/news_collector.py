@@ -269,6 +269,21 @@ def _is_roundup_title(title: str) -> bool:
     return bool(_ROUNDUP_TITLE_RE.search(title or ""))
 
 
+# 쇼핑·할인 소식(The Verge 딜 코너 등)은 뉴스 계정에 올릴 카드뉴스 주제가 아니다. 가격 할인,
+# 기프트 카드, 쿠폰 기사가 후보로 큐에 들어온 적이 있어 수집 단계에서 아예 제외한다. "가격 인하"
+# 같은 일반 뉴스 표현은 일부러 뺀다(API 가격 인하는 정당한 뉴스).
+_DEAL_TITLE_RE = re.compile(
+    r"\bdeals?\b|\bdiscount(?:s|ed)?\b|\bcoupons?\b|gift\s*cards?|\d+\s?%\s*off|\$\s?\d+(?:\.\d+)?\s*off|"
+    r"\bon\s+sale\b|\bsave\s+(?:big|up|\$|\d)|half\s+off|\bprime\s+day\b|\bblack\s+friday\b|"
+    r"\blowest\s+price\b|할인|특가|쿠폰|기프트\s*카드|반값",
+    re.IGNORECASE,
+)
+
+
+def _is_deal_title(title: str) -> bool:
+    return bool(_DEAL_TITLE_RE.search(title or ""))
+
+
 # "그가 이렇게 말했다/주장했다/경고했다"류 발언·의견 인용 기사는 팩트 수치
 # 기준(_MIN_FACTS)을 겨우 넘겨도 실제로는 검증 가능한 사건·수치보다 한 사람의
 # 주관적 평가가 카드 대부분을 채운다 — "AI 공포는 과장이다"처럼 반응은
@@ -548,6 +563,7 @@ def collect_and_select(exclude_urls: frozenset[str] = frozenset()) -> NewsSelect
         if item.title.strip()
         and item.url.startswith(("http://", "https://"))
         and looks_like_article_url(item.url)
+        and not _is_deal_title(item.title)
         and item.url not in exclude_urls
     ]
 
