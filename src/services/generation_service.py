@@ -275,7 +275,7 @@ def _finish_tracking(
         print(f"  [Tracking] 실행 기록 종료 실패: {type(exc).__name__}")
 
 
-def _close_cancelled_run(run_id: str | None, elapsed: float, strategy_id: str) -> None:
+def _close_cancelled_run(run_id: str | None, elapsed: float, strategy_id: str, reason=None) -> None:
     """Mark a stopped run CANCELLED, keeping what it already spent."""
 
     if not run_id:
@@ -290,7 +290,11 @@ def _close_cancelled_run(run_id: str | None, elapsed: float, strategy_id: str) -
             "CANCELLED",
             cost=totals["cost_usd"] if totals["calls"] else None,
             latency=elapsed,
-            error="CANCELLED_BY_OPERATOR",
+            error=(
+                "RUN_BUDGET_EXCEEDED"
+                if type(reason).__name__ == "RunBudgetExceeded"
+                else "CANCELLED_BY_OPERATOR"
+            ),
             strategy_id=strategy_id,
         )
     except Exception as exc:
@@ -414,10 +418,10 @@ def execute_generation(
                 publish_attempt_state=PublishAttemptState.NOT_ATTEMPTED,
                 publish_attempt_id=publish_attempt_id,
             )
-    except GenerationCancelled:
-        # 운영자가 중지했다. 실패가 아니라 "취소"로 닫고, 그때까지 쓴 호출 비용은
+    except GenerationCancelled as cancelled:
+        # 운영자가 중지했다(또는 한 번의 생성 비용 상한을 넘어 시스템이 멈췄다). 실패가 아니라 "취소"로 닫고, 그때까지 쓴 호출 비용은
         # 그대로 남긴다 (이미 나간 호출은 청구되므로). 예외는 다시 던져 위에서 처리한다.
-        _close_cancelled_run(run_id, time.monotonic() - started, strategy_id)
+        _close_cancelled_run(run_id, time.monotonic() - started, strategy_id, cancelled)
         raise
     except Exception:
         if run_id:

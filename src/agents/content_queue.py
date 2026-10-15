@@ -569,6 +569,12 @@ def _process_claimed_row(
         print(f"  [ContentQueue] 파이프라인 오류 (큐 id={queue_id}): {e}")
         mark_queue_error(queue_id, "UNKNOWN_PIPELINE_EXCEPTION")
         raise
+    except BaseException as stopped:
+        # 한 번의 생성 비용 상한을 넘으면 이 기사는 같은 방식으로 또 실패하므로 사유를
+        # 남겨 자동 재시도 대상에서 뺀다. 운영자의 중지(GenerationCancelled)는 그냥 대기로 돌린다.
+        if type(stopped).__name__ == "RunBudgetExceeded":
+            mark_queue_error(queue_id, "RUN_BUDGET_EXCEEDED", increment_retry=False)
+        raise
     finally:
         # 다른 경로(mark_queue_status/complete_queue_publish)가 이미 최종
         # 상태로 바꿔놨다면 이건 조용히 아무 일도 하지 않는다 — 그래야 위의

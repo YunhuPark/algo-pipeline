@@ -1444,12 +1444,14 @@ def _run_queue_prepare_job(job_id: str, queue_id: int | None = None) -> None:
             job["status"] = "error"
             job["error"] = "대기 중인 큐 항목이 없거나 생성에 실패했습니다."
             _emit(q, "error", job["error"])
-    except cancellation.GenerationCancelled:
-        # 운영자가 중지했다. 항목은 content_queue의 finally에서 이미 원래 상태
-        # (대기)로 돌아갔다 — 오류 코드는 남기지 않는다.
+    except cancellation.GenerationCancelled as stopped:
+        # 운영자가 중지했거나, 한 번의 생성 비용 상한을 넘어 시스템이 멈췄다.
         sys.stdout = old_stdout
         job["status"] = "cancelled"
-        job["error"] = "사용자가 중지했습니다. 항목은 대기 상태로 돌아갔습니다."
+        if isinstance(stopped, cancellation.RunBudgetExceeded):
+            job["error"] = f"{stopped} — 이 기사는 비용 대비 생성이 어려워 보류됩니다."
+        else:
+            job["error"] = "사용자가 중지했습니다. 항목은 대기 상태로 돌아갔습니다."
         _emit(q, "error", "⏹ " + job["error"] + " (이미 호출된 AI 비용은 환불되지 않습니다)")
     except Exception as e:
         sys.stdout = old_stdout
