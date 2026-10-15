@@ -1434,7 +1434,7 @@ def _generate_caption(script: CardNewsScript, handle: str) -> str:
     try:
         from langchain_openai import ChatOpenAI
         from src.config import OPENAI_API_KEY
-        from src.qa.caption_guard import unsupported_figures, unsupported_hype
+        from src.qa.caption_guard import figure_meaning_mismatch, unsupported_figures, unsupported_hype
 
         llm = ChatOpenAI(model="gpt-4o-mini", temperature=0.75, api_key=OPENAI_API_KEY)
 
@@ -1448,7 +1448,11 @@ def _generate_caption(script: CardNewsScript, handle: str) -> str:
         attempt_prompt = prompt
         for attempt in range(2):
             body = llm.invoke(attempt_prompt).content.strip()
-            bad = unsupported_figures(body, support) + unsupported_hype(body, support)
+            bad = (
+                unsupported_figures(body, support)
+                + unsupported_hype(body, support)
+                + figure_meaning_mismatch(body, support)
+            )
             if not bad:
                 if hashtag_str and hashtag_str[:10] not in body:
                     body = f"{body}\n\n{hashtag_str}"
@@ -1457,7 +1461,8 @@ def _generate_caption(script: CardNewsScript, handle: str) -> str:
                   f"{'다시 작성' if attempt == 0 else '안전한 캡션으로 대체'}")
             attempt_prompt = (
                 f"{prompt}\n\n[수정 지시] 직전 캡션의 다음 표현은 카드에 없는 내용입니다: "
-                f"{', '.join(bad)}. 숫자는 카드에 쓰인 표기를 그대로 쓰고, 카드에 없는 "
+                f"{', '.join(bad)}. 숫자는 카드에 쓰인 표기와 의미를 그대로 쓰고(카드가 '반영 비율'이라 한 숫자를 "
+                f"'변화·증가'처럼 다른 뜻으로 쓰지 마세요), 카드에 없는 "
                 f"강한 표현(완벽·압도적·최고 등)은 쓰지 마세요. 확신이 없으면 빼세요."
             )
         return _safe_caption(script, handle, hashtag_str)

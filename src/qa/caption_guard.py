@@ -105,6 +105,37 @@ def unsupported_hype(caption: str, supporting_texts: list[str]) -> list[str]:
     return [word for word in HYPE_WORDS if word in body and word not in support]
 
 
+# 숫자 바로 뒤에 붙어 숫자의 "의미"를 바꾸는 말("80%의 변화!"). 카드에서 같은 숫자 옆에 그 말이 없으면
+# 캡션이 숫자의 뜻을 바꿔 쓴 것이다("시나리오의 80%를 반영"을 "80%의 변화"로).
+MEANING_WORDS = (
+    "변화", "증가", "감소", "상승", "하락", "성장", "급증", "급감", "절감", "인상", "인하",
+    "확대", "축소", "폭등", "폭락", "개선", "악화",
+)
+_FIGURE_TOKEN = re.compile(r"\d[\d,\.]*\s?(?:%|퍼센트|만|억|조|배|명|개|대|달러|원)")
+
+
+def figure_meaning_mismatch(caption: str, supporting_texts: list[str]) -> list[str]:
+    """Figure+meaning pairs in the caption (e.g. "80%의 변화") that no card states."""
+
+    support = " ".join(supporting_texts)
+    problems: list[str] = []
+    for match in _FIGURE_TOKEN.finditer(_HASHTAG.sub(" ", caption or "")):
+        window = caption[match.end(): match.end() + 8]
+        word = next((w for w in MEANING_WORDS if w in window), "")
+        if not word:
+            continue
+        figure = re.sub(r"\s+", "", match.group(0))
+        stated = any(
+            word in re.sub(r"\s+", "", support[max(0, m.start() - 12): m.end() + 12])
+            for m in _FIGURE_TOKEN.finditer(support)
+            if re.sub(r"\s+", "", m.group(0)) == figure
+        )
+        label = f"{figure}의 {word}"
+        if not stated and label not in problems:
+            problems.append(label)
+    return problems
+
+
 def unsupported_figures(caption: str, supporting_texts: list[str]) -> list[str]:
     """Figures in `caption` that no supporting text states (as written)."""
 

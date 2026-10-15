@@ -226,3 +226,13 @@ def test_invented_public_reaction_is_flagged():
     cards = ["노동 단체는 자동화가 긍정적이지 않을 수 있다고 지적합니다."]
     assert "팽팽" in unsupported_hype("여러 의견이 팽팽해!", cards)
     assert unsupported_hype("노동 단체가 우려를 나타냈어", cards) == []
+
+
+def test_a_figure_cannot_take_a_different_meaning_in_the_caption():
+    from src.qa.caption_guard import figure_meaning_mismatch
+
+    cards = ["AI 시뮬레이션은 컨설턴트가 직면하는 시나리오의 80%를 반영하도록 설계되었습니다."]
+    assert figure_meaning_mismatch("80%의 변화! 맥킨지가 신입 평가에 AI를 활용합니다", cards) == ["80%의 변화"]
+    assert figure_meaning_mismatch("시나리오의 80%를 반영한 AI 면접이야", cards) == []
+    # the same word next to the same figure on a card is fine
+    assert figure_meaning_mismatch("매출 30% 증가!", ["올해 매출이 30% 증가했습니다."]) == []

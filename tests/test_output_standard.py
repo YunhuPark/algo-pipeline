@@ -101,3 +101,11 @@ def test_approve_publish_refuses_a_set_that_violates_a_blocking_rule(tmp_path, m
     assert resp.status_code == 422
     assert "S10-source" in resp.get_json()["error"]
     assert not started          # nothing was scheduled to publish
+
+
+def test_a_bare_figure_cover_title_warns(tmp_path):
+    folder = _good_folder(tmp_path)
+    script = json.loads((folder / "script.json").read_text(encoding="utf-8"))
+    script["slides"][0]["title"] = "80%"
+    (folder / "script.json").write_text(json.dumps(script), encoding="utf-8")
+    assert [v.rule for v in check_output(folder)] == ["S6-cover-figure"]

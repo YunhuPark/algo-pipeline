@@ -233,6 +233,20 @@ def _localized_stat(number: NormalizedNumber, claim_text: str) -> tuple[str, str
     return display, label
 
 
+def has_complete_figure(title: str) -> bool:
+    """표지 제목에 "100만 대 이상의 로봇"처럼 대상이 붙은 숫자 구절이 있는가.
+
+    "80%"만 있는 제목은 무슨 숫자인지 알 수 없어서(실제로는 '시나리오의 80%를 반영'인데 표지는
+    80%만 크게 나와 변화율로 읽혔다) 숫자 구절로 인정하지 않는다.
+    """
+
+    match = _FIGURE_PHRASE_RE.search(title or "")
+    if not match:
+        return False
+    rest = (title[: match.start()] + " " + title[match.end():])
+    return len(re.findall(r"[가-힣A-Za-z]", rest)) >= 2
+
+
 def _lead_figure_phrase(claims: List[Claim]) -> str:
     """The first verified figure phrase in the card copy, e.g. "100만 대 이상의 로봇".
 
@@ -255,13 +269,15 @@ def _lead_figure_phrase(claims: List[Claim]) -> str:
             word = word_match.group(1)
             pos = word_match.end()
             stripped = _TRAILING_PARTICLE_RE.sub("", word)
-            words.append(stripped)
+            if stripped:
+                words.append(stripped)
             if stripped != word:      # 조사가 붙었으면 명사구가 끝난 것이다
                 break
         figure = re.sub(r"\s+", " ", match.group(1)).strip()
         qualifier = match.group(2) or ""
         if not words:
-            return figure
+            # 숫자 뒤에 대상이 없으면("시나리오의 80%를 반영…") 숫자만으로는 표지 제목이 되지 못한다.
+            continue
         noun_phrase = " ".join(words)
         return f"{figure} {qualifier}의 {noun_phrase}" if qualifier else f"{figure} {noun_phrase}"
     return ""
@@ -411,10 +427,13 @@ class ScriptAssembler:
 
         # 표지 제목에 숫자가 없는데 카드에 검증된 숫자가 있으면, 그 숫자를 제목에 쓴다.
         # 숫자만 있고 단위가 빠진 제목("로봇 운영 규모 100만")도 숫자 구절로 보지 않는다.
-        if not _FIGURE_PHRASE_RE.search(cover_title):
+        if not has_complete_figure(cover_title):
             lead = _lead_figure_phrase(content_claims[:max_content_slides])
             if lead:
                 cover_title = _fit_cover_title(lead, 22)
+            elif _FIGURE_PHRASE_RE.search(cover_title) and content_claims:
+                # 숫자만 덩그러니 있는 제목("80%")은 버리고 첫 카드의 소제목을 쓴다.
+                cover_title = _fit_cover_title(_claim_headline(content_claims[0]), 22)
 
         slides = []
 

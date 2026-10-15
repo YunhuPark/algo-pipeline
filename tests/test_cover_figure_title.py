@@ -61,3 +61,21 @@ def test_stat_box_keeps_the_source_notation_when_the_body_has_no_matching_figure
 
     number = N(raw_text="1 million", normalized_value=1000000, subject="robots", unit="")
     assert _localized_stat(number, "로봇을 운영합니다.") == ("1 million", "robots")
+
+
+def test_a_bare_figure_is_not_a_complete_cover_phrase():
+    from src.qa.script_assembler import has_complete_figure
+
+    assert not has_complete_figure("80%")
+    assert not has_complete_figure("100만")
+    assert has_complete_figure("100만 대 이상의 로봇")
+    assert has_complete_figure("맥킨지 신입 80% 반영")
+
+
+def test_a_figure_with_no_object_after_it_is_not_used_as_the_cover_title():
+    from types import SimpleNamespace as N
+
+    from src.qa.script_assembler import _lead_figure_phrase
+
+    claim = N(claim_text="AI 시뮬레이션은 컨설턴트가 직면하는 시나리오의 80%를 반영하도록 설계되었습니다.")
+    assert _lead_figure_phrase([claim]) == ""
