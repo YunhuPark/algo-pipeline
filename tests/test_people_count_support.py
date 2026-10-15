@@ -33,3 +33,23 @@ def test_a_different_value_is_still_rejected():
 def test_a_people_noun_far_from_the_number_does_not_count():
     far = "It reached 1.5 million units shipped last quarter across many different regions and the company also has workers."
     assert not supported(_num("150만 명"), far)
+
+
+def test_hyphenated_unit_in_an_english_compound_modifier_is_read():
+    # Regression: "a 10-minute conversation" was parsed without its unit, so the claim "10분" was
+    # rejected as unsupported on every retry (13 paid retries on one article).
+    from src.qa.deterministic_verifier import _extract_number_mentions
+
+    assert list(_extract_number_mentions("a 10-minute conversation"))[0][1] == "minute"
+    evidence = "McKinsey asks candidates to have a 10-minute conversation with an AI-simulated client."
+    assert supported(N(raw_text="10분", unit="minutes", normalized_value=10), evidence)
+
+
+def test_number_ranges_and_dates_are_not_changed_by_the_hyphen_rule():
+    from decimal import Decimal
+
+    from src.qa.deterministic_verifier import _extract_number_mentions
+
+    values = [v for v, _unit in _extract_number_mentions("from 10-20 percent in 2025-2026")]
+    assert Decimal("10") in values and Decimal("20") in values
+    assert Decimal("2025") in values and Decimal("2026") in values

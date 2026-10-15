@@ -121,10 +121,13 @@ _KOREAN_COMPOUND_NUMBER_RE = re.compile(
     rf"\s*(?P<unit>{_UNIT_PATTERN})?",
     re.IGNORECASE,
 )
+# 숫자와 단위/배수 사이에는 공백 하나 또는 하이픈 하나가 올 수 있다. "a 10-minute conversation"이나
+# "a 5-million-dollar deal"처럼 영어 복합 수식어는 하이픈으로 붙어 있는데, 예전에는 이 단위를 읽지
+# 못해 "10분"을 근거 없는 숫자로 거부하고 같은 주장을 13번 다시 생성하는 비용($0.25)이 들었다.
 _NUMBER_MENTION_RE = re.compile(
     rf"(?<![\w.])(?P<currency>[$₩])?\s*"
-    rf"(?P<number>{_NUMBER_PATTERN})\s*"
-    rf"(?P<scale>{_KOREAN_SCALE_PATTERN}|{_ENGLISH_SCALE_PATTERN})?\s*"
+    rf"(?P<number>{_NUMBER_PATTERN})(?:\s+|-)?"
+    rf"(?P<scale>{_KOREAN_SCALE_PATTERN}|{_ENGLISH_SCALE_PATTERN})?(?:\s+|-)?"
     rf"(?P<unit>{_UNIT_PATTERN})?",
     re.IGNORECASE,
 )
