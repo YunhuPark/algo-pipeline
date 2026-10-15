@@ -16,7 +16,7 @@
 | S3-position | block | 영상 없는 카드 본문 패널 `TEXT_BODY_TOP`, 영상 카드 `BODY_TOP`(영상 56% 바로 아래) | `design_renderer`, `tests/test_body_grid.py` |
 | S4-video-evidence | block | 영상 카드는 자막 검증·움직임 확인·채널명·영상 파일 모두 있음 | `youtube_fetcher.find_verified_video_for_slide`, `pipeline` |
 | S5-no-unverified-media | block | 검증 기록 없는 영상(스톡 포함)은 금지, 없으면 문장 카드 | `STOCK_VIDEO_FALLBACK` 기본 off, 자막 없는 영상 거부 |
-| S6-cover-figure | warn | 카드에 검증된 숫자가 있으면 표지 제목에 단위 붙은 숫자 | `script_assembler._lead_figure_phrase` |
+| S6-cover-figure | warn | 표지 제목의 숫자는 대상이 붙은 구절("100만 대 이상의 로봇")이어야 하고 "80%"처럼 숫자만 있으면 안 됨 | `script_assembler.has_complete_figure`, `_lead_figure_phrase` |
 | S7-caption | block | 온전한 첫 줄 + 출처 줄 | `design_renderer._generate_caption`, `caption_guard`, `preview_audit` |
 | S8-stat-language | warn | 수치 상자 표기는 본문과 같은 언어 | `script_assembler._localized_stat` |
 | S9-background | warn | 본문 카드 배경 평균 밝기 ≤ 125/255 | `design_renderer._apply_background` |

@@ -43,7 +43,7 @@ RULES: tuple[Rule, ...] = (
     Rule("S3-position", "block", "영상 없는 카드의 본문 패널은 모두 같은 줄, 영상 카드의 패널은 영상 바로 아래에서 시작한다"),
     Rule("S4-video-evidence", "block", "영상 카드는 자막 검증과 움직임 확인 기록, 채널명, 영상 파일이 모두 있다"),
     Rule("S5-no-unverified-media", "block", "검증 기록이 없는 영상(스톡 영상 포함)은 카드에 들어가지 않는다 — 없으면 문장 카드"),
-    Rule("S6-cover-figure", "warn", "카드에 검증된 숫자가 있으면 표지 제목에 단위가 붙은 숫자가 들어간다"),
+    Rule("S6-cover-figure", "warn", "표지 제목에 숫자가 있으면 대상이 붙은 구절이어야 한다(숫자만 있는 제목 금지)"),
     Rule("S7-caption", "block", "캡션은 온전한 첫 줄로 시작하고 출처 줄을 포함한다"),
     Rule("S8-stat-language", "warn", "수치 상자의 표기는 본문과 같은 언어(한국어 카드에 영어 'million' 금지)"),
     Rule("S9-background", "warn", "본문 카드 배경은 글자가 읽힐 만큼 어둡다(평균 밝기 상한)"),
@@ -126,15 +126,13 @@ def check_output(out_dir: Path) -> list[Violation]:
             add("S5-no-unverified-media", f"카드 {n}: 검증 기록 없는 영상(스톡 등)이 들어 있습니다")
 
     # ── S6 cover figure ────────────────────────────────
-    from src.qa.script_assembler import _FIGURE_PHRASE_RE
+    from src.qa.script_assembler import has_complete_figure
 
     cover = next((s for s in slides if s.get("slide_type") == "cover"), None)
     if cover is not None:
-        body_has_figure = any(
-            _FIGURE_PHRASE_RE.search(s.get("body", "")) for s in slides if s.get("slide_type") == "content"
-        )
-        if body_has_figure and not _FIGURE_PHRASE_RE.search(cover.get("title", "")):
-            add("S6-cover-figure", f"표지 제목 '{cover.get('title')}'에 단위가 붙은 숫자가 없습니다")
+        title = cover.get("title", "")
+        if re.search(r"\d", title) and not has_complete_figure(title):
+            add("S6-cover-figure", f"표지 제목 '{title}'은 숫자만 있거나 무슨 숫자인지 알 수 없습니다")
 
     # ── S7 caption ─────────────────────────────────────
     caption_path = out_dir / "caption.txt"
