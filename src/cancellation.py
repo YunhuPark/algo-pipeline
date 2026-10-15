@@ -21,6 +21,15 @@ class GenerationCancelled(BaseException):
     """Raised inside a generation when the operator asked it to stop."""
 
 
+class RunBudgetExceeded(GenerationCancelled):
+    """Raised when one generation has already spent more than MAX_RUN_COST_USD.
+
+    A weak article (a shopping deal full of prices and percentages) can fail the number and
+    editorial checks over and over, and every retry is a paid call. One such run cost $0.69.
+    This stops the spending; the call that was already in flight is still billed.
+    """
+
+
 _requested = threading.Event()
 
 

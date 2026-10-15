@@ -256,8 +256,10 @@ class ProviderAwareChatOpenAI(_OriginalChatOpenAI):
     def _generate(self, messages, stop=None, run_manager=None, **kwargs):
         # 중지 요청이 있으면 비용이 드는 호출을 하기 전에 멈춘다.
         from src.cancellation import raise_if_requested
+        from src.usage_tracker import check_run_budget
 
         raise_if_requested()
+        check_run_budget()
         if _primary_likely_down():
             fallback = self._fallback_model()
             if fallback is not None:
@@ -316,8 +318,10 @@ class ProviderAwareChatOpenAI(_OriginalChatOpenAI):
 
     async def _agenerate(self, messages, stop=None, run_manager=None, **kwargs):
         from src.cancellation import raise_if_requested
+        from src.usage_tracker import check_run_budget
 
         raise_if_requested()
+        check_run_budget()
         if _primary_likely_down():
             fallback = self._fallback_model()
             if fallback is not None:

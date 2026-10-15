@@ -272,6 +272,43 @@ def record_retry(stage: str, error_code: str, detail: str = "", attempt: int | N
         pass
 
 
+DEFAULT_MAX_RUN_COST_USD = 0.35
+
+
+def max_run_cost() -> float:
+    """Per-generation spending cap in USD (MAX_RUN_COST_USD; 0 or negative disables it)."""
+
+    raw = os.getenv("MAX_RUN_COST_USD", "").strip()
+    try:
+        return float(raw) if raw else DEFAULT_MAX_RUN_COST_USD
+    except ValueError:
+        return DEFAULT_MAX_RUN_COST_USD
+
+
+def current_run_spend() -> float:
+    """Priced spend so far for the run that is currently active (0 when there is none)."""
+
+    kind, run_id = _current_scope()
+    if kind != "generation" or not run_id:
+        return 0.0
+    return float(run_totals(run_id)["priced_cost_usd"] or 0.0)
+
+
+def check_run_budget() -> None:
+    """Raise RunBudgetExceeded before a paid call if this generation is over its cap."""
+
+    limit = max_run_cost()
+    if limit <= 0 or not tracking_enabled():
+        return
+    spent = current_run_spend()
+    if spent > limit:
+        from src.cancellation import RunBudgetExceeded
+
+        raise RunBudgetExceeded(
+            f"이번 생성에 ${spent:.2f}를 써서 상한(${limit:.2f})을 넘어 중단합니다"
+        )
+
+
 def run_totals(run_id: str) -> dict[str, Any]:
     """Aggregate one run: priced cost, tokens, and how many calls had no price.
 
