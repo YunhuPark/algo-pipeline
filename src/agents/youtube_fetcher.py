@@ -1037,9 +1037,17 @@ def find_verified_video_for_slide(
     3. 없으면 (None, 0)
     """
     try:
+        import os as _os
+
         from langchain_openai import ChatOpenAI
         from src.config import OPENAI_API_KEY
         llm = ChatOpenAI(model="gpt-4o-mini", temperature=0, api_key=OPENAI_API_KEY)
+        # 자막이 슬라이드 내용과 정말 맞는지 판정하는 호출은 더 정확한 모델로 한다. 저렴한 모델은
+        # "맥킨지 + 시뮬레이션"이라는 단어만 겹쳐도 맥킨지 입사 시험 게임 영상을 AI 면접 카드에 붙였다.
+        # 판정은 후보 몇 개에만 부르므로 비용 증가는 호출당 1센트 안팎이다.
+        judge_llm = ChatOpenAI(
+            model=_os.getenv("VIDEO_JUDGE_MODEL", "gpt-4o"), temperature=0, api_key=OPENAI_API_KEY
+        )
     except Exception as e:
         print(f"  [YouTubeFetcher] LLM 초기화 실패: {e}")
         return None, 0
@@ -1171,13 +1179,16 @@ def find_verified_video_for_slide(
             f"5. 인트로/광고/자기소개 구간 제외\n"
             f"6. 슬라이드가 한국어라도 영어 자막에서 동일 의미를 찾으세요\n"
             f"7. 투자 권유·종목/코인 홍보·\"지금 사라\" 식의 선동, 상품 판매·광고가 주된 영상은 "
-            f"주제가 겹쳐도 match=false (뉴스 카드에 붙이기에 신뢰를 해친다)\n\n"
+            f"주제가 겹쳐도 match=false (뉴스 카드에 붙이기에 신뢰를 해친다)\n"
+            f"8. 슬라이드가 말하는 구체적인 대상(예: 'AI 모의 클라이언트와의 면접 시뮬레이션')이 영상의 "
+            f"주제여야 한다. 같은 회사·분야의 다른 주제(예: 입사 시험 게임 풀이, 일반 회사 소개)는 "
+            f"단어가 겹쳐도 match=false\n\n"
             f"JSON만 출력 (다른 텍스트 금지):\n"
             f"{{\"match\": true/false, \"start_seconds\": 관련내용 첫 등장 초(정수, 없으면 0), "
             f"\"reason\": \"한 줄 근거\"}}"
         )
         try:
-            result = llm.invoke(prompt)
+            result = judge_llm.invoke(prompt)
             raw = re.sub(r"```[a-z]*\n?", "", result.content.strip()).strip("`").strip()
             # JSON 블록만 추출
             m = re.search(r'\{.*\}', raw, re.DOTALL)
