@@ -1401,6 +1401,21 @@ def _safe_caption(script: CardNewsScript, handle: str, hashtag_str: str) -> str:
     return "\n".join(lines)
 
 
+def _invoke_with_retry(llm, prompt: str, tries: int = 3):
+    """일시적인 네트워크 오류("Connection error.")는 몇 번 다시 시도한다. 중지 요청 등
+    BaseException은 그대로 통과한다."""
+
+    import time as _time
+
+    for attempt in range(tries):
+        try:
+            return llm.invoke(prompt)
+        except Exception:
+            if attempt == tries - 1:
+                raise
+            _time.sleep(2 * (attempt + 1))
+
+
 def _generate_caption(script: CardNewsScript, handle: str) -> str:
     """GPT-4o-mini로 카드 내용 기반 인스타그램 캡션 동적 생성 — 사람이 쓴 것처럼"""
     slides_summary = "\n".join(
@@ -1449,7 +1464,7 @@ def _generate_caption(script: CardNewsScript, handle: str) -> str:
         ]
         attempt_prompt = prompt
         for attempt in range(2):
-            body = llm.invoke(attempt_prompt).content.strip()
+            body = _invoke_with_retry(llm, attempt_prompt).content.strip()
             bad = (
                 unsupported_figures(body, support)
                 + unsupported_hype(body, support)
@@ -1469,12 +1484,10 @@ def _generate_caption(script: CardNewsScript, handle: str) -> str:
             )
         return _safe_caption(script, handle, hashtag_str)
     except Exception as e:
-        print(f"  [Renderer] AI 캡션 생성 실패({e}), 기본 캡션 사용")
-        lines = [f"⚡ {script.hook}", ""]
-        for s in [x for x in script.slides if x.slide_type == "content"]:
-            lines.append(f"· {s.title}: {s.body.split(chr(10))[0][:60]}")
-        lines += ["", "저장해두고 나중에 써먹어요 💾", "", handle, "", hashtag_str]
-        return "\n".join(lines)
+        # 일시적인 연결 오류는 위에서 이미 재시도했다. 그래도 실패하면 카드 제목만으로 만든
+        # 안전한 캡션을 쓴다(예전에는 본문 문장을 통째로 붙여 인스타 캡션으로는 너무 길었다).
+        print(f"  [Renderer] AI 캡션 생성 실패({e}), 안전한 기본 캡션 사용")
+        return _safe_caption(script, handle, hashtag_str)
 
 
 # ── 메인 ──────────────────────────────────────────────────
