@@ -18,6 +18,11 @@ from urllib.parse import urlsplit
 
 # Registered domain -> display name. Anything else falls back to the domain.
 _OUTLETS: dict[str, str] = {
+    "openai.com": "OpenAI",
+    "deepmind.google": "Google DeepMind",
+    "the-decoder.com": "The Decoder",
+    "marktechpost.com": "MarkTechPost",
+    "aitimes.com": "AI타임스",
     "techcrunch.com": "TechCrunch",
     "theverge.com": "The Verge",
     "wired.com": "WIRED",

@@ -322,10 +322,23 @@ def _fill_from_news(count: int) -> list[int]:
             ids.append(row_id)
             print(f"  [ContentQueue] 뉴스 큐 추가: {topic}")
         except Exception as e:
+            from src.agents.news_collector import NoRelevantNews
+
+            if isinstance(e, NoRelevantNews):
+                # 같은 풀에서 다시 골라도 같은 결과이므로 더 시도하지 않고, 사유를 그대로 남긴다.
+                print(f"  [ContentQueue] {e}")
+                skipped.append(str(e))
+                break
             print(f"  [ContentQueue] 뉴스 수집 실패 (시도 {i+1}): {e}")
             skipped.append(f"수집 실패: {str(e)[:60]}")
 
     LAST_COLLECTION_REPORT["added"] = len(ids)
+    try:
+        from src.agents.news_collector import LAST_POOL_STATS
+
+        LAST_COLLECTION_REPORT["pool"] = dict(LAST_POOL_STATS)
+    except Exception:
+        pass
     _log_collection(count, len(ids), skipped)
     return ids
 

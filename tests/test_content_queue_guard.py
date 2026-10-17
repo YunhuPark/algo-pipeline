@@ -998,3 +998,22 @@ def test_collection_reports_the_real_count_and_does_not_pad_with_extra_picks(que
     report = content_queue.LAST_COLLECTION_REPORT
     assert report["requested"] == 3 and report["added"] == 2
     assert any("최신 기사가 아님" in reason for reason in report["skipped"])
+
+
+def test_no_relevant_news_stops_collection_and_is_reported_honestly(queue_db):
+    """When today has no AI/AI-adjacent article, nothing is padded in and the reason is reported."""
+    from src.agents.news_collector import NoRelevantNews
+
+    calls = []
+
+    def fake_collect(exclude_urls=frozenset()):
+        calls.append(1)
+        raise NoRelevantNews("AI·AI 인접 기사가 없습니다 (수집 20건 중 AI 0, AI 인접 0, 그 외 20, 수치 부족 0)")
+
+    with patch.object(content_queue, "_collect_news", side_effect=fake_collect):
+        ids = content_queue._fill_from_news(3)
+
+    assert ids == [] and len(calls) == 1          # no point retrying the same empty pool
+    report = content_queue.LAST_COLLECTION_REPORT
+    assert report["requested"] == 3 and report["added"] == 0
+    assert "AI·AI 인접 기사가 없습니다" in report["skipped"][0]
