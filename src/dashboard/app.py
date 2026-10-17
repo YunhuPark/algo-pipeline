@@ -1363,9 +1363,15 @@ def queue_retry(qid: int):
 def queue_generate():
     count = int(request.form.get("count", 3))
     try:
+        from src.agents import content_queue
         from src.agents.content_queue import bulk_generate
-        bulk_generate(count=count, auto_news=True)
-        return redirect(url_for("queue_page", msg=f"{count}개 자동 추가 완료"))
+        ids = bulk_generate(count=count, auto_news=True)
+        # 실제로 들어온 개수와 제외 사유를 그대로 보여준다("3개 완료"라고만 하면 2개만 들어와도 모른다).
+        skipped = content_queue.LAST_COLLECTION_REPORT.get("skipped", [])
+        message = f"{len(ids)}개 추가 (요청 {count}개)"
+        if len(ids) < count and skipped:
+            message += " — 제외: " + "; ".join(skipped[:3])
+        return redirect(url_for("queue_page", msg=message))
     except Exception as e:
         return redirect(url_for("queue_page", err=str(e)))
 

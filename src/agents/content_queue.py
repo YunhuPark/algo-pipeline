@@ -213,9 +213,21 @@ def bulk_generate(
     return ids
 
 
+# 마지막 수집의 결과 보고. 화면 메시지가 "3개 추가 완료"라고만 하면 실제로는 2개만 들어와도
+# 알 수 없으므로, 몇 개를 요청해 몇 개가 들어왔고 왜 제외됐는지를 남긴다.
+LAST_COLLECTION_REPORT: dict = {"requested": 0, "added": 0, "skipped": []}
+
+
 def _fill_from_news(count: int) -> list[int]:
-    """뉴스 수집을 count번 반복해 큐에 저장."""
+    """뉴스 수집을 반복해 큐에 count개를 채운다.
+
+    한 번의 시도는 기사 하나를 고르고, 최신성·적합성·출처 검사를 통과해야 큐에 들어간다. 검사에
+    걸린 시도는 개수를 채우지 못하므로, 요청 개수의 2배까지 더 시도한다(그래도 모자라면 모자란 채로
+    끝내고 이유를 LAST_COLLECTION_REPORT와 logs/collection.log에 남긴다).
+    """
     ids: list[int] = []
+    skipped: list[str] = []
+    LAST_COLLECTION_REPORT.update(requested=count, added=0, skipped=skipped)
     seen_topics: set[str] = set()
     # 이미 큐에 있는 기사 + 이번 일괄 수집에서 방금 고른 기사를 계속 누적해
     # 다음 반복에서 제외한다 — 안 그러면 "자동 수집 시작"을 여러 번 눌러도
@@ -223,9 +235,13 @@ def _fill_from_news(count: int) -> list[int]:
     # 다시 고르게 된다.
     excluded_urls: set[str] = set(_queued_source_urls())
 
-    for i in range(count):
+    attempts = 0
+    max_attempts = max(count, 1) * 2
+    while len(ids) < count and attempts < max_attempts:
+        i = attempts
+        attempts += 1
         try:
-            print(f"  [ContentQueue] 뉴스 수집 중 ({i+1}/{count})...")
+            print(f"  [ContentQueue] 뉴스 수집 중 (시도 {i+1}, 목표 {len(ids)}/{count})...")
             news = _collect_news(exclude_urls=frozenset(excluded_urls))
 
             # A selected headline without a real source cannot become
@@ -234,6 +250,7 @@ def _fill_from_news(count: int) -> list[int]:
             selected_item = getattr(news, "selected_item", None)
             if selected_item is None:
                 print("  [ContentQueue] 검증 가능한 뉴스 출처 없음 — 큐 추가 생략")
+                skipped.append("검증 가능한 출처 없음")
                 continue
 
             excluded_urls.add(selected_item.url)
@@ -247,6 +264,7 @@ def _fill_from_news(count: int) -> list[int]:
                     "  [ContentQueue] 주제-출처 불일치 감지, 큐 추가 생략: "
                     f"'{news.topic}' vs '{selected_item.title}'"
                 )
+                skipped.append(f"주제와 기사가 맞지 않음: {news.topic[:30]}")
                 continue
 
             # 최신 기사만 쓴다. 발행일은 피드 값을, 없으면 기사 페이지의 메타데이터를
@@ -260,6 +278,7 @@ def _fill_from_news(count: int) -> list[int]:
                     f"  [ContentQueue] 최신 기사가 아님, 큐 추가 생략 "
                     f"({freshness.code}): '{news.topic}' — {freshness.detail}"
                 )
+                skipped.append(f"최신 기사가 아님: {news.topic[:30]} ({freshness.detail})")
                 continue
 
             # 생성 단계에서 아홉 번 재시도하고도 반드시 실패하는 항목(주제가
@@ -273,6 +292,7 @@ def _fill_from_news(count: int) -> list[int]:
                     f"  [ContentQueue] 생성이 불가능한 항목, 큐 추가 생략 "
                     f"({suitability.code}): '{news.topic}' — {suitability.detail}"
                 )
+                skipped.append(f"생성이 어려운 기사: {news.topic[:30]} ({suitability.detail})")
                 continue
 
             # 중복 주제 회피
@@ -301,9 +321,27 @@ def _fill_from_news(count: int) -> list[int]:
             ids.append(row_id)
             print(f"  [ContentQueue] 뉴스 큐 추가: {topic}")
         except Exception as e:
-            print(f"  [ContentQueue] 뉴스 수집 실패 ({i+1}/{count}): {e}")
+            print(f"  [ContentQueue] 뉴스 수집 실패 (시도 {i+1}): {e}")
+            skipped.append(f"수집 실패: {str(e)[:60]}")
 
+    LAST_COLLECTION_REPORT["added"] = len(ids)
+    _log_collection(count, len(ids), skipped)
     return ids
+
+
+def _log_collection(requested: int, added: int, skipped: list[str]) -> None:
+    """수집 결과를 파일에도 남긴다(대시보드 요청 안에서 돌아 화면 로그가 남지 않으므로)."""
+
+    try:
+        from datetime import datetime
+
+        log_path = Path(__file__).resolve().parents[2] / "logs" / "collection.log"
+        with open(log_path, "a", encoding="utf-8") as fh:
+            fh.write(f"[{datetime.now():%Y-%m-%d %H:%M:%S}] 요청 {requested}개 → {added}개 추가\n")
+            for reason in skipped:
+                fh.write(f"    제외: {reason}\n")
+    except OSError:
+        pass
 
 
 def publish_next(
