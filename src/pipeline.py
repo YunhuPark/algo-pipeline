@@ -113,6 +113,20 @@ def run_pipeline(
         if res is not None:
             return replace(res, retry_count=retry)
 
+        if notes_state.get("give_up_source"):
+            notes_state["give_up_source"] = False
+            if trend_context or source_lineage is not None:
+                print("  ⚠️ 편집 점수 미달이 반복되어 이 기사는 카드로 만들기 어렵다고 판단하고 중단합니다.")
+                break
+            failed_title = notes_state.get("last_article_title", "")
+            if failed_title:
+                ignored_titles.add(failed_title)
+                print(f"  → 편집 점수 미달로 '{failed_title[:40]}' 포기, 다음 기사 시도")
+            notes_state["last"] = ""
+            notes_state["last_article_title"] = ""
+            fact_check_retries = 0
+            continue
+
         # 기사 교체 없이 재시도 = 팩트체크 실패 (같은 기사 재시도)
         if ignored_titles == prev_ignored:
             fact_check_retries += 1
@@ -377,6 +391,11 @@ def _run_once(
         print(f"  → {len(script.slides)}장 생성 완료")
     except QualityGateError as e:
         print(f"  ⚠️ Quality Gate 실패 (생성 중): {e.error_code} - {e}")
+        from src.agents.content_creator import is_editorial_score_failure
+
+        if notes_state is not None and is_editorial_score_failure(e):
+            # 이미 한 번 다시 써도 점수가 안 오른 기사다. 같은 기사로 바깥 재시도를 반복하지 않는다.
+            notes_state["give_up_source"] = True
         # run_pipeline()의 바깥 재시도 루프는 이 함수가 None을 돌려줘야만
         # "기사 교체 없이 재시도 = 팩트체크 실패" 분기(같은 기사에 피드백을
         # 실어 재시도하고, MAX_FACT_RETRIES를 넘기면 이 기사를 블랙리스트에
