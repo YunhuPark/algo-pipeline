@@ -282,11 +282,12 @@ def _fill_from_news(count: int) -> list[int]:
                 skipped.append(f"최신 기사가 아님: {news.topic[:30]} ({freshness.detail})")
                 continue
 
-            # 생성 단계에서 아홉 번 재시도하고도 반드시 실패하는 항목(주제가
-            # 너무 막연하거나, 원문이 답을 다음 편으로 미루는 경우)은 큐에
-            # 쌓기 전에 거른다.
+            # 생성 단계에서 아홉 번 재시도하고도 반드시 실패하는 항목(주제가 너무 막연하거나, 원문이
+            # 답을 다음 편으로 미루는 경우)은 큐에 쌓기 전에 거른다. 원문 길이는 RSS 요약(300자 안팎)이
+            # 아니라 실제로 생성에 쓰이는 전체 기사 본문으로 판단해야 한다 — 요약이 짧은 매체(AI타임스,
+            # The Decoder 등)의 정상 기사가 "원문이 300자로 너무 짧다"며 전부 탈락하던 문제가 있었다.
             suitability = check_source_suitability(
-                news.topic, selected_item.summary, selected_item.title
+                news.topic, selected_item.summary, selected_item.title, check_length=False
             )
             if not suitability.ok:
                 print(
@@ -307,12 +308,30 @@ def _fill_from_news(count: int) -> list[int]:
             from src.agents import trend_analyzer
             from src.services.generation_service import build_queue_metadata
 
-            report = trend_analyzer.build_locked_source_report(
-                topic,
-                title=selected_item.title,
-                url=selected_item.url,
-                content=selected_item.summary,
-            )
+            try:
+                report = trend_analyzer.build_locked_source_report(
+                    topic,
+                    title=selected_item.title,
+                    url=selected_item.url,
+                    content=selected_item.summary,
+                )
+            except ValueError as exc:
+                print(f"  [ContentQueue] 원문 본문을 확보하지 못해 큐 추가 생략: '{topic}' ({exc})")
+                skipped.append(f"원문을 가져오지 못함: {news.topic[:30]} ({exc})")
+                continue
+            results = getattr(report, "results", None) or []
+            first_content = getattr(results[0], "content", None) if results else None
+            # 보강된 전체 본문이 있으면 그것으로, 없으면 피드 요약으로 판단한다.
+            full_text = first_content if isinstance(first_content, str) else selected_item.summary
+            length_check = check_source_suitability(topic, full_text, selected_item.title)
+            if not length_check.ok:
+                print(
+                    f"  [ContentQueue] 생성이 불가능한 항목, 큐 추가 생략 "
+                    f"({length_check.code}): '{topic}' — {length_check.detail}"
+                )
+                skipped.append(f"생성이 어려운 기사: {news.topic[:30]} ({length_check.detail})")
+                continue
+
             metadata = build_queue_metadata(topic, report)
             _stamp_published(metadata, published)
             row_id = enqueue_v2(

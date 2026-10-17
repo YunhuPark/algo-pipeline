@@ -107,3 +107,36 @@ def test_collection_skips_unsuitable_items_and_keeps_good_ones(monkeypatch):
 
     assert enqueued == ["Oura의 22억 달러 IPO"]
     assert ids == [1]
+
+
+def test_length_is_judged_on_the_full_article_not_the_short_feed_summary(queue_db_for_suitability=None):
+    """Regression: AI타임스/The Decoder feeds carry ~300-char summaries, so every article was rejected
+    with "원문이 300자로 너무 짧습니다" even though the full article (fetched for generation) is long."""
+    from types import SimpleNamespace
+    from unittest.mock import patch
+
+    from src.agents import content_queue
+
+    short_summary = "AI 모델 발표 기사 요약입니다. " * 10        # ~170 chars, too short on its own
+    full_article = "아마존은 로봇 100만 대를 운영합니다. " * 60    # long enough once fetched
+
+    news = SimpleNamespace(
+        topic="Google 구글의 Gemini 4 공개",
+        selected_item=SimpleNamespace(
+            title="Google's Gemini 4", url="https://example.com/g4", summary=short_summary,
+            published=None,
+        ),
+    )
+    report = SimpleNamespace(results=[SimpleNamespace(content=full_article)])
+
+    with patch.object(content_queue, "_collect_news", return_value=news), \
+         patch.object(content_queue, "resolve_published", return_value=None), \
+         patch.object(content_queue, "check_freshness", return_value=SimpleNamespace(ok=True)), \
+         patch("src.qa.topic_source_guard.topic_matches_source", return_value=True), \
+         patch("src.agents.trend_analyzer.build_locked_source_report", return_value=report), \
+         patch("src.services.generation_service.build_queue_metadata", return_value=SimpleNamespace()), \
+         patch.object(content_queue, "_stamp_published"), \
+         patch.object(content_queue, "enqueue_v2", return_value=77):
+        ids = content_queue._fill_from_news(1)
+
+    assert ids == [77]
