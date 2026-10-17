@@ -126,8 +126,8 @@ def test_fill_from_news_excludes_already_queued_and_newly_picked_urls(queue_db):
          ):
         content_queue._fill_from_news(2)
 
-    # 선택된 기사가 모두 최신성 검사에서 빠지면 개수를 못 채우므로 요청 개수의 2배(=4번)까지 시도한다.
-    assert len(calls) == 4
+    # 요청한 개수(2번)만 시도한다 — 개수를 채우려고 더 끌어오지 않는다.
+    assert len(calls) == 2
     # 첫 호출: 이미 큐에 있던 기사 URL이 먼저 제외돼야 한다
     assert "https://example.com/article" in calls[0]
     # 두 번째 호출: 첫 호출에서 방금 고른 기사도 추가로 제외돼야 한다
@@ -968,9 +968,9 @@ def test_human_rejection_marks_queue_skipped_without_remote_attempt(queue_db):
     assert status == "skipped"
 
 
-def test_collection_retries_a_rejected_pick_and_reports_what_it_skipped(queue_db):
-    """One of three picks failing a check used to leave the queue with 2 items while the screen
-    said "3개 추가 완료". It now tries again (up to twice the request) and reports the truth."""
+def test_collection_reports_the_real_count_and_does_not_pad_with_extra_picks(queue_db):
+    """Regression: the screen said "3개 추가 완료" while only 2 were queued. The report must say what
+    really happened, and a rejected pick must not be replaced by pulling in more articles."""
     from datetime import datetime
 
     calls = []
@@ -987,20 +987,14 @@ def test_collection_retries_a_rejected_pick_and_reports_what_it_skipped(queue_db
         )
 
     def fake_freshness(published, **kw):
-        stale = len(calls) == 2          # the 2nd pick is judged stale; every other pick is fresh
+        stale = len(calls) == 2          # the 2nd pick is judged stale; the others are fresh
         return SimpleNamespace(ok=not stale, code="SOURCE_TOO_OLD", detail="3일 전 기사")
 
-    with patch.object(content_queue, "_collect_news", side_effect=fake_collect), \
-         patch.object(content_queue, "check_freshness", side_effect=fake_freshness), \
-         patch.object(content_queue, "check_source_suitability", return_value=SimpleNamespace(ok=True)), \
-         patch("src.qa.topic_source_guard.topic_matches_source", return_value=True), \
-         patch("src.agents.trend_analyzer.build_locked_source_report"), \
-         patch("src.services.generation_service.build_queue_metadata", side_effect=lambda *a, **k: metadata()), \
-         patch.object(content_queue, "enqueue_v2", side_effect=iter([101, 102, 103])):
+    with patch.object(content_queue, "_collect_news", side_effect=fake_collect),          patch.object(content_queue, "check_freshness", side_effect=fake_freshness),          patch.object(content_queue, "check_source_suitability", return_value=SimpleNamespace(ok=True)),          patch("src.qa.topic_source_guard.topic_matches_source", return_value=True),          patch("src.agents.trend_analyzer.build_locked_source_report"),          patch("src.services.generation_service.build_queue_metadata", side_effect=lambda *a, **k: metadata()),          patch.object(content_queue, "enqueue_v2", side_effect=iter([101, 102, 103])):
         ids = content_queue._fill_from_news(3)
 
-    assert ids == [101, 102, 103]          # reached the requested 3 despite one rejection
-    assert len(calls) == 4
+    assert ids == [101, 102]               # 3 requested, 2 acceptable -> exactly 2, no padding
+    assert len(calls) == 3
     report = content_queue.LAST_COLLECTION_REPORT
-    assert report["requested"] == 3 and report["added"] == 3
+    assert report["requested"] == 3 and report["added"] == 2
     assert any("최신 기사가 아님" in reason for reason in report["skipped"])
