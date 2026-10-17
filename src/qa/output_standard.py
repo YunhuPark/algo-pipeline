@@ -126,12 +126,14 @@ def check_output(out_dir: Path) -> list[Violation]:
             add("S5-no-unverified-media", f"카드 {n}: 검증 기록 없는 영상(스톡 등)이 들어 있습니다")
 
     # ── S6 cover figure ────────────────────────────────
-    from src.qa.script_assembler import has_complete_figure
+    from src.qa.script_assembler import _FIGURE_PHRASE_RE, has_complete_figure
 
     cover = next((s for s in slides if s.get("slide_type") == "cover"), None)
     if cover is not None:
         title = cover.get("title", "")
-        if re.search(r"\d", title) and not has_complete_figure(title):
+        # "G7"·"GPT-5"처럼 숫자가 이름에 들어간 제목은 숫자 구절이 아니다. 단위가 붙은 숫자("80%")가
+        # 대상 없이 있을 때만 경고한다.
+        if _FIGURE_PHRASE_RE.search(title) and not has_complete_figure(title):
             add("S6-cover-figure", f"표지 제목 '{title}'은 숫자만 있거나 무슨 숫자인지 알 수 없습니다")
 
     # ── S7 caption ─────────────────────────────────────
