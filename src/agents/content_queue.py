@@ -219,11 +219,12 @@ LAST_COLLECTION_REPORT: dict = {"requested": 0, "added": 0, "skipped": []}
 
 
 def _fill_from_news(count: int) -> list[int]:
-    """뉴스 수집을 반복해 큐에 count개를 채운다.
+    """뉴스 수집을 count번 시도해 큐에 저장한다.
 
     한 번의 시도는 기사 하나를 고르고, 최신성·적합성·출처 검사를 통과해야 큐에 들어간다. 검사에
-    걸린 시도는 개수를 채우지 못하므로, 요청 개수의 2배까지 더 시도한다(그래도 모자라면 모자란 채로
-    끝내고 이유를 LAST_COLLECTION_REPORT와 logs/collection.log에 남긴다).
+    걸린 시도는 그냥 빠진다 — 개수를 채우려고 기준에 못 미치는 기사를 더 끌어오지 않는다. 오늘 맞는
+    기사가 2개뿐이면 2개만 넣고, 몇 개를 요청해 몇 개가 들어왔는지와 제외 사유를
+    LAST_COLLECTION_REPORT와 logs/collection.log에 있는 그대로 남긴다.
     """
     ids: list[int] = []
     skipped: list[str] = []
@@ -236,7 +237,7 @@ def _fill_from_news(count: int) -> list[int]:
     excluded_urls: set[str] = set(_queued_source_urls())
 
     attempts = 0
-    max_attempts = max(count, 1) * 2
+    max_attempts = max(count, 1)   # 개수를 채우려고 기준에 못 미치는 기사를 더 끌어오지 않는다
     while len(ids) < count and attempts < max_attempts:
         i = attempts
         attempts += 1
