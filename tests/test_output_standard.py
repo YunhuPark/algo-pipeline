@@ -109,3 +109,12 @@ def test_a_bare_figure_cover_title_warns(tmp_path):
     script["slides"][0]["title"] = "80%"
     (folder / "script.json").write_text(json.dumps(script), encoding="utf-8")
     assert [v.rule for v in check_output(folder)] == ["S6-cover-figure"]
+
+
+def test_a_name_with_a_digit_in_the_cover_title_is_not_a_bare_figure(tmp_path):
+    # Regression: "G7, AI 공격 차단" was flagged because "7" looked like a figure.
+    folder = _good_folder(tmp_path)
+    script = json.loads((folder / "script.json").read_text(encoding="utf-8"))
+    script["slides"][0]["title"] = "G7, AI 공격 차단"
+    (folder / "script.json").write_text(json.dumps(script), encoding="utf-8")
+    assert check_output(folder) == []
