@@ -1369,6 +1369,12 @@ def queue_generate():
         # 실제로 들어온 개수와 제외 사유를 그대로 보여준다("3개 완료"라고만 하면 2개만 들어와도 모른다).
         skipped = content_queue.LAST_COLLECTION_REPORT.get("skipped", [])
         message = f"{len(ids)}개 추가 (요청 {count}개)"
+        pool = content_queue.LAST_COLLECTION_REPORT.get("pool") or {}
+        if pool:
+            message += (
+                f" · 오늘 후보: AI {pool.get('ai', 0)}건, AI 인접 {pool.get('adjacent', 0)}건, "
+                f"그 외 제외 {pool.get('other', 0)}건"
+            )
         if len(ids) < count and skipped:
             message += " — 제외: " + "; ".join(skipped[:3])
         return redirect(url_for("queue_page", msg=message))

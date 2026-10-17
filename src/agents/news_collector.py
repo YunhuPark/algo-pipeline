@@ -24,6 +24,15 @@ from src.utils.rss_content import extract_feed_entry_content, looks_like_article
 
 # ── RSS 피드 목록 (한국 + 글로벌 주요 뉴스) ───────────────
 RSS_FEEDS = [
+    # AI 전문 소스(먼저 둔다 — 후보가 많을 때 앞쪽부터 선택 풀에 들어간다)
+    ("OpenAI",            "https://openai.com/news/rss.xml"),
+    ("Google DeepMind",   "https://deepmind.google/blog/rss.xml"),
+    ("The Decoder",       "https://the-decoder.com/feed/"),
+    ("MarkTechPost",      "https://www.marktechpost.com/feed/"),
+    ("AI타임스",           "https://www.aitimes.com/rss/allArticle.xml"),
+    ("TechCrunch AI",     "https://techcrunch.com/category/artificial-intelligence/feed/"),
+    ("The Verge AI",      "https://www.theverge.com/rss/ai-artificial-intelligence/index.xml"),
+    ("Ars Technica AI",   "https://arstechnica.com/ai/feed/"),
     # 한국 뉴스
     ("연합뉴스 IT",       "https://www.yna.co.kr/rss/it.xml"),
     ("ZDNet Korea",       "https://zdnet.co.kr/rss/"),
@@ -207,6 +216,7 @@ _FACT_TOKEN_RE = re.compile(
     re.IGNORECASE,
 )
 
+_MAX_CANDIDATES = 60      # 선택 풀에 넣는 최대 기사 수(AI 소스를 늘려서 40에서 올렸다)
 _MIN_FACTS = 2            # 이 정도는 있어야 카드 4장에 쓸 수치가 나온다
 _MIN_GROUNDED_POOL = 5    # 후보를 좁혀도 선택지가 남을 만큼은 있어야 한다
 _MIN_ON_PERSONA_POOL = 2  # AI·IT·비즈니스 후보는 이 정도만 있어도 우선한다
@@ -299,6 +309,34 @@ _OPINION_STATEMENT_RE = re.compile(
 
 def _is_opinion_statement_title(title: str) -> bool:
     return bool(_OPINION_STATEMENT_RE.search(title or ""))
+
+
+# AI 인접: AI 자체는 아니지만 AI 산업과 직접 맞닿은 주제(칩·클라우드·로봇·자동화·에이전트).
+# 쇼핑·스마트폰 기능·선거·예측 시장 같은 일반 기술/소비자 뉴스는 여기에 해당하지 않는다.
+_AI_ADJACENT_RE = re.compile(
+    r"반도체|semiconductor|(?<![A-Za-z])chips?(?![A-Za-z])|(?<![A-Za-z])GPUs?(?![A-Za-z])|"
+    r"데이터\s*센터|data\s*centers?|클라우드|cloud|로봇|robot|자동화|automation|에이전트|"
+    r"(?<![A-Za-z])agents?(?![A-Za-z])|자율주행|autonomous|슈퍼컴퓨터|supercomputer|알고리즘|algorithm",
+    re.IGNORECASE,
+)
+
+
+class NoRelevantNews(RuntimeError):
+    """오늘 수집분에 AI·AI 인접 기사(수치 포함)가 없다. 개수를 채우려고 다른 주제를 끌어오지 않는다."""
+
+
+# 마지막 후보 풀의 단계별 개수(대시보드 안내용): AI 직접 / AI 인접 / 그 외(제외) / 수치 부족으로 탈락
+LAST_POOL_STATS: dict = {"ai": 0, "adjacent": 0, "other": 0, "no_facts": 0}
+
+
+def _topic_tier(item: NewsItem) -> int:
+    """1 = AI 직접, 2 = AI 인접, 3 = 그 외(제외). 모든 소스에 똑같이 적용한다 — RSS 출신이라고 통과시키지 않는다."""
+    text = f"{item.title} {item.summary[:200]}"
+    if _AI_SPECIFIC_RE.search(text):
+        return 1
+    if _AI_ADJACENT_RE.search(text):
+        return 2
+    return 3
 
 
 def _is_ai_specific_candidate(item: NewsItem) -> bool:
@@ -397,7 +435,7 @@ _HUMAN = """
 
 def _select_topic_with_gpt(items: list[NewsItem]) -> _SelectedTopic:
     """주제를 고르고, selected_index를 items 기준 1-based로 맞춰 돌려준다."""
-    candidates = list(enumerate(items[:40]))   # (원본 인덱스, 기사)
+    candidates = list(enumerate(items[:_MAX_CANDIDATES]))   # (원본 인덱스, 기사)
     # 해외 RSS(TechCrunch 등)는 본문 대신 한두 문장짜리 부제만 오는 경우가
     # 많아, 정작 핵심 수치는 제목에만 있고 summary는 0건으로 잡히는 일이
     # 잦았다(예: "$18 million"가 제목에만 있음) — 제목도 함께 스캔한다.
@@ -405,41 +443,36 @@ def _select_topic_with_gpt(items: list[NewsItem]) -> _SelectedTopic:
         idx: _fact_count(f"{it.title} {it.summary}") for idx, it in candidates
     }
 
-    # 후보 압축 4단계 — 우선순위: (1) AI 특화 + 팩트 충분 → (2) AI·IT·비즈니스
-    # 전체 + 팩트 충분 → (3) 팩트만 충분(카테고리 무관) → (4) 전체. 프롬프트
-    # 지시만으로는 사회 뉴스가 팩트를 아주 많이 담고 있을 때 그쪽으로 넘어가는
-    # 걸 막지 못해, 코드 단계에서 먼저 카테고리로 걸러 GPT에게 애초에 후보로
-    # 보여주지 않는다.
-    grounded = [(idx, it) for idx, it in candidates if fact_counts[idx] >= _MIN_FACTS]
-    ai_grounded = [
-        (idx, it) for idx, it in grounded if _is_ai_specific_candidate(it)
-    ]
-    on_persona_grounded = [
-        (idx, it) for idx, it in grounded if _is_on_persona_candidate(it)
-    ]
+    # 후보 압축 — 이 계정은 AI 계정이다. 단계: (1) AI 직접 (2) AI 인접(칩·클라우드·로봇·자동화) (3) 그 외.
+    # 3단계는 후보로 쓰지 않는다. 예전에는 AI 후보가 부족하면 IT·비즈니스로, 그래도 부족하면 아무
+    # 기사로 범위를 넓혀서 예측 시장·스마트폰 기능·쇼핑 할인이 큐에 들어왔다. 이제는 모자란 날은
+    # 모자란 채로 두고(NoRelevantNews) 오늘 있는 만큼만 정직하게 보여준다.
+    tiers = {idx: _topic_tier(it) for idx, it in candidates}
+    ai_all = [(idx, it) for idx, it in candidates if tiers[idx] == 1]
+    adjacent_all = [(idx, it) for idx, it in candidates if tiers[idx] == 2]
+    ai_grounded = [(idx, it) for idx, it in ai_all if fact_counts[idx] >= _MIN_FACTS]
+    adjacent_grounded = [(idx, it) for idx, it in adjacent_all if fact_counts[idx] >= _MIN_FACTS]
+    LAST_POOL_STATS.update(
+        ai=len(ai_all),
+        adjacent=len(adjacent_all),
+        other=len(candidates) - len(ai_all) - len(adjacent_all),
+        no_facts=(len(ai_all) - len(ai_grounded)) + (len(adjacent_all) - len(adjacent_grounded)),
+    )
     if len(ai_grounded) >= _MIN_AI_POOL:
         pool = ai_grounded
         print(
-            f"  [NewsCollector] AI 특화 + 본문 수치 {_MIN_FACTS}개 이상 "
-            f"기사 {len(pool)}건으로 후보 압축 (AI 최우선)"
+            f"  [NewsCollector] AI 직접 기사 {len(pool)}건(본문 수치 {_MIN_FACTS}개 이상)에서 선택 "
+            f"(AI 인접 {len(adjacent_grounded)}건은 보조)"
         )
-    elif len(on_persona_grounded) >= _MIN_ON_PERSONA_POOL:
-        pool = on_persona_grounded
+    elif ai_grounded or adjacent_grounded:
+        pool = ai_grounded + adjacent_grounded
         print(
-            f"  [NewsCollector] AI 후보 부족({len(ai_grounded)}건) → AI·IT·비즈니스 + "
-            f"본문 수치 {_MIN_FACTS}개 이상 기사 {len(pool)}건으로 후보 압축"
-        )
-    elif len(grounded) >= _MIN_GROUNDED_POOL:
-        pool = grounded
-        print(
-            f"  [NewsCollector] 카테고리 부합 후보 부족({len(on_persona_grounded)}건) "
-            f"→ 본문 수치 {_MIN_FACTS}개 이상 기사 {len(grounded)}건에서 선택"
+            f"  [NewsCollector] AI 직접 {len(ai_grounded)}건 + AI 인접 {len(adjacent_grounded)}건에서 선택"
         )
     else:
-        pool = candidates
-        print(
-            f"  [NewsCollector] 수치 있는 기사 {len(grounded)}건뿐 → 전체 "
-            f"{len(candidates)}건에서 선택"
+        raise NoRelevantNews(
+            f"AI·AI 인접 기사가 없습니다 (수집 {len(candidates)}건 중 AI {len(ai_all)}, "
+            f"AI 인접 {len(adjacent_all)}, 그 외 {LAST_POOL_STATS['other']}, 수치 부족 {LAST_POOL_STATS['no_facts']})"
         )
 
     non_roundup_pool = [(idx, it) for idx, it in pool if not _is_roundup_title(it.title)]
@@ -570,11 +603,17 @@ def collect_and_select(exclude_urls: frozenset[str] = frozenset()) -> NewsSelect
     if not all_items:
         raise RuntimeError("수집된 뉴스가 없습니다. 네트워크 연결을 확인하세요.")
 
+    # AI 섹션 피드와 일반 피드는 같은 기사를 중복해서 싣는다 — URL 기준으로 하나만 남긴다.
+    unique: dict[str, NewsItem] = {}
+    for item in all_items:
+        unique.setdefault(item.url, item)
+    all_items = list(unique.values())
+
     all_items = _drop_stale_items(all_items)
 
     print(f"  [NewsCollector] 총 {len(all_items)}개 기사 → GPT-4o 주제 선택 중...")
     selected = _select_topic_with_gpt(all_items)
-    selected_index = max(1, min(selected.selected_index, min(len(all_items), 40)))
+    selected_index = max(1, min(selected.selected_index, min(len(all_items), _MAX_CANDIDATES)))
     selected_item = all_items[selected_index - 1]
     source_locked_topic = _ensure_source_locked_topic(
         selected.topic,
