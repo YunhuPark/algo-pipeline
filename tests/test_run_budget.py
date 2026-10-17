@@ -12,12 +12,12 @@ def _tracking_on(monkeypatch):
     monkeypatch.delenv("MAX_RUN_COST_USD", raising=False)
 
 
-def test_default_cap_is_35_cents(monkeypatch):
-    assert usage_tracker.max_run_cost() == 0.35
+def test_default_cap_is_20_cents(monkeypatch):
+    assert usage_tracker.max_run_cost() == 0.20
     monkeypatch.setenv("MAX_RUN_COST_USD", "0.5")
     assert usage_tracker.max_run_cost() == 0.5
     monkeypatch.setenv("MAX_RUN_COST_USD", "garbage")
-    assert usage_tracker.max_run_cost() == 0.35
+    assert usage_tracker.max_run_cost() == 0.20
 
 
 def test_over_the_cap_stops_new_paid_calls(monkeypatch):
@@ -59,3 +59,16 @@ def test_llm_call_is_refused_before_spending_when_over_budget(monkeypatch):
 
 def test_spend_is_only_counted_for_an_active_generation_run(monkeypatch):
     assert usage_tracker.current_run_spend() == 0.0   # no scope -> nothing to cap
+
+
+def test_score_failures_are_told_apart_from_formatting_rule_failures():
+    from src.agents.content_creator import is_editorial_score_failure
+    from src.qa.deterministic_verifier import QualityGateError
+
+    score = QualityGateError("EDITORIAL_QUALITY_FAILED", "다음 항목이 기준(7.0점) 미달입니다: 후킹력(6.0점)")
+    rule = QualityGateError("EDITORIAL_QUALITY_FAILED", "다음 규칙을 지켜서 다시 작성해주세요: - 슬라이드6 제목이 말줄임표로 끝남")
+    other = QualityGateError("CLAIM_NUMBER_UNSUPPORTED", "숫자 오류")
+
+    assert is_editorial_score_failure(score)
+    assert not is_editorial_score_failure(rule)      # cheap to fix -> keeps its normal retries
+    assert not is_editorial_score_failure(other)

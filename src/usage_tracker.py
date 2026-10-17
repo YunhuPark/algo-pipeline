@@ -272,7 +272,7 @@ def record_retry(stage: str, error_code: str, detail: str = "", attempt: int | N
         pass
 
 
-DEFAULT_MAX_RUN_COST_USD = 0.35
+DEFAULT_MAX_RUN_COST_USD = 0.20   # 정상 생성은 $0.03~0.12 — 안 되는 기사에서 잃는 돈을 줄인다
 
 
 def max_run_cost() -> float:
