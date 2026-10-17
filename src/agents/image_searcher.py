@@ -22,6 +22,16 @@ from src.config import OPENAI_API_KEY, PEXELS_API_KEY, DATA_DIR
 TARGET_W, TARGET_H = 1080, 1350  # Instagram 4:5
 
 
+# ── 배경 스타일 ───────────────────────────────────────────
+# 밝은 배경을 시험해 봤지만 주제와 무관한 화려한 추상 사진이 뽑혀서, 어두운 기술
+# 사진이 더 무난하다는 판단으로 기본을 dark로 되돌렸다. 밝게 쓰려면 BACKGROUND_STYLE=bright.
+
+def _bright_style() -> bool:
+    import os
+
+    return os.getenv("BACKGROUND_STYLE", "dark").strip().lower() == "bright"
+
+
 # ── 쿼리 생성 ─────────────────────────────────────────────
 
 def _generate_pexels_query(topic: str) -> str:
@@ -38,8 +48,13 @@ def _generate_pexels_query(topic: str) -> str:
                     f"Convert this Korean topic to an optimal English Pexels photo search query. "
                     f"Return ONLY the search query (5-8 words), no explanation.\n"
                     f"Topic: '{topic}'\n"
-                    f"Rules: dark/moody/cinematic style preferred, no people if possible, "
-                    f"abstract or technology backgrounds work best for card news overlays."
+                    + (
+                        "Rules: bright, vivid, colorful and clean look (NOT dark or moody), "
+                        if _bright_style()
+                        else "Rules: dark/moody/cinematic style, "
+                    )
+                    + "focused on objects, devices or abstract technology, no people or faces, "
+                    "works as a card news background under bold text."
                 )
             }]
         )
@@ -48,24 +63,24 @@ def _generate_pexels_query(topic: str) -> str:
     except Exception:
         # fallback: 간단한 영문 변환
         fallback_map = {
-            "AI": "artificial intelligence technology futuristic dark",
+            "AI": "artificial intelligence technology futuristic colorful",
             "인공지능": "artificial intelligence neural network abstract",
             "ChatGPT": "chatbot AI robot technology",
             "앱": "mobile app smartphone technology",
-            "개발": "software development code dark screen",
+            "개발": "software development code colorful screen",
             "스타트업": "startup technology modern office",
             "테크": "technology digital future abstract",
             "경제": "economy finance business data",
             "환경": "nature environment sustainability green",
             "건강": "health wellness lifestyle minimal",
-            "보안": "cybersecurity dark digital protection",
+            "보안": "cybersecurity digital protection blue lock",
             "메타버스": "metaverse virtual reality digital world",
             "블록체인": "blockchain cryptocurrency digital abstract",
         }
         for k, v in fallback_map.items():
             if k in topic:
                 return v
-        return f"{topic} technology abstract dark background"
+        return f"{topic} technology abstract bright colorful background"
 
 
 # ── 이미지 처리 ───────────────────────────────────────────
@@ -87,30 +102,51 @@ def _average_brightness(img: Image.Image) -> float:
     return sum(pixels) / len(pixels)
 
 
-def _pick_darkest(photos: list, n: int = 10) -> dict | None:
+def _photo_score(img: Image.Image) -> tuple[float, float, float]:
+    """(점수, 평균밝기, 평균채도). 중간 밝기이면서 색감이 있는 사진일수록 높다.
+
+    예전에는 "가장 어두운 사진"을 골랐다. 글자가 얇고 뒤에 받침이 없던 시절의
+    가독성 대책이었는데, 지금은 굵은 글자·윤곽선·반투명 상자가 가독성을 맡으므로
+    배경이 어두울 이유가 없고 오히려 카드가 칠흑처럼 보이는 원인이었다. 너무
+    어두운 사진과 하얗게 날아간 사진은 모두 감점한다.
     """
-    Pexels 사진 목록에서 가장 어두운 사진 선택 (텍스트 가독성 최적화).
-    각 사진을 다운로드해 밝기 비교 후 최적 선택.
+    import colorsys
+
+    thumb = img.copy().convert("RGB").resize((48, 48), Image.BILINEAR)
+    pixels = list(thumb.getdata())
+    brightness = sum(0.299 * r + 0.587 * g + 0.114 * b for r, g, b in pixels) / len(pixels)
+    saturation = sum(colorsys.rgb_to_hsv(r / 255, g / 255, b / 255)[1] for r, g, b in pixels) / len(pixels)
+    closeness = 1.0 - min(1.0, abs(brightness - 115) / 115)   # 115 근처가 최고점(흰 글자가 묻히지 않는 밝기)
+    return closeness + 0.9 * min(saturation, 0.6), brightness, saturation
+
+
+def _pick_best(photos: list, n: int = 30, bright: bool = False) -> dict | None:
+    """Pexels 후보를 병렬로 내려받아 고른다.
+
+    bright=False(기본)면 평균 밝기가 가장 낮은 사진, True면 _photo_score가 가장 높은 사진.
     """
-    candidates = []
-    for photo in photos[:n]:
-        url = photo["src"]["medium"]  # 빠른 밝기 체크용 저해상도
+    from concurrent.futures import ThreadPoolExecutor
+
+    def _score(photo):
         try:
-            r = httpx.get(url, timeout=10, follow_redirects=True)
-            if r.status_code == 200:
-                img = Image.open(io.BytesIO(r.content)).convert("RGB")
-                brightness = _average_brightness(img)
-                candidates.append((brightness, photo))
+            r = httpx.get(photo["src"]["medium"], timeout=10, follow_redirects=True)
+            if r.status_code != 200:
+                return None
+            img = Image.open(io.BytesIO(r.content)).convert("RGB")
+            score, brightness, saturation = _photo_score(img)
+            return (score if bright else -brightness, brightness, saturation, photo)
         except Exception:
-            continue
+            return None
 
-    if not candidates:
+    with ThreadPoolExecutor(max_workers=6) as pool:
+        scored = [x for x in pool.map(_score, photos[:n]) if x]
+    if not scored:
         return photos[0] if photos else None
-
-    # 밝기 오름차순 정렬 → 가장 어두운 것 선택
-    candidates.sort(key=lambda x: x[0])
-    chosen_brightness, chosen = candidates[0]
-    print(f"  [Pexels] 밝기 분석: {len(candidates)}장 중 평균밝기 {chosen_brightness:.0f}/255인 사진 선택")
+    score, brightness, saturation, chosen = max(scored, key=lambda x: x[0])
+    print(
+        f"  [Pexels] 밝기 분석({'bright' if bright else 'dark'}): {len(scored)}장 중 "
+        f"밝기 {brightness:.0f}/255, 채도 {saturation:.2f}인 사진 선택"
+    )
     return chosen
 
 
@@ -119,7 +155,7 @@ def _pick_darkest(photos: list, n: int = 10) -> dict | None:
 def search_pexels(topic: str, randomize: bool = False, page: int = 1) -> Image.Image | None:
     """
     Pexels API로 주제 관련 고화질 사진 검색.
-    상위 10장 중 가장 어두운 사진을 선택해 텍스트 가독성 최적화.
+    상위 30장 중 중간 밝기에 색감이 있는 사진을 선택 (밝고 선명한 카드 배경).
 
     Args:
         topic:      한국어 주제
@@ -140,9 +176,9 @@ def search_pexels(topic: str, randomize: bool = False, page: int = 1) -> Image.I
                 "query": query,
                 "orientation": "portrait",
                 "size": "large",
-                "per_page": 10,      # 10장 수집 후 가장 어두운 것 선택
+                "per_page": 30,      # 후보를 넉넉히 받아 스타일에 맞는 것 선택
                 "page": page,
-                "color": "black",   # 어두운 톤 우선
+                **({} if _bright_style() else {"color": "black"}),   # dark: 어두운 톤 우선
             },
             timeout=15,
         )
@@ -156,8 +192,8 @@ def search_pexels(topic: str, randomize: bool = False, page: int = 1) -> Image.I
             # randomize 모드: 상위 5장 중 무작위
             photo = random.choice(photos[:5])
         else:
-            # 기본 모드: 밝기 분석 후 가장 어두운 사진 선택
-            photo = _pick_darkest(photos, n=10) or photos[0]
+            # dark(기본): 가장 어두운 사진 / bright: 중간 밝기이면서 색감 있는 사진
+            photo = _pick_best(photos, n=30, bright=_bright_style()) or photos[0]
 
         photo_url = photo["src"]["large2x"]
         alt = photo.get("alt", "no description")[:60]
@@ -275,10 +311,18 @@ def generate_dalle_background(topic: str) -> Image.Image:
             messages=[{
                 "role": "user",
                 "content": (
-                    f"Write a DALL-E 3 image generation prompt for a dark, cinematic background "
-                    f"image suitable for a Korean tech card news about '{topic}'. "
-                    f"Style: dark navy/purple tones, cinematic lighting, abstract futuristic, "
-                    f"NO text, NO UI, full-bleed background. Max 80 words."
+                    + (
+                        f"Write a DALL-E 3 image generation prompt for a bright, vivid, colorful "
+                        f"background image suitable for a Korean tech card news about '{topic}'. "
+                        f"Style: clean modern look, saturated blue/teal/magenta accents, soft studio "
+                        f"lighting, abstract futuristic, NO text, NO UI, NO people, full-bleed "
+                        f"background. Max 80 words."
+                        if _bright_style()
+                        else f"Write a DALL-E 3 image generation prompt for a dark, cinematic background "
+                        f"image suitable for a Korean tech card news about '{topic}'. "
+                        f"Style: dark navy/purple tones, cinematic lighting, abstract futuristic, "
+                        f"NO text, NO UI, NO people, full-bleed background. Max 80 words."
+                    )
                 )
             }]
         )
@@ -336,6 +380,8 @@ def get_background_image(
     source = "dalle" if force_dalle or not PEXELS_API_KEY else "pexels"
     # 재시도 시 캐시 키에 페이지 번호 포함 → 다른 이미지 사용
     cache_suffix = f"_p{retry_num}" if retry_num > 0 else ""
+    if _bright_style():
+        cache_suffix = f"_bright{cache_suffix}"
     cache_path = cache_dir / f"{safe}_{source}{cache_suffix}.jpg"
 
     if cache_path.exists() and not force_refresh:

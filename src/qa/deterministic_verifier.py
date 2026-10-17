@@ -121,10 +121,13 @@ _KOREAN_COMPOUND_NUMBER_RE = re.compile(
     rf"\s*(?P<unit>{_UNIT_PATTERN})?",
     re.IGNORECASE,
 )
+# 숫자와 단위/배수 사이에는 공백 하나 또는 하이픈 하나가 올 수 있다. "a 10-minute conversation"이나
+# "a 5-million-dollar deal"처럼 영어 복합 수식어는 하이픈으로 붙어 있는데, 예전에는 이 단위를 읽지
+# 못해 "10분"을 근거 없는 숫자로 거부하고 같은 주장을 13번 다시 생성하는 비용($0.25)이 들었다.
 _NUMBER_MENTION_RE = re.compile(
     rf"(?<![\w.])(?P<currency>[$₩])?\s*"
-    rf"(?P<number>{_NUMBER_PATTERN})\s*"
-    rf"(?P<scale>{_KOREAN_SCALE_PATTERN}|{_ENGLISH_SCALE_PATTERN})?\s*"
+    rf"(?P<number>{_NUMBER_PATTERN})(?:\s+|-)?"
+    rf"(?P<scale>{_KOREAN_SCALE_PATTERN}|{_ENGLISH_SCALE_PATTERN})?(?:\s+|-)?"
     rf"(?P<unit>{_UNIT_PATTERN})?",
     re.IGNORECASE,
 )
@@ -579,10 +582,42 @@ def _number_supported_by_evidence(num_obj, evidence_text: str) -> bool:
         value = num_obj.normalized_value
         qual = declared_unit
 
-    return any(
+    if any(
         value == evidence_value and qual == evidence_unit
         for evidence_value, evidence_unit in _extract_number_mentions(evidence_text)
-    )
+    ):
+        return True
+    # "1.5 million full-time and part-time human workers"처럼 사람 명사가 수식어
+    # 뒤에 오면 위 추출은 단위를 못 읽어서 "150만 명"을 근거 없는 숫자로 거부했다.
+    # 값이 정확히 같고 바로 뒤(수식어 몇 단어 안)에 사람 명사가 있을 때만 "명"으로 인정한다.
+    return qual == "people" and _count_followed_by_people_noun(value, evidence_text)
+
+
+_PEOPLE_NOUNS = frozenset({
+    "workers", "worker", "employees", "employee", "staff", "people", "persons",
+    "users", "customers", "residents", "members", "citizens", "students",
+    "workforce", "jobs",
+})
+_PEOPLE_NOUN_MAX_GAP_WORDS = 6
+
+
+def _count_followed_by_people_noun(value: Decimal, evidence_text: str) -> bool:
+    """True if `value` appears in the evidence with a people noun within a few words after it."""
+
+    normalized = unicodedata.normalize("NFKC", evidence_text or "")
+    for match in _NUMBER_MENTION_RE.finditer(normalized):
+        if match.group("unit"):
+            continue
+        number = _to_decimal(match.group("number"))
+        if number is None:
+            continue
+        scale = (match.group("scale") or "").lower()
+        if number * _SCALE_FACTORS.get(scale, Decimal("1")) != value:
+            continue
+        words = re.findall(r"[A-Za-z]+(?:-[A-Za-z]+)*", normalized[match.end():match.end() + 90])
+        if any(word.lower() in _PEOPLE_NOUNS for word in words[:_PEOPLE_NOUN_MAX_GAP_WORDS]):
+            return True
+    return False
 
 
 def _plain_decimal(value: Decimal) -> str:

@@ -106,7 +106,11 @@ _COVER_COPY_SYSTEM = """
 이미 검증된 카드 내용을 소개/마무리하는 문구만 씁니다.
 
 작성 규칙:
-- cover_title: 22자 이내, 호기심을 유발하는 완결된 문장/구 (말줄임표 금지)
+- cover_title: 16자 이내의 완결된 짧은 구. 피드에서 썸네일로 스치듯 보여도 클릭하고 싶게,
+  카드 핵심 요점에 이미 나온 가장 놀라운 숫자나 대비·변화를 맨 앞에 두세요
+  (예: "메가와트당 40% 더", "15억 달러 몸값"). 숫자는 요점에 적힌 표기 그대로만 쓰고
+  새 숫자를 만들거나 바꾸지 마세요. 요점에 없는 과장·낚시("충격", "난리", "역대급")와
+  말줄임표는 금지입니다. 숫자가 없으면 가장 구체적인 사건·주체를 앞에 두세요.
 - hook: 40자 이내, 커버 바로 아래 붙는 한 줄 후크
 - cta_title: 20자 이내, 마지막 장 제목 (질문형 또는 저장 유도형)
 - cta_body: 45~130자, 마지막 장 본문 (자연스러운 참여 유도 문구)
@@ -169,6 +173,114 @@ def _entities_in_copy(claim: Claim) -> list[str]:
         entity for entity in claim.entities
         if entity.strip() and entity.strip().casefold() in haystack
     ]
+
+
+_FIGURE_PHRASE_RE = re.compile(
+    r"(\d[\d,\.]*\s?(?:만|억|조|천)?\s?(?:명|대|개|곳|건|달러|원|%|배|년))"
+    r"(?:\s?(이상|이하|가량|여))?(?:의)?"
+)
+_TRAILING_PARTICLE_RE = re.compile(r"(?:이|가|을|를|은|는|에|도|의)$")
+_WORD_RE = re.compile(r"\s*([가-힣A-Za-z]{1,8})")
+
+
+def _natural_korean_figures(text: str) -> str:
+    """"1백만"→"100만", "2천만"→"2000만"처럼 같은 값을 자연스러운 표기로 바꾼다."""
+
+    text = re.sub(r"(\d+)십만", lambda m: f"{m.group(1)}0만", text)
+    text = re.sub(r"(\d+)백만", lambda m: f"{m.group(1)}00만", text)
+    return re.sub(r"(\d+)천만", lambda m: f"{m.group(1)}000만", text)
+
+
+_ENGLISH_WORD_RE = re.compile(r"[A-Za-z]{3,}")
+
+
+def _localized_stat(number: NormalizedNumber, claim_text: str) -> tuple[str, str]:
+    """수치 상자에 쓸 (값, 라벨)을 본문 표기에 맞춘다.
+
+    근거 숫자의 raw_text는 기사 원문 표기("1 million", 라벨 "robots")라서, 본문이 "100만 대"라고
+    쓴 카드에서도 상자만 영어로 나왔다. 본문(claim_text) 안에서 같은 값을 가진 한국어 숫자
+    구절을 찾아 그 표기와 바로 뒤 명사를 쓰면 본문과 상자가 항상 같은 표기가 된다. 찾지 못하면
+    기존 표기를 그대로 둔다.
+    """
+
+    display, label = _display_number(number), number.subject.strip()
+    if not (_ENGLISH_WORD_RE.search(display) and re.search(r"[가-힣]", claim_text)):
+        return display, label
+    from decimal import Decimal
+
+    from src.qa.deterministic_verifier import _extract_number_mentions
+
+    target = Decimal(str(number.normalized_value))
+    for match in _FIGURE_PHRASE_RE.finditer(claim_text):
+        figure = re.sub(r"\s+", " ", match.group(1)).strip()
+        if any(value == target for value, _unit in _extract_number_mentions(figure)):
+            localized_label = label
+            if _ENGLISH_WORD_RE.search(label) or not label:
+                words = []
+                pos = match.end()
+                for _ in range(2):
+                    word_match = _WORD_RE.match(claim_text, pos)
+                    if not word_match:
+                        break
+                    word = word_match.group(1)
+                    pos = word_match.end()
+                    stripped = _TRAILING_PARTICLE_RE.sub("", word)
+                    words.append(stripped)
+                    if stripped != word:
+                        break
+                localized_label = " ".join(words)
+            return figure, localized_label
+    return display, label
+
+
+def has_complete_figure(title: str) -> bool:
+    """표지 제목에 "100만 대 이상의 로봇"처럼 대상이 붙은 숫자 구절이 있는가.
+
+    "80%"만 있는 제목은 무슨 숫자인지 알 수 없어서(실제로는 '시나리오의 80%를 반영'인데 표지는
+    80%만 크게 나와 변화율로 읽혔다) 숫자 구절로 인정하지 않는다.
+    """
+
+    match = _FIGURE_PHRASE_RE.search(title or "")
+    if not match:
+        return False
+    rest = (title[: match.start()] + " " + title[match.end():])
+    return len(re.findall(r"[가-힣A-Za-z]", rest)) >= 2
+
+
+def _lead_figure_phrase(claims: List[Claim]) -> str:
+    """The first verified figure phrase in the card copy, e.g. "100만 대 이상의 로봇".
+
+    The cover title is the thumbnail, and a concrete figure is what makes people
+    stop. The model was asked to lead with one but often did not ("아마존 로봇
+    혁신" when the cards say 100만 대). The phrase is cut from claim_text, which
+    already passed number verification, so no new figure is introduced.
+    """
+
+    for claim in claims:
+        match = _FIGURE_PHRASE_RE.search(claim.claim_text)
+        if not match:
+            continue
+        words: list[str] = []
+        pos = match.end()
+        for _ in range(2):
+            word_match = _WORD_RE.match(claim.claim_text, pos)
+            if not word_match:
+                break
+            word = word_match.group(1)
+            pos = word_match.end()
+            stripped = _TRAILING_PARTICLE_RE.sub("", word)
+            if stripped:
+                words.append(stripped)
+            if stripped != word:      # 조사가 붙었으면 명사구가 끝난 것이다
+                break
+        figure = re.sub(r"\s+", " ", match.group(1)).strip()
+        qualifier = match.group(2) or ""
+        if not words:
+            # 숫자 뒤에 대상이 없으면("시나리오의 80%를 반영…") 숫자만으로는 표지 제목이 되지 못한다.
+            continue
+        noun_phrase = " ".join(words)
+        return f"{figure} {qualifier}의 {noun_phrase}" if qualifier else f"{figure} {noun_phrase}"
+    return ""
 
 
 def _claim_headline(claim: Claim) -> str:
@@ -242,10 +354,16 @@ def _visual_type(claim: Claim) -> str:
 
 
 def _hashtags(topic: str, claims: List[Claim]) -> list[str]:
-    tags = ["#알고", "#카드뉴스", "#뉴스분석", "#팩트체크", "#인사이트"]
+    # "#팩트체크"는 넣지 않는다 — 카드는 출처 한 건과의 일치만 검증하므로
+    # 외부 팩트체크를 했다는 인상을 주는 태그는 과장이다.
+    tags = ["#알고", "#카드뉴스", "#뉴스분석", "#인사이트"]
     candidates = [topic]
     candidates.extend(entity for claim in claims for entity in claim.entities)
     for item in candidates:
+        # "Brian Greenwood"처럼 영문 사람 이름은 해시태그로 쓰지 않는다. 기사 필자가
+        # 해시태그로 올라간 사례가 있었고, 사람 이름 태그는 탐색 효과보다 오해 위험이 크다.
+        if re.fullmatch(r"[A-Z][a-z]+ [A-Z][a-z]+", item.strip()):
+            continue
         normalized = re.sub(r"[^0-9A-Za-z가-힣_]", "", item)
         if normalized and len(normalized) <= 24:
             tag = f"#{normalized}"
@@ -304,6 +422,19 @@ class ScriptAssembler:
             cover_hook = _ANGLE_HOOKS.get(editorial_angle, _default_hook(topic))
             cta_title, generated_cta_body = _contextual_cta(topic)
 
+        # "1백만 대" 같은 어색한 표기는 "100만 대"로 바로잡는다(값은 같다).
+        cover_title = _natural_korean_figures(cover_title)
+
+        # 표지 제목에 숫자가 없는데 카드에 검증된 숫자가 있으면, 그 숫자를 제목에 쓴다.
+        # 숫자만 있고 단위가 빠진 제목("로봇 운영 규모 100만")도 숫자 구절로 보지 않는다.
+        if not has_complete_figure(cover_title):
+            lead = _lead_figure_phrase(content_claims[:max_content_slides])
+            if lead:
+                cover_title = _fit_cover_title(lead, 22)
+            elif _FIGURE_PHRASE_RE.search(cover_title) and content_claims:
+                # 숫자만 덩그러니 있는 제목("80%")은 버리고 첫 카드의 소제목을 쓴다.
+                cover_title = _fit_cover_title(_claim_headline(content_claims[0]), 22)
+
         slides = []
 
         # 1a. Cover slide: frame the factual topic as a safe question instead
@@ -327,15 +458,16 @@ class ScriptAssembler:
             # 지목하지 않은 주체를 시각적으로 지목해서는 안 된다.
             mentioned = _entities_in_copy(c)
             primary_number = _primary_number(c)
-            accent = _display_number(primary_number) if primary_number else ""
+            accent = _localized_stat(primary_number, c.claim_text)[0] if primary_number else ""
             if not accent and mentioned:
                 accent = mentioned[0]
             visual_numbers = sorted(
                 c.numbers,
                 key=lambda item: item is not primary_number,
             )[:3]
-            visual_values = [_display_number(item) for item in visual_numbers]
-            visual_labels = [item.subject.strip() for item in visual_numbers]
+            localized = [_localized_stat(item, c.claim_text) for item in visual_numbers]
+            visual_values = [value for value, _label in localized]
+            visual_labels = [label for _value, label in localized]
             if not visual_values and mentioned:
                 visual_values = [mentioned[0]]
 
