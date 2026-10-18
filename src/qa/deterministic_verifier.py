@@ -620,6 +620,14 @@ def _number_supported_by_evidence(num_obj, evidence_text: str) -> bool:
         for evidence_value, evidence_unit in _extract_number_mentions(evidence_text)
     ):
         return True
+    # 범용 개수 단위("650개")는 근거에서 단위가 인식되지 않은 명사("650 VxRail hosts", "12,000 virtual
+    # machines")와도 맞는다. 명사를 일일이 사전에 넣을 수 없어서, 단위가 비어 있는 같은 값이면 인정한다
+    # (퍼센트·금액·사람 등 다른 단위로 읽힌 값은 여전히 안 맞는다).
+    if qual == "count" and any(
+        value == evidence_value and evidence_unit == ""
+        for evidence_value, evidence_unit in _extract_number_mentions(evidence_text)
+    ):
+        return True
     # 단위 없이 값만 쓴 숫자("24 million")는 근거에서 같은 값이면 단위가 무엇이든("2,400만 명") 맞는 것으로 본다.
     if not qual and not declared_unit and any(
         value == evidence_value for evidence_value, _unit in _extract_number_mentions(evidence_text)

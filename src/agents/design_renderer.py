@@ -1401,19 +1401,30 @@ def _safe_caption(script: CardNewsScript, handle: str, hashtag_str: str) -> str:
     return "\n".join(lines)
 
 
+_TRANSIENT_ERROR_NAMES = {
+    "APIConnectionError", "APITimeoutError", "ConnectError", "ReadTimeout", "ConnectTimeout",
+    "RemoteProtocolError", "ConnectionError", "TimeoutError", "RateLimitError",
+}
+
+
 def _invoke_with_retry(llm, prompt: str, tries: int = 3):
-    """일시적인 네트워크 오류("Connection error.")는 몇 번 다시 시도한다. 중지 요청 등
-    BaseException은 그대로 통과한다."""
+    """일시적인 네트워크 오류("Connection error.")만 몇 번 다시 시도한다.
+
+    인증 오류처럼 다시 해도 소용없는 오류는 바로 올려 보낸다(테스트에서 가짜 키로 불러 시간만
+    쓰던 문제). 중지 요청 등 BaseException은 그대로 통과한다.
+    """
 
     import time as _time
 
     for attempt in range(tries):
         try:
             return llm.invoke(prompt)
-        except Exception:
-            if attempt == tries - 1:
+        except Exception as exc:
+            transient = type(exc).__name__ in _TRANSIENT_ERROR_NAMES
+            if not transient or attempt == tries - 1:
                 raise
-            _time.sleep(2 * (attempt + 1))
+            if "PYTEST_CURRENT_TEST" not in os.environ:
+                _time.sleep(2 * (attempt + 1))
 
 
 def _generate_caption(script: CardNewsScript, handle: str) -> str:
