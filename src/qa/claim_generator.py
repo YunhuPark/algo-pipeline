@@ -246,10 +246,33 @@ def _normalize_number_payloads(raw_numbers: Any) -> Any:
     return normalized_numbers
 
 
+DISPLAY_TITLE_LIMIT = 22   # Claim.display_title max_length
+
+
+def _shorten_display_title(text: str, limit: int = DISPLAY_TITLE_LIMIT) -> str:
+    """Cut a too-long card headline at a word boundary.
+
+    The model often writes a 23-30 character headline. That is not a factual problem, but the schema
+    rejected it and the whole claim set was regenerated (one article burned $0.20 on this alone).
+    The headline carries no evidence, so shortening it deterministically weakens nothing.
+    """
+
+    clean = re.sub(r"\s+", " ", str(text or "")).strip().rstrip(".!?…")
+    if len(clean) <= limit:
+        return clean
+    cut = clean[:limit]
+    boundary = cut.rfind(" ")
+    if boundary >= 8:
+        cut = cut[:boundary]
+    return cut.rstrip(" ,:;-·")
+
+
 def _normalize_claim_payload(raw_claim: dict[str, Any]) -> dict[str, Any]:
     """Normalize non-factual metadata without weakening evidence checks."""
 
     payload = dict(raw_claim)
+    if payload.get("display_title"):
+        payload["display_title"] = _shorten_display_title(payload["display_title"])
     role = payload.get("editorial_role")
     if role is not None:
         normalized_role = str(role).strip().lower()
@@ -700,16 +723,19 @@ class ClaimGenerator:
                     for evidence_id in cited_ids
                     if evidence_id in evidence_by_id
                 )
+                # 기사 제목의 숫자("saved over $11.3 million")도 같은 기사의 근거다. 인용한 본문 구절에만
+                # 있어야 한다고 하면, 제목에만 숫자가 있는 기사에서 맞는 숫자가 10번 넘게 거부됐다.
+                number_evidence_text = f"{cited_evidence_text} {lineage.source_title or ''}"
                 claim = _align_claim_number_text_to_evidence(
                     claim,
-                    cited_evidence_text,
+                    number_evidence_text,
                 )
                 claim = _align_claim_entities_to_evidence(
                     claim,
                     cited_evidence_text,
                 )
                 _raise_for_unsupported_claim_entities(claim, cited_evidence_text)
-                _raise_for_unsupported_claim_numbers(claim, cited_evidence_text)
+                _raise_for_unsupported_claim_numbers(claim, number_evidence_text)
             except ClaimGenerationError:
                 raise
             except ValidationError as exc:
