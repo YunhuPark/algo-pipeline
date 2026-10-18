@@ -79,3 +79,22 @@ def test_a_figure_with_no_object_after_it_is_not_used_as_the_cover_title():
 
     claim = N(claim_text="AI 시뮬레이션은 컨설턴트가 직면하는 시나리오의 80%를 반영하도록 설계되었습니다.")
     assert _lead_figure_phrase([claim]) == ""
+
+
+def test_a_year_followed_by_a_particle_is_never_a_cover_phrase():
+    # Regression found by the regression harness: "2026년에는 ..." produced the cover title "2026년 에".
+    from types import SimpleNamespace as N
+
+    from src.qa.script_assembler import _lead_figure_phrase
+
+    claim = N(claim_text="2026년에는 취약점 악용 사례의 70% 이상이 공개 당일에 공격으로 이어졌다.")
+    assert _lead_figure_phrase([claim]) == ""
+
+
+def test_stacked_particles_are_stripped_before_a_noun_is_accepted():
+    from types import SimpleNamespace as N
+
+    from src.qa.script_assembler import _lead_figure_phrase
+
+    assert _lead_figure_phrase([N(claim_text="아마존은 100만 대 이상의 로봇을 운영한다.")]) == "100만 대 이상의 로봇"
+    assert _lead_figure_phrase([N(claim_text="지원자 300명에는 면접이 면제된다.")]) == ""

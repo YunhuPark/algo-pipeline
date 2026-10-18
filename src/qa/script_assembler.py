@@ -179,7 +179,17 @@ _FIGURE_PHRASE_RE = re.compile(
     r"(\d[\d,\.]*\s?(?:만|억|조|천)?\s?(?:명|대|개|곳|건|달러|원|%|배|년))"
     r"(?:\s?(이상|이하|가량|여))?(?:의)?"
 )
-_TRAILING_PARTICLE_RE = re.compile(r"(?:이|가|을|를|은|는|에|도|의)$")
+# 명사 뒤에 붙는 조사. "에는"·"에서는"처럼 겹쳐 붙는 경우가 많아 끝에서 반복해서 벗긴다.
+_TRAILING_PARTICLE_RE = re.compile(r"(?:에서는|에서도|에서|에는|에도|에게|으로|이라|과|와|로|이|가|을|를|은|는|에|도|의)$")
+_YEAR_FIGURE_RE = re.compile(r"^(?:19|20)\d{2}\s?년$")
+
+
+def _strip_particles(word: str) -> str:
+    while True:
+        stripped = _TRAILING_PARTICLE_RE.sub("", word)
+        if stripped == word:
+            return word
+        word = stripped
 _WORD_RE = re.compile(r"\s*([가-힣A-Za-z]{1,8})")
 
 
@@ -268,13 +278,15 @@ def _lead_figure_phrase(claims: List[Claim]) -> str:
                 break
             word = word_match.group(1)
             pos = word_match.end()
-            stripped = _TRAILING_PARTICLE_RE.sub("", word)
-            if stripped:
+            stripped = _strip_particles(word)
+            if len(stripped) >= 2:     # 조사만 남거나 한 글자면 명사가 아니다("2026년에는" → "에")
                 words.append(stripped)
-            if stripped != word:      # 조사가 붙었으면 명사구가 끝난 것이다
+            if stripped != word:       # 조사가 붙었으면 명사구가 끝난 것이다
                 break
         figure = re.sub(r"\s+", " ", match.group(1)).strip()
         qualifier = match.group(2) or ""
+        if _YEAR_FIGURE_RE.match(figure):
+            continue                   # 연도는 표지를 끌 숫자가 아니다
         if not words:
             # 숫자 뒤에 대상이 없으면("시나리오의 80%를 반영…") 숫자만으로는 표지 제목이 되지 못한다.
             continue
