@@ -296,9 +296,39 @@ def _canonical_unit(raw_unit: str = "", currency: str = "") -> str:
     return ""
 
 
+_WORD_NUMBERS = {
+    "one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7, "eight": 8,
+    "nine": 9, "ten": 10, "eleven": 11, "twelve": 12, "thirteen": 13, "fourteen": 14,
+    "fifteen": 15, "sixteen": 16, "seventeen": 17, "eighteen": 18, "nineteen": 19,
+    "twenty": 20, "thirty": 30, "forty": 40, "fifty": 50, "sixty": 60, "seventy": 70,
+    "eighty": 80, "ninety": 90,
+}
+_TENS = "twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety"
+_ONES = "one|two|three|four|five|six|seven|eight|nine"
+_NUMBER_WORD = "|".join(_WORD_NUMBERS)
+# Only a number word that is followed by a unit or scale is a figure ("five days", "ten percent",
+# "one million"); "one of the", "the two sides" stay words.
+_WORD_NUMBER_UNIT_AHEAD = (
+    r"(?=[\s-]+(?:days?|weeks?|months?|years?|hours?|minutes?|seconds?|percent|per\s*cent|"
+    r"people|persons?|employees?|workers?|users?|customers?|engineers?|developers?|"
+    r"million|billion|trillion|thousand|times|offices?|countries|cities|stores?)\b)"
+)
+_TENS_ONES_RE = re.compile(rf"\b({_TENS})[- ]({_ONES})\b{_WORD_NUMBER_UNIT_AHEAD}", re.IGNORECASE)
+_WORD_NUMBER_RE = re.compile(rf"\b({_NUMBER_WORD})\b{_WORD_NUMBER_UNIT_AHEAD}", re.IGNORECASE)
+
+
+def _spelled_numbers_to_digits(text: str) -> str:
+    """"more than five days" -> "more than 5 days"; "twenty-five employees" -> "25 employees"."""
+
+    text = _TENS_ONES_RE.sub(
+        lambda m: str(_WORD_NUMBERS[m.group(1).lower()] + _WORD_NUMBERS[m.group(2).lower()]), text
+    )
+    return _WORD_NUMBER_RE.sub(lambda m: str(_WORD_NUMBERS[m.group(1).lower()]), text)
+
+
 def _extract_number_mentions(text: str) -> Iterable[Tuple[Decimal, str]]:
     """Yield canonical numeric values and semantic units from Korean/English text."""
-    normalized = unicodedata.normalize("NFKC", text or "")
+    normalized = _spelled_numbers_to_digits(unicodedata.normalize("NFKC", text or ""))
     compound_spans: list[tuple[int, int]] = []
 
     # Korean large numbers are often additive (for example, 1억 500만 = 105M).
@@ -692,7 +722,7 @@ def repair_source_backed_numeric_localizations(
             evidence_map[evidence_id].text
             for evidence_id in claim.evidence_ids
             if evidence_id in evidence_map
-        )
+        ) + f" {getattr(lineage, 'source_title', '') or ''}"
         replacements: dict[str, tuple[str, Decimal]] = {}
         repaired_numbers = []
         for number in claim.numbers:
@@ -938,9 +968,10 @@ class DeterministicVerifier:
                 if not found:
                     raise QualityGateError("ENTITY_UNSUPPORTED", f"Entity '{entity}' not found in evidence.", claim.claim_id)
 
-            # 3. Check Numbers
+            # 3. Check Numbers (the article's own headline is part of its evidence)
+            number_evidence_text = f"{combined_evidence_text} {getattr(lineage, 'source_title', '') or ''}"
             for num_obj in claim.numbers:
-                if not _number_supported_by_evidence(num_obj, combined_evidence_text):
+                if not _number_supported_by_evidence(num_obj, number_evidence_text):
                     raise QualityGateError("NUMBER_UNSUPPORTED", f"Number '{num_obj.raw_text}' not supported by evidence.", claim.claim_id)
 
             # 4. Check Dates

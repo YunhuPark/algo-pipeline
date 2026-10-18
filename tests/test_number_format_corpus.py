@@ -77,6 +77,15 @@ SUPPORTED = [
     ("전년 대비 1.5배 증가했다.", "1.5배", "times"),
     ("서비스 이용자가 2,400만 명에 달한다.", "2,400만 명", "people"),
     ("프로그램은 10분간 진행된다.", "10분", "minutes"),
+    # ── spelled-out numbers (found by the regression run: "more than five days") ──
+    ("The headphones last more than five days per charge.", "5일", "days"),
+    ("Usage is up ten percent.", "10%", "percent"),
+    ("The firm has twenty-five employees.", "25명", "people"),
+    ("It signed one million users.", "100만 명", "people"),
+    ("A two-year contract was agreed.", "2년", "years"),
+    ("The pilot ran for three months.", "3개월", "months"),
+    # ── over/more than + dollars, as in a headline ─────
+    ("Topgolf saved over $11.3 million after leaving VMware.", "1,130만 달러", "usd"),
     # ── Korean evidence -> English-looking claim ───────
     ("이용자가 2,400만 명이다.", "24 million", ""),
     ("투자금은 15억 달러다.", "$1.5 billion", ""),
@@ -94,6 +103,8 @@ REJECTED = [
     ("Prices rose 3.5%.", "35%", "percent"),                                # moved decimal
     ("The firm has 12,000 employees.", "120,000명", "people"),
     ("It signed 3M customers.", "30만 명", "people"),
+    ("The headphones last more than five days per charge.", "6일", "days"),   # spelled-out, wrong value
+    ("The two sides met on Monday.", "2명", "people"),                         # "two" is not a figure here
 ]
 
 
@@ -110,3 +121,23 @@ def test_number_present_in_the_source_is_supported(evidence, raw, unit):
 @pytest.mark.parametrize("evidence,raw,unit", REJECTED, ids=[f"{r[1]}<-{r[0][:38]}" for r in REJECTED])
 def test_number_that_is_not_in_the_source_stays_rejected(evidence, raw, unit):
     assert not supported(_num(raw, unit), evidence), f"{raw!r} must NOT be supported by: {evidence}"
+
+
+def test_a_long_headline_is_shortened_not_rejected():
+    from src.qa.claim_generator import _shorten_display_title
+
+    long = "마이크로소프트가 새로운 인공지능 반도체를 공개했다"
+    short = _shorten_display_title(long)
+    assert len(short) <= 22 and short and not short.endswith(("…", "."))
+    assert _shorten_display_title("짧은 제목") == "짧은 제목"
+
+
+def test_a_number_that_only_appears_in_the_article_headline_is_supported():
+    from types import SimpleNamespace as NS
+
+    from src.qa.deterministic_verifier import DeterministicVerifier  # noqa: F401  (import check)
+
+    # the lineage-level behaviour is exercised end to end by the regression run (#18); here we pin the
+    # building block: the headline text is searchable like any evidence text.
+    headline = "Topgolf saved over $11.3 million after leaving VMware"
+    assert supported(_num("1,130만 달러", "usd"), "Body text without the figure. " + headline)
