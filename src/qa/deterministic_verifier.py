@@ -76,6 +76,8 @@ _SCALE_FACTORS = {
     "thousand": Decimal("1000"),
     "m": Decimal("1000000"),
     "million": Decimal("1000000"),
+    "mn": Decimal("1000000"),
+    "bn": Decimal("1000000000"),
     "b": Decimal("1000000000"),
     "billion": Decimal("1000000000"),
     "t": Decimal("1000000000000"),
@@ -83,11 +85,11 @@ _SCALE_FACTORS = {
 }
 
 _KOREAN_SCALE_PATTERN = r"(?:천억|백억|십억|천만|백만|십만|조|억|만|천)"
-_ENGLISH_SCALE_PATTERN = r"(?:trillion|billion|million|thousand|[kmbt](?![A-Za-z]))"
+_ENGLISH_SCALE_PATTERN = r"(?:trillion|billion|million|thousand|bn|mn|[kmbt](?![A-Za-z]))"
 _UNIT_PATTERN = (
-    r"(?:퍼센트|percentage|percent|%|달러|dollars?|usd|원|krw|won|"
-    r"명|people|persons?|users?|customers?|employees?|개|items?|parameters?|"
-    r"tokens?|companies?|models?|곳|places?|locations?|개월|months?|년|years?|"
+    r"(?:퍼센트|percentage|per\s*cent|percent|%|달러|dollars?|usd|원|krw|won|"
+    r"명|people|persons?|users?|customers?|employees?|개월|개|items?|parameters?|"
+    r"tokens?|companies?|models?|곳|places?|locations?|offices?|sites?|branches|stores?|months?|년|years?|"
     r"일|days?|시간|hours?|분|minutes?|초|seconds?|배|times?|x(?![A-Za-z]))"
 )
 _NUMBER_PATTERN = r"\d[\d,]*(?:\.\d+)?"
@@ -268,13 +270,14 @@ def _canonical_unit(raw_unit: str = "", currency: str = "") -> str:
         return "usd"
     if currency == "₩" or unit in {"원", "krw", "won"}:
         return "krw"
-    if unit in {"%", "퍼센트", "percent", "percentage"}:
+    if unit in {"%", "퍼센트", "percent", "percentage"} or re.fullmatch(r"per\s*cent", unit):
         return "percent"
     if unit in {"명", "people", "person", "persons", "user", "users", "customer", "customers", "employee", "employees"}:
         return "people"
     if unit in {"개", "item", "items", "parameter", "parameters", "token", "tokens", "company", "companies", "model", "models"}:
         return "count"
-    if unit in {"곳", "place", "places", "location", "locations"}:
+    if unit in {"곳", "place", "places", "location", "locations", "office", "offices", "site", "sites",
+                "branch", "branches", "store", "stores"}:
         return "place"
     if unit in {"일", "day", "days"}:
         return "day"
@@ -587,6 +590,11 @@ def _number_supported_by_evidence(num_obj, evidence_text: str) -> bool:
         for evidence_value, evidence_unit in _extract_number_mentions(evidence_text)
     ):
         return True
+    # 단위 없이 값만 쓴 숫자("24 million")는 근거에서 같은 값이면 단위가 무엇이든("2,400만 명") 맞는 것으로 본다.
+    if not qual and not declared_unit and any(
+        value == evidence_value for evidence_value, _unit in _extract_number_mentions(evidence_text)
+    ):
+        return True
     # "1.5 million full-time and part-time human workers"처럼 사람 명사가 수식어
     # 뒤에 오면 위 추출은 단위를 못 읽어서 "150만 명"을 근거 없는 숫자로 거부했다.
     # 값이 정확히 같고 바로 뒤(수식어 몇 단어 안)에 사람 명사가 있을 때만 "명"으로 인정한다.
@@ -596,7 +604,11 @@ def _number_supported_by_evidence(num_obj, evidence_text: str) -> bool:
 _PEOPLE_NOUNS = frozenset({
     "workers", "worker", "employees", "employee", "staff", "people", "persons",
     "users", "customers", "residents", "members", "citizens", "students",
-    "workforce", "jobs",
+    "workforce", "jobs", "developers", "engineers", "researchers", "scientists",
+    "teachers", "participants", "attendees", "subscribers", "players", "drivers",
+    "applicants", "candidates", "patients", "consumers", "shoppers", "creators",
+    "artists", "voters", "victims", "passengers", "visitors", "professionals",
+    "managers", "executives", "contractors", "freelancers", "farmers", "gamers",
 })
 _PEOPLE_NOUN_MAX_GAP_WORDS = 6
 
