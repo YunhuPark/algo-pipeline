@@ -7,6 +7,7 @@ Step 3: 통과된 사실만으로 카드뉴스 생성
 """
 from __future__ import annotations
 
+import os
 from typing import Optional
 
 from src.schemas.card_news import (
@@ -259,7 +260,10 @@ class ContentCreator:
                 # 과장을 금지해 서로 부딪힌다), 재시도마다 $0.06 안팎이 든다. 형식 규칙 위반("말줄임표로
                 # 끝남" 등)은 고치기 쉬우니 기존 횟수를 그대로 쓴다.
                 is_score_failure = is_editorial_score_failure(exc)
-                repair_limit = 1 if is_score_failure else MAX_CLAIM_QUALITY_REPAIRS_PER_ERROR
+                repair_limit = (
+                    int(os.getenv("EDITORIAL_SCORE_RETRIES", "1")) if is_score_failure
+                    else MAX_CLAIM_QUALITY_REPAIRS_PER_ERROR
+                )
                 if (
                     attempt >= MAX_CLAIM_QUALITY_ATTEMPTS
                     or exc.error_code not in _RETRYABLE_CLAIM_QUALITY_ERRORS

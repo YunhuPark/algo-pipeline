@@ -77,6 +77,9 @@ SUPPORTED = [
     ("전년 대비 1.5배 증가했다.", "1.5배", "times"),
     ("서비스 이용자가 2,400만 명에 달한다.", "2,400만 명", "people"),
     ("프로그램은 10분간 진행된다.", "10분", "minutes"),
+    # ── generic counter 개 for things the dictionary does not know (regression run, Topgolf) ──
+    ("Topgolf replaced 650 VxRail hosts with about 400 Dell PowerEdge servers.", "650개", "count"),
+    ("The company moved 12,000 virtual machines (VMs) to a new platform.", "12,000개", "count"),
     # ── spelled-out numbers (found by the regression run: "more than five days") ──
     ("The headphones last more than five days per charge.", "5일", "days"),
     ("Usage is up ten percent.", "10%", "percent"),
@@ -105,6 +108,8 @@ REJECTED = [
     ("It signed 3M customers.", "30만 명", "people"),
     ("The headphones last more than five days per charge.", "6일", "days"),   # spelled-out, wrong value
     ("The two sides met on Monday.", "2명", "people"),                         # "two" is not a figure here
+    ("Topgolf replaced 650 VxRail hosts.", "65%", "percent"),                   # a count never matches a percent
+    ("It cut costs by 650 percent.", "650개", "count"),                         # percent is not a count of things
 ]
 
 
