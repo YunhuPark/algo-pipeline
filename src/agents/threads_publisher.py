@@ -45,14 +45,8 @@ load_dotenv(override=False)
 
 # ── 환경 변수 ─────────────────────────────────────────────
 # Threads 전용 토큰 → 없으면 Instagram 토큰 폴백 (같은 Meta 플랫폼)
-THREADS_ACCESS_TOKEN: str = (
-    os.getenv("THREADS_ACCESS_TOKEN")
-    or os.getenv("IG_ACCESS_TOKEN", "")
-)
-THREADS_USER_ID: str = (
-    os.getenv("THREADS_USER_ID")
-    or os.getenv("IG_USER_ID", "")
-)
+THREADS_ACCESS_TOKEN: str = os.getenv("THREADS_ACCESS_TOKEN", "")
+THREADS_USER_ID: str = os.getenv("THREADS_USER_ID", "")
 # 이미지 공개 URL 베이스 (ngrok 없이 정적 서버 사용 시)
 _IMAGE_BASE_URL: str = os.getenv("IG_IMAGE_BASE_URL", "")
 
@@ -202,6 +196,7 @@ def publish(
     hook: str,
     hashtags: list[str],
     base_url: str = "",
+    caption: str = "",
 ) -> str:
     """
     카드뉴스 이미지들을 Threads 캐러셀로 게시.
@@ -219,8 +214,7 @@ def publish(
     """
     if not THREADS_ACCESS_TOKEN or not THREADS_USER_ID:
         raise EnvironmentError(
-            ".env에 THREADS_ACCESS_TOKEN(또는 IG_ACCESS_TOKEN)과 "
-            "THREADS_USER_ID(또는 IG_USER_ID)가 없습니다."
+            ".env에 THREADS_ACCESS_TOKEN과 THREADS_USER_ID가 없습니다."
         )
 
     # PNG 파일만 필터
@@ -230,7 +224,7 @@ def publish(
 
     # 단일 이미지는 캐러셀 불필요 → 단순 IMAGE 게시
     if len(imgs) == 1:
-        return _publish_single(imgs[0], hook, hashtags, base_url)
+        return _publish_single(imgs[0], hook, hashtags, base_url, caption)
 
     # 공개 URL 결정: 명시 인자 → .env → ngrok 자동 시작
     url_base = (base_url or _IMAGE_BASE_URL or "").rstrip("/")
@@ -242,7 +236,7 @@ def publish(
     print(f"\n  [ThreadsPublisher] Threads 업로드 시작 ({len(imgs)}장)...")
     print(f"  [ThreadsPublisher] 이미지 URL 베이스: {url_base}")
 
-    caption = _build_caption(hook, hashtags)
+    caption = caption or _build_caption(hook, hashtags)
 
     # 1. 각 이미지 캐러셀 아이템 컨테이너 생성
     container_ids: list[str] = []
@@ -274,6 +268,7 @@ def _publish_single(
     hook: str,
     hashtags: list[str],
     base_url: str = "",
+    caption: str = "",
 ) -> str:
     """단일 이미지를 Threads 단독 게시물로 업로드."""
     url_base = (base_url or _IMAGE_BASE_URL or "").rstrip("/")
@@ -282,7 +277,7 @@ def _publish_single(
         url_base = _get_public_url(img_path.parent).rstrip("/")
 
     img_url = f"{url_base}/{img_path.name}"
-    caption = _build_caption(hook, hashtags)
+    caption = caption or _build_caption(hook, hashtags)
 
     # 단일 이미지 컨테이너
     resp = httpx.post(

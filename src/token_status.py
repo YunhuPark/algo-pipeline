@@ -9,9 +9,9 @@ WARN_DAYS = 10
 _STYLE = "background:#fff3cd;color:#7a5b00;padding:10px 14px;border-radius:8px;margin-bottom:12px"
 
 
-def days_left(today: date | None = None) -> int | None:
+def days_left(today: date | None = None, var: str = "IG_TOKEN_REFRESHED") -> int | None:
     """Days until the token expires, or None when no refresh date is recorded."""
-    raw = os.getenv("IG_TOKEN_REFRESHED", "").strip()
+    raw = os.getenv(var, "").strip()
     if not raw:
         return None
     try:
@@ -32,4 +32,18 @@ def banner_html(today: date | None = None) -> str:
     if left <= WARN_DAYS:
         return (f'<div style="{_STYLE}">Instagram 토큰 만료까지 {left}일 남았습니다. '
                 '<code>python scripts/refresh_ig_token.py</code>로 갱신하세요.</div>')
+    return ""
+
+
+def threads_banner_html(today: date | None = None) -> str:
+    """Same notice for the Threads token; silent when Threads is not configured."""
+    if not os.getenv("THREADS_ACCESS_TOKEN", "").strip():
+        return ""
+    left = days_left(today, "THREADS_TOKEN_REFRESHED")
+    if left is None:
+        return f'<div style="{_STYLE}">Threads 토큰 갱신일이 기록되어 있지 않습니다. <code>python scripts/threads_token.py --refresh</code></div>'
+    if left <= 0:
+        return f'<div style="{_STYLE}">Threads 토큰이 만료되었습니다. 새로 발급해야 합니다.</div>'
+    if left <= WARN_DAYS:
+        return f'<div style="{_STYLE}">Threads 토큰 만료까지 {left}일 남았습니다. <code>python scripts/threads_token.py --refresh</code></div>'
     return ""
