@@ -796,10 +796,10 @@ def index():
     # 최근 게시물 5개
     recent = list(posts)[:5]
 
-    from src.token_status import banner_html as _token_banner
+    from src.token_status import banner_html as _ig_banner, threads_banner_html as _th_banner
 
     # stat cards
-    stats = f"""{_token_banner()}
+    stats = f"""{_ig_banner()}{_th_banner()}
     <div class="stat-grid">
       <div class="stat-card">
         <div class="val">{today_cnt}</div>
@@ -1085,6 +1085,9 @@ def queue_page():
         <div class="panel-header">
           <div class="panel-title" id="qPreviewTitle">미리보기</div>
           <div style="display:flex;gap:8px">
+            <label style="display:inline-flex;align-items:center;gap:6px;margin-right:10px;font-size:13px">
+              <input type="checkbox" id="qThreadsChk"> Threads에도 게시
+            </label>
             <button id="qApproveBtn" class="btn btn-primary">✅ 승인해서 발행</button>
             <button id="qRejectBtn" class="btn btn-danger">❌ 거절</button>
           </div>
@@ -1192,7 +1195,7 @@ document.getElementById('qApproveBtn').addEventListener('click', () => {{
     qLogErr('발행할 항목을 확인하지 못했습니다. 미리보기를 다시 생성해 주세요.');
     return;
   }}
-  if (!confirm('실제 Instagram 계정(@algo__kr)에 지금 바로 게시됩니다. 진행할까요?')) return;
+  if (!confirm(document.getElementById('qThreadsChk').checked ? '실제 Instagram과 Threads 계정(@algo__kr)에 지금 바로 게시됩니다. 진행할까요?' : '실제 Instagram 계정(@algo__kr)에 지금 바로 게시됩니다. 진행할까요?')) return;
   document.getElementById('qApproveBtn').disabled = true;
   document.getElementById('qRejectBtn').disabled = true;
   document.getElementById('qProgressPanel').style.display = 'block';
@@ -1204,7 +1207,7 @@ document.getElementById('qApproveBtn').addEventListener('click', () => {{
   fetch('/queue/approve_publish', {{
     method: 'POST',
     headers: {{'Content-Type': 'application/json'}},
-    body: JSON.stringify({{queue_id: qQueueId}}),
+    body: JSON.stringify({{queue_id: qQueueId, threads: document.getElementById('qThreadsChk').checked}}),
   }})
     .then(r => r.json())
     .then(data => {{
@@ -1661,7 +1664,7 @@ def _record_queue_review(queue_id: int, decision: str) -> bool:
         return False
 
 
-def _run_queue_publish_job(job_id: str, queue_id: int) -> None:
+def _run_queue_publish_job(job_id: str, queue_id: int, with_threads: bool = False) -> None:
     global _ACTIVE_QUEUE_JOB
     _ACTIVE_QUEUE_JOB = {"job_id": job_id, "mode": "publish"}
     q = _JOB_QUEUES[job_id]
@@ -1693,10 +1696,27 @@ def _run_queue_publish_job(job_id: str, queue_id: int) -> None:
         # 단계를 타지 않지만, image_dir가 없어 전체 파이프라인으로 떨어지는
         # 예외 상황까지 대비해 명시한다.
         _record_queue_approval(queue_id)
+        try:
+            from src.token_refresh import ensure_fresh
+            for note in ensure_fresh():
+                _emit(q, "log", note)
+        except Exception:
+            pass   # a failed auto-refresh only leaves the dashboard warning in place
         result = publish_specific(
             queue_id, publish_to_ig=True, require_human_approval=False
         )
         sys.stdout = old_stdout
+
+        if result and with_threads:
+            # Threads is a courtesy copy: its failure never undoes or hides the Instagram post.
+            try:
+                from src.db import get_queue_row
+                from src.threads_cross_post import cross_post
+                row = get_queue_row(queue_id)
+                th_id = cross_post((row["image_dir"] if row is not None else "") or "")
+                _emit(q, "log", f"Threads 게시 완료: {th_id}")
+            except Exception as exc:
+                _emit(q, "log", f"Threads 게시는 건너뛰었습니다(Instagram은 게시됨): {exc}")
 
         if result:
             job["status"] = "done"
@@ -1783,7 +1803,7 @@ def queue_approve_publish():
         "image_dir": "", "caption": "", "error": "", "queue_id": None,
     }
     t = threading.Thread(
-        target=_run_queue_publish_job, args=(job_id, queue_id), daemon=True
+        target=_run_queue_publish_job, args=(job_id, queue_id, bool(data.get("threads"))), daemon=True
     )
     try:
         t.start()
