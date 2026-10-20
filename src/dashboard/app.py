@@ -796,8 +796,10 @@ def index():
     # 최근 게시물 5개
     recent = list(posts)[:5]
 
+    from src.token_status import banner_html as _token_banner
+
     # stat cards
-    stats = f"""
+    stats = f"""{_token_banner()}
     <div class="stat-grid">
       <div class="stat-card">
         <div class="val">{today_cnt}</div>
