@@ -1,0 +1,6 @@
+audit.jsonl
+audit.head
+audit.jsonl.lock
+runs/
+worktrees/
+tasks/
