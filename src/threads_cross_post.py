@@ -6,6 +6,7 @@ from pathlib import Path
 from urllib.parse import quote
 
 THREADS_MAX_CHARS = 500
+DEFAULT_TOPIC_TAG = "AI Threads"
 
 
 def threads_ready() -> bool:
@@ -53,4 +54,5 @@ def cross_post(image_dir: str) -> str:
         media, hook="", hashtags=[],
         base_url=f"{base}/output_img/{quote(folder.name)}",
         caption=_caption_for(folder),
+        topic_tag=os.getenv("THREADS_TOPIC_TAG", DEFAULT_TOPIC_TAG),
     )
