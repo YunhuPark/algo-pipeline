@@ -128,7 +128,9 @@ _EMOJI_RE = re.compile(
 
 def _clean(text: str) -> str:
     """텍스트에서 이모지 제거 후 앞뒤 공백 정리"""
-    return _EMOJI_RE.sub("", text).strip()
+    from src.qa.text_style import strip_sentence_periods
+
+    return strip_sentence_periods(_EMOJI_RE.sub("", text)).strip()
 
 
 # ── 이모지: RGBA 레이어 방식 (X 버그 수정) ───────────────────
@@ -1640,6 +1642,9 @@ def render_card_set(
         caption = insert_into_caption(
             caption, source.caption_block(), " ".join(script.hashtags[:15])
         )
+    from src.qa.text_style import strip_sentence_periods
+
+    caption = strip_sentence_periods(caption)   # 마침표 없는 문체
     # 이 파일이 곧 게시되는 캡션이다 (publisher가 그대로 읽는다).
     (out_dir / "caption.txt").write_text(caption, encoding="utf-8")
     print(f"  [Renderer] 캡션 저장: caption.txt")
