@@ -333,7 +333,9 @@ def read_card_caption(folder: Path) -> str:
 
 
 def _final_caption(caption: str | None, hook: str, hashtags: list[str]) -> str:
-    text = (caption or "").strip()
+    from src.qa.text_style import strip_sentence_periods
+
+    text = strip_sentence_periods((caption or "").strip())
     if not text:
         return _build_caption(hook, hashtags)
     if len(text) > INSTAGRAM_CAPTION_LIMIT:

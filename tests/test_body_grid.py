@@ -68,7 +68,7 @@ def test_title_and_body_type_is_the_same_on_every_card(monkeypatch):
     sizes = set()
     for title, body in (
         ("짧은 제목", "짧은 본문입니다."),
-        ("조금 더 긴 제목 예시입니다", "근거로 확인된 문장입니다. " * 4),
+        ("조금 더 긴 제목 예시입니다", "근거로 확인된 문장입니다. 이어지는 두 번째 문장입니다. 세 번째 문장입니다."),
         ("제목", "중간 길이의 본문 문장입니다. " * 3),
     ):
         title_font, _, _, body_font, _, _, _ = renderer._text_panel_layout(title, body, draw)
