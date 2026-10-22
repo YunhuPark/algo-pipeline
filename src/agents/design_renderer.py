@@ -865,8 +865,9 @@ def _cover_palette(img: Image.Image) -> tuple[tuple[int, int, int], tuple[int, i
     return light, dark  # type: ignore[return-value]
 
 
+# 단위는 긴 것부터 나열한다 — "89개국"에서 "개"만 먼저 잡히면 단어 중간에서 색이 바뀐다.
 _FIGURE_RE = re.compile(
-    r"\d[\d,\.]*\s?(?:%|억|조|만|천|배|달러|원|명|개|년|월|일|[A-Za-z]{1,3}\b)?"
+    r"\d[\d,\.]*\s?(?:%|억|조|만|천|배|달러|원|명|개국|개사|개월|개|곳|건|년|월|일|[A-Za-z]{1,3}\b)?"
 )
 
 
