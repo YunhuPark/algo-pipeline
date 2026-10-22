@@ -48,3 +48,10 @@ def test_the_judge_runs_at_temperature_zero(monkeypatch):
     monkeypatch.setattr(verifier, "ChatOpenAI", _FakeLLM)
     verifier._ai_evaluate(_script())
     assert captured["temperature"] == 0
+
+
+def test_rubric_matches_the_cover_standard():
+    # the judge must not demand a company name or a cover longer than the layout allows
+    rubric = verifier._EVAL_SYSTEM
+    assert "22자 이내" in rubric
+    assert "회사명이 없어도 높게 채점" in rubric
