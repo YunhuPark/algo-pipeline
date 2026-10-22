@@ -29,10 +29,10 @@ def _caption_for(folder: Path) -> str:
 
 
 def cross_post(image_dir: str) -> str:
-    """Publish the reviewed PNG cards to Threads and return the post id.
+    """Publish the reviewed cards (images and video cards, same selection as Instagram) to Threads.
 
-    Raises ValueError when the set cannot go out as-is (e.g. it contains video cards, which the
-    Threads publisher does not handle) so the caller can say so instead of posting a different set.
+    Raises ValueError when the set cannot go out as-is, so the caller can say so instead of
+    posting a different set.
     """
     from src.agents import threads_publisher as tp
     from src.agents.content_queue import _select_render_media
@@ -41,8 +41,6 @@ def cross_post(image_dir: str) -> str:
     media = _select_render_media(folder)
     if not media:
         raise ValueError("게시할 카드 이미지를 찾지 못했습니다.")
-    if any(p.suffix.lower() != ".png" for p in media):
-        raise ValueError("영상 카드가 포함된 세트라 Threads에는 올리지 않았습니다.")
     if not threads_ready():
         raise ValueError("THREADS_ACCESS_TOKEN/THREADS_USER_ID가 .env에 없습니다.")
     base = os.getenv("IG_IMAGE_BASE_URL", "").strip().rstrip("/")
