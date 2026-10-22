@@ -110,3 +110,15 @@ def test_cover_highlight_covers_the_whole_figure_word():
     assert marked("6개월 만에 2개사 인수") == ["6개월", "2개사"]
     assert marked("10만 곳의 광고주") == ["10만"]      # spaced words stay separate
     assert marked("40% 더 빠른 칩") == ["40%"]
+
+
+def test_names_with_digits_are_not_highlighted_as_figures():
+    from src.agents.design_renderer import _FIGURE_RE
+
+    def marked(line):
+        return [m.group(0) for m in _FIGURE_RE.finditer(line)]
+
+    assert marked("G7, AI 공격 차단") == []        # was "7, AI" in cyan
+    assert marked("GPT-5 출시") == [] and marked("Gemini 4 공개") == []
+    assert marked("5G 시장") == ["5G"] and marked("3.5배, AI") == ["3.5배"]
+    assert marked("2,400만 명") == ["2,400만"]
