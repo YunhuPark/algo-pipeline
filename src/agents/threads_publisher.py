@@ -122,7 +122,15 @@ def _create_carousel_item(media_url: str, is_video: bool = False) -> str:
     return data["id"]
 
 
-def _create_carousel_container(container_ids: list[str], caption: str) -> str:
+def normalize_topic_tag(tag: str) -> str:
+    """A Threads topic tag: 1-50 chars, no periods or ampersands. Empty/invalid -> no tag."""
+    tag = (tag or "").strip().lstrip("#").strip()
+    if not tag or len(tag) > 50 or "." in tag or "&" in tag:
+        return ""
+    return tag
+
+
+def _create_carousel_container(container_ids: list[str], caption: str, topic_tag: str = "") -> str:
     """
     캐러셀 컨테이너 생성 → carousel_id 반환.
     """
@@ -133,6 +141,7 @@ def _create_carousel_container(container_ids: list[str], caption: str) -> str:
             "children":     ",".join(container_ids),
             "text":         caption,
             "access_token": THREADS_ACCESS_TOKEN,
+            **({"topic_tag": normalize_topic_tag(topic_tag)} if normalize_topic_tag(topic_tag) else {}),
         },
         timeout=30,
     )
@@ -197,6 +206,7 @@ def publish(
     hashtags: list[str],
     base_url: str = "",
     caption: str = "",
+    topic_tag: str = "",
 ) -> str:
     """
     카드뉴스 이미지들을 Threads 캐러셀로 게시.
@@ -224,7 +234,7 @@ def publish(
 
     # 단일 이미지는 캐러셀 불필요 → 단순 IMAGE 게시
     if len(imgs) == 1 and imgs[0].suffix.lower() == ".png":
-        return _publish_single(imgs[0], hook, hashtags, base_url, caption)
+        return _publish_single(imgs[0], hook, hashtags, base_url, caption, topic_tag)
 
     # 공개 URL 결정: 명시 인자 → .env → ngrok 자동 시작
     url_base = (base_url or _IMAGE_BASE_URL or "").rstrip("/")
@@ -251,7 +261,7 @@ def publish(
 
     # 2. 캐러셀 컨테이너 생성
     print("  [ThreadsPublisher] 캐러셀 컨테이너 생성 중...")
-    carousel_id = _create_carousel_container(container_ids, caption)
+    carousel_id = _create_carousel_container(container_ids, caption, topic_tag)
     print(f"    → carousel_id: {carousel_id}")
     _wait_for_ready(carousel_id)
 
@@ -270,6 +280,7 @@ def _publish_single(
     hashtags: list[str],
     base_url: str = "",
     caption: str = "",
+    topic_tag: str = "",
 ) -> str:
     """단일 이미지를 Threads 단독 게시물로 업로드."""
     url_base = (base_url or _IMAGE_BASE_URL or "").rstrip("/")
@@ -288,6 +299,7 @@ def _publish_single(
             "image_url":    img_url,
             "text":         caption,
             "access_token": THREADS_ACCESS_TOKEN,
+            **({"topic_tag": normalize_topic_tag(topic_tag)} if normalize_topic_tag(topic_tag) else {}),
         },
         timeout=30,
     )

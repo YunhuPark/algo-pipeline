@@ -93,3 +93,39 @@ def test_auto_refresh_only_when_due(monkeypatch):
         assert notes and "완료" in notes[0]
     with patch("scripts.refresh_ig_token.main", return_value=2):
         assert "실패" in tr.ensure_fresh(force=True)[0]
+
+
+def test_topic_tag_is_validated_and_sent_with_the_container():
+    from src.agents import threads_publisher as tp
+
+    assert tp.normalize_topic_tag("#AI Threads") == "AI Threads"
+    assert tp.normalize_topic_tag("a.b") == "" and tp.normalize_topic_tag("a&b") == ""
+    assert tp.normalize_topic_tag("x" * 51) == "" and tp.normalize_topic_tag("  ") == ""
+
+    seen = []
+
+    class R:
+        def json(self):
+            return {"id": "c"}
+
+    def fake_post(url, params=None, timeout=None):
+        seen.append(params)
+        return R()
+
+    with patch("src.agents.threads_publisher.httpx.post", fake_post):
+        tp._create_carousel_container(["1", "2"], "cap", "AI Threads")
+        tp._create_carousel_container(["1", "2"], "cap", "bad.tag")
+    assert seen[0]["topic_tag"] == "AI Threads"
+    assert "topic_tag" not in seen[1]
+
+
+def test_cross_post_passes_the_ai_threads_tag_by_default(tmp_path, monkeypatch):
+    folder = tmp_path / "set"
+    _set_cards(folder, ["card_01.png", "card_02.png"])
+    monkeypatch.setenv("THREADS_ACCESS_TOKEN", "t")
+    monkeypatch.setenv("THREADS_USER_ID", "1")
+    monkeypatch.setenv("IG_IMAGE_BASE_URL", "https://example.test")
+    monkeypatch.delenv("THREADS_TOPIC_TAG", raising=False)
+    with patch("src.agents.threads_publisher.publish", return_value="p") as pub:
+        tc.cross_post(str(folder))
+    assert pub.call_args.kwargs["topic_tag"] == "AI Threads"
