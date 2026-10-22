@@ -102,15 +102,15 @@ def _get_public_url(image_dir: Path, port: int = 8765) -> str:
 
 # ── Threads Graph API 헬퍼 ────────────────────────────────
 
-def _create_carousel_item(image_url: str) -> str:
+def _create_carousel_item(media_url: str, is_video: bool = False) -> str:
     """
-    캐러셀 아이템용 이미지 컨테이너 생성 → container_id 반환.
+    캐러셀 아이템용 이미지/영상 컨테이너 생성 → container_id 반환.
     """
     resp = httpx.post(
         f"{THREADS_API_BASE}/{THREADS_USER_ID}/threads",
         params={
-            "media_type":       "IMAGE",
-            "image_url":        image_url,
+            "media_type":       "VIDEO" if is_video else "IMAGE",
+            "video_url" if is_video else "image_url": media_url,
             "is_carousel_item": "true",
             "access_token":     THREADS_ACCESS_TOKEN,
         },
@@ -118,7 +118,7 @@ def _create_carousel_item(image_url: str) -> str:
     )
     data = resp.json()
     if "id" not in data:
-        raise RuntimeError(f"Threads 이미지 컨테이너 생성 실패: {data}")
+        raise RuntimeError(f"Threads {'영상' if is_video else '이미지'} 컨테이너 생성 실패: {data}")
     return data["id"]
 
 
@@ -217,13 +217,13 @@ def publish(
             ".env에 THREADS_ACCESS_TOKEN과 THREADS_USER_ID가 없습니다."
         )
 
-    # PNG 파일만 필터
-    imgs = [p for p in image_paths if p.suffix.lower() == ".png"]
+    # PNG(이미지)와 MP4(영상 카드)만 사용
+    imgs = [p for p in image_paths if p.suffix.lower() in (".png", ".mp4")]
     if not imgs:
-        raise ValueError("업로드할 PNG 파일이 없습니다.")
+        raise ValueError("업로드할 PNG/MP4 파일이 없습니다.")
 
     # 단일 이미지는 캐러셀 불필요 → 단순 IMAGE 게시
-    if len(imgs) == 1:
+    if len(imgs) == 1 and imgs[0].suffix.lower() == ".png":
         return _publish_single(imgs[0], hook, hashtags, base_url, caption)
 
     # 공개 URL 결정: 명시 인자 → .env → ngrok 자동 시작
@@ -243,9 +243,10 @@ def publish(
     for i, img_path in enumerate(imgs, 1):
         img_url = f"{url_base}/{img_path.name}"
         print(f"  [ThreadsPublisher] 컨테이너 생성 ({i}/{len(imgs)}): {img_path.name}")
-        cid = _create_carousel_item(img_url)
+        is_video = img_path.suffix.lower() == ".mp4"
+        cid = _create_carousel_item(img_url, is_video=is_video)
         print(f"    → container_id: {cid}")
-        _wait_for_ready(cid)
+        _wait_for_ready(cid, max_wait=300 if is_video else 60)
         container_ids.append(cid)
 
     # 2. 캐러셀 컨테이너 생성
