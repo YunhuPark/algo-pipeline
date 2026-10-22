@@ -98,3 +98,15 @@ def test_stacked_particles_are_stripped_before_a_noun_is_accepted():
 
     assert _lead_figure_phrase([N(claim_text="아마존은 100만 대 이상의 로봇을 운영한다.")]) == "100만 대 이상의 로봇"
     assert _lead_figure_phrase([N(claim_text="지원자 300명에는 면접이 면제된다.")]) == ""
+
+
+def test_cover_highlight_covers_the_whole_figure_word():
+    from src.agents.design_renderer import _FIGURE_RE
+
+    def marked(line):
+        return [m.group(0) for m in _FIGURE_RE.finditer(line)]
+
+    assert marked("89개국 광고 서비스") == ["89개국"]      # not "89개" + a white "국"
+    assert marked("6개월 만에 2개사 인수") == ["6개월", "2개사"]
+    assert marked("10만 곳의 광고주") == ["10만"]      # spaced words stay separate
+    assert marked("40% 더 빠른 칩") == ["40%"]
