@@ -129,3 +129,45 @@ def test_cross_post_passes_the_ai_threads_tag_by_default(tmp_path, monkeypatch):
     with patch("src.agents.threads_publisher.publish", return_value="p") as pub:
         tc.cross_post(str(folder))
     assert pub.call_args.kwargs["topic_tag"] == "AI Threads"
+
+
+def _row(status="published", image_dir="C:/out/set1"):
+    return {"id": 28, "status": status, "image_dir": image_dir, "topic": "주제"}
+
+
+def test_queue_item_cross_post_records_the_post_and_refuses_duplicates(monkeypatch):
+    recorded = []
+    posts = []
+    monkeypatch.setattr("src.db.get_queue_row", lambda qid: _row())
+    monkeypatch.setattr("src.db.get_posts", lambda platform=None, limit=50, include_deleted=False: posts)
+    monkeypatch.setattr("src.db.insert_post", lambda **kw: recorded.append(kw) or 1)
+    monkeypatch.setattr(tc, "cross_post", lambda image_dir: "th-1")
+    monkeypatch.setattr(tc, "_log", lambda message: None)
+
+    ok, message = tc.cross_post_queue_item(28)
+    assert ok and "th-1" in message
+    assert recorded[0]["platform"] == "threads" and recorded[0]["post_id"] == "th-1"
+
+    posts.append({"image_dir": "C:/out/set1", "post_id": "th-1"})   # now it is in the posts table
+    ok, message = tc.cross_post_queue_item(28)
+    assert not ok and "이미 Threads" in message
+    assert len(recorded) == 1                                          # no second post, no second record
+
+
+def test_queue_item_cross_post_only_after_instagram_and_reports_failures(monkeypatch):
+    logged = []
+    monkeypatch.setattr("src.db.get_queue_row", lambda qid: _row(status="ready"))
+    monkeypatch.setattr("src.db.get_posts", lambda **kw: [])
+    ok, message = tc.cross_post_queue_item(28)
+    assert not ok and "Instagram에 게시되지 않아" in message
+
+    monkeypatch.setattr("src.db.get_queue_row", lambda qid: _row())
+    monkeypatch.setattr(tc, "_log", logged.append)
+
+    def boom(image_dir):
+        raise RuntimeError("Threads 미디어 처리 타임아웃")
+
+    monkeypatch.setattr(tc, "cross_post", boom)
+    ok, message = tc.cross_post_queue_item(28)
+    assert not ok and "Instagram은 게시됨" in message and "타임아웃" in message
+    assert logged and "타임아웃" in logged[0]                           # a durable trace exists

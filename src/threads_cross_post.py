@@ -56,3 +56,51 @@ def cross_post(image_dir: str) -> str:
         caption=_caption_for(folder),
         topic_tag=os.getenv("THREADS_TOPIC_TAG", DEFAULT_TOPIC_TAG),
     )
+
+
+def _log(message: str) -> None:
+    """Keep a durable trace; the dashboard's job log disappears with the server process."""
+    from datetime import datetime
+
+    try:
+        path = Path(__file__).resolve().parents[1] / "logs" / "threads_cross_post.log"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as fh:
+            fh.write(f"[{datetime.now():%Y-%m-%d %H:%M:%S}] {message}\n")
+    except OSError:
+        pass
+
+
+def cross_post_queue_item(queue_id: int) -> tuple[bool, str]:
+    """Post a published queue item to Threads once; returns (ok, human-readable message).
+
+    Refuses items that are not published on Instagram yet and items already posted to Threads
+    (matched by the card folder), so a retry can never create a duplicate.
+    """
+    import json
+
+    from src.db import get_posts, get_queue_row, insert_post
+
+    row = get_queue_row(queue_id)
+    if row is None:
+        return False, f"큐 항목 #{queue_id}을 찾지 못했습니다"
+    if row["status"] != "published":
+        return False, f"#{queue_id}은 아직 Instagram에 게시되지 않아 Threads에 올리지 않습니다"
+    image_dir = row["image_dir"] or ""
+    for post in get_posts(platform="threads", limit=200):
+        if post["image_dir"] == image_dir and post["post_id"]:
+            return False, f"#{queue_id}은 이미 Threads에 게시되었습니다 ({post['post_id']})"
+    try:
+        post_id = cross_post(image_dir)
+    except Exception as exc:
+        message = f"Threads 게시 실패(Instagram은 게시됨): {type(exc).__name__}: {str(exc)[:300]}"
+        _log(f"#{queue_id} {message}")
+        return False, message
+    hook = ""
+    try:
+        hook = json.loads((Path(image_dir) / "script.json").read_text(encoding="utf-8")).get("hook", "")
+    except (OSError, ValueError):
+        pass
+    insert_post(platform="threads", topic=row["topic"], post_id=post_id, hook=hook, image_dir=image_dir)
+    _log(f"#{queue_id} Threads 게시 완료 {post_id}")
+    return True, f"Threads 게시 완료: {post_id}"
