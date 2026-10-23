@@ -1239,7 +1239,16 @@ def _render_cta(img: Image.Image, slide: Slide, total: int,
     b_lines = wrap_text(_clean(slide.body), bf, draw, text_w)
     _, _, _, lh2 = draw.textbbox((0, 0), "가나다", font=bf)
 
+    # 앞 카드에서 확인된 수치 칩(2~3개). 문장 요약 대신 한눈에 보이는 숫자로 마무리한다.
+    chips = [
+        (_clean(v), _clean(slide.visual_labels[i]) if i < len(slide.visual_labels) else "")
+        for i, v in enumerate(slide.visual_values[:3]) if _clean(v)
+    ] if len(slide.visual_values) >= 2 else []
+    CHIP_H, CHIP_GAP = 122, 14
+
     est_h = 0
+    if chips:
+        est_h += CHIP_H + 26
     if slide.emoji:
         ep = _find_emoji_font()
         if ep:
@@ -1278,6 +1287,36 @@ def _render_cta(img: Image.Image, slide: Slide, total: int,
             _draw_stroked_line(draw, line, tf, y, fill=(255, 255, 255), stroke=5)
         y += int(lh * 1.2)
     y += 16
+
+    # 수치 칩
+    if chips:
+        chip_w = (text_w - CHIP_GAP * (len(chips) - 1)) // len(chips)
+        chip_layer = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+        cd = ImageDraw.Draw(chip_layer)
+        for i in range(len(chips)):
+            x0 = PAD + i * (chip_w + CHIP_GAP)
+            cd.rounded_rectangle([x0, y, x0 + chip_w, y + CHIP_H], radius=18, fill=(4, 4, 12, 170))
+            cd.rounded_rectangle([x0, y, x0 + chip_w, y + CHIP_H], radius=18,
+                                 outline=(*STYLE["accent2"], 150), width=2)
+        img = Image.alpha_composite(img.convert("RGBA"), chip_layer).convert("RGB")
+        draw = ImageDraw.Draw(img)
+        for i, (value, label) in enumerate(chips):
+            x0 = PAD + i * (chip_w + CHIP_GAP)
+            size = 46
+            vf = _font(size, bold=True)
+            while size > 24 and draw.textlength(value, font=vf) > chip_w - 24:
+                size -= 2
+                vf = _font(size, bold=True)
+            vw = int(draw.textlength(value, font=vf))
+            draw.text((x0 + (chip_w - vw) // 2, y + 22), value, font=vf, fill=(255, 255, 255))
+            if label:
+                lf = _font(22, bold=False)
+                lw = int(draw.textlength(label, font=lf))
+                if lw > chip_w - 16:
+                    label = label[: max(2, (chip_w - 16) // 22)]
+                    lw = int(draw.textlength(label, font=lf))
+                draw.text((x0 + (chip_w - lw) // 2, y + 82), label, font=lf, fill=STYLE["accent2"])
+        y += CHIP_H + 26
 
     # 본문
     for line in b_lines:
