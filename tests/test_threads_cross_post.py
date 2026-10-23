@@ -230,7 +230,10 @@ def _script_json(folder: Path, bodies, note=None):
 def test_threads_gets_its_own_clean_caption_not_the_instagram_one(tmp_path):
     folder = tmp_path / "set"
     _set_cards(folder, ["card_01.png", "card_02.png"])          # caption.txt: hashtags, handle, emoji
-    (folder / "caption.txt").write_text("89개국 확장! 🌍\n\n· 항목\n\n@algo__kr\n#알고 #카드뉴스", encoding="utf-8")
+    (folder / "caption.txt").write_text(
+        "89개국 확장! 🌍\n\n· 오픈AI가 광고를 26개국에 추가했어.  \n· 중남미 14개국도 포함됐어!\n\n@algo__kr\n#알고 #카드뉴스",
+        encoding="utf-8",
+    )
     _script_json(
         folder,
         ["오픈AI가 광고 서비스를 26개국에 추가했다.", "중남미 14개국이 포함된다."],
@@ -238,7 +241,8 @@ def test_threads_gets_its_own_clean_caption_not_the_instagram_one(tmp_path):
     )
     text = tc.threads_caption(folder)
     assert text.splitlines()[0] == "오픈AI, 챗GPT 광고 서비스 89개국으로 확대"
-    assert "· 오픈AI가 광고 서비스를 26개국에 추가했다" in text and "추가했다." not in text   # no final period
+    assert "· 오픈AI가 광고를 26개국에 추가했어" in text and "추가했어." not in text      # Instagram's tone, no final period
+    assert "· 중남미 14개국도 포함됐어!" in text
     assert "출처: AI타임스 · 2026.10.22" in text
     assert "https://www.aitimes.com/news/articleView.html?idxno=1" in text
     assert "#" not in text and "@algo__kr" not in text and "🌍" not in text
@@ -258,3 +262,10 @@ def test_without_a_script_the_instagram_caption_is_the_fallback(tmp_path):
     _set_cards(folder, ["card_01.png"])
     assert tc.threads_caption(folder) == ""
     assert tc._caption_for(folder).startswith("첫 줄")
+
+
+def test_without_caption_bullets_the_card_sentences_are_used(tmp_path):
+    folder = tmp_path / "nobullets"
+    _script_json(folder, ["광고 서비스를 확대했다.", "중남미가 포함된다."], {"outlet": "AI타임스", "published": "2026-10-22", "url": "https://x.test/a"})
+    text = tc.threads_caption(folder)
+    assert "· 광고 서비스를 확대했다" in text and "· 중남미가 포함된다" in text

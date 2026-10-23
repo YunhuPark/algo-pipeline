@@ -32,11 +32,21 @@ def threads_caption(folder: Path) -> str:
     except (OSError, ValueError):
         return ""
     headline = strip_sentence_periods(str(data.get("topic") or "").strip())
-    points = [
-        "· " + strip_sentence_periods(str(s.get("body") or "").strip()).replace("\n", " ")
-        for s in data.get("slides", [])
-        if s.get("slide_type") == "content" and str(s.get("body") or "").strip()
-    ]
+    # Key points: the Instagram caption's own bullets (same friendly tone, already checked against the
+    # cards). Only when it has none, fall back to the verified card sentences.
+    points: list[str] = []
+    try:
+        for line in (folder / "caption.txt").read_text(encoding="utf-8").splitlines():
+            if line.strip().startswith("·"):
+                points.append("· " + strip_sentence_periods(line.strip().lstrip("·").strip()))
+    except OSError:
+        pass
+    if not points:
+        points = [
+            "· " + strip_sentence_periods(str(s.get("body") or "").strip()).replace("\n", " ")
+            for s in data.get("slides", [])
+            if s.get("slide_type") == "content" and str(s.get("body") or "").strip()
+        ]
     if not headline or not points:
         return ""
     note = data.get("source_note") or {}
