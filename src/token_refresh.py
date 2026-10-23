@@ -40,10 +40,14 @@ def _due(date_var: str, token_var: str) -> bool:
 
 def _push_into_loaded_modules() -> None:
     """Modules read the tokens at import time; hand them the refreshed values."""
+    from src import threads_credentials
+
     for mod_name, env in _MODULE_TOKENS.items():
         mod = sys.modules.get(mod_name)
-        if mod is not None and hasattr(mod, env):
-            setattr(mod, env, os.getenv(env, ""))
+        if mod is None or not hasattr(mod, env):
+            continue
+        value = threads_credentials.load()[0] if env == "THREADS_ACCESS_TOKEN" else os.getenv(env, "")
+        setattr(mod, env, value)
 
 
 def ensure_fresh(force: bool = False) -> list[str]:
