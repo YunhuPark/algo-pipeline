@@ -1708,15 +1708,12 @@ def _run_queue_publish_job(job_id: str, queue_id: int, with_threads: bool = Fals
         sys.stdout = old_stdout
 
         if result and with_threads:
-            # Threads is a courtesy copy: its failure never undoes or hides the Instagram post.
-            try:
-                from src.db import get_queue_row
-                from src.threads_cross_post import cross_post
-                row = get_queue_row(queue_id)
-                th_id = cross_post((row["image_dir"] if row is not None else "") or "")
-                _emit(q, "log", f"Threads 게시 완료: {th_id}")
-            except Exception as exc:
-                _emit(q, "log", f"Threads 게시는 건너뛰었습니다(Instagram은 게시됨): {exc}")
+            # Threads is a courtesy copy: its failure never undoes or hides the Instagram post. The
+            # outcome is kept in the job log and logs/threads_cross_post.log, and duplicates are refused.
+            from src.threads_cross_post import cross_post_queue_item
+            ok, note = cross_post_queue_item(queue_id)
+            job["logs"].append(note)
+            _emit(q, "log", note)
 
         if result:
             job["status"] = "done"
