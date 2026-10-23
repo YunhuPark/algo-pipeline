@@ -8,6 +8,16 @@ from src import threads_cross_post as tc
 from src import token_refresh as tr
 
 
+@pytest.fixture(autouse=True)
+def _algo_env_file(tmp_path, monkeypatch):
+    """Credentials are read from the project's .env only; give every test its own (CI has none)."""
+    from src import threads_credentials as creds
+
+    env_file = tmp_path / "algo.env"
+    env_file.write_text("THREADS_ACCESS_TOKEN=t" + chr(10) + "THREADS_USER_ID=1" + chr(10), encoding="utf-8")
+    monkeypatch.setattr(creds, "ENV_PATH", env_file)
+
+
 def _set_cards(folder: Path, names):
     folder.mkdir(parents=True, exist_ok=True)
     for n in names:
