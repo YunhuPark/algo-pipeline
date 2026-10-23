@@ -398,22 +398,14 @@ def _visual_type(claim: Claim) -> str:
 
 
 def _hashtags(topic: str, claims: List[Claim]) -> list[str]:
-    # "#팩트체크"는 넣지 않는다 — 카드는 출처 한 건과의 일치만 검증하므로
-    # 외부 팩트체크를 했다는 인상을 주는 태그는 과장이다.
-    tags = ["#알고", "#카드뉴스", "#뉴스분석", "#인사이트"]
-    candidates = [topic]
-    candidates.extend(entity for claim in claims for entity in claim.entities)
-    for item in candidates:
-        # "Brian Greenwood"처럼 영문 사람 이름은 해시태그로 쓰지 않는다. 기사 필자가
-        # 해시태그로 올라간 사례가 있었고, 사람 이름 태그는 탐색 효과보다 오해 위험이 크다.
-        if re.fullmatch(r"[A-Z][a-z]+ [A-Z][a-z]+", item.strip()):
-            continue
-        normalized = re.sub(r"[^0-9A-Za-z가-힣_]", "", item)
-        if normalized and len(normalized) <= 24:
-            tag = f"#{normalized}"
-            if tag not in tags:
-                tags.append(tag)
-    return tags[:10]
+    """Searchable tags: brand/format, the companies and products mentioned, topic tags picked by
+    keywords, and broad AI tags (see hashtag_pool). The whole headline is no longer a tag, and
+    "#팩트체크" stays out: a card is only checked against one source, so that tag would overstate it."""
+    from src.qa.hashtag_pool import build_hashtags
+
+    entities = [entity for claim in claims for entity in claim.entities]
+    claim_text = " ".join(getattr(claim, "claim_text", "") for claim in claims)
+    return build_hashtags(topic, claim_text, entities)
 
 
 class ScriptAssembler:
