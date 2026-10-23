@@ -74,15 +74,15 @@ def get_connection(db_path: str | Path, **kwargs) -> sqlite3.Connection:
                 f"[{algo_env}] Attempted to access non-production DB '{db_path}'. "
                 "Production/Development must use the official persistent paths."
             )
-        if algo_env == "test":
-            uri = kwargs.get('uri', False)
-            path_str = str(db_path)
-            if uri and 'mode=ro' in path_str and not _allow_ro_in_test:
-                raise DatabaseContaminationError("mode=ro access to prod DB is blocked in tests.")
+    if algo_env == "test":
+        uri = kwargs.get('uri', False)
+        path_str = str(db_path)
+        if uri and 'mode=ro' in path_str and not _allow_ro_in_test:
+            raise DatabaseContaminationError("mode=ro access to prod DB is blocked in tests.")
 
-            # Track the connection
-            if str(db_path) != ":memory:":
-                _test_connections.append(str(resolved_path))
+        # Track the connection
+        if str(db_path) != ":memory:":
+            _test_connections.append(str(resolved_path))
 
     kwargs.setdefault("timeout", 30)
     conn = sqlite3.connect(str(db_path), **kwargs)
