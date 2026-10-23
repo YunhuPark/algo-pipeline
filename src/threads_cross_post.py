@@ -16,8 +16,55 @@ def threads_ready() -> bool:
     return bool(token and user_id)
 
 
+def threads_caption(folder: Path) -> str:
+    """A short, clean Threads text built from the reviewed card content (no hashtags, no handle,
+    no emoji; Threads uses one topic tag instead): headline, the verified key points, the source.
+
+    Returns "" when the set has no usable script.json, so the caller can fall back to the Instagram
+    caption.
+    """
+    import json
+
+    from src.qa.text_style import strip_sentence_periods
+
+    try:
+        data = json.loads((folder / "script.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return ""
+    headline = strip_sentence_periods(str(data.get("topic") or "").strip())
+    points = [
+        "· " + strip_sentence_periods(str(s.get("body") or "").strip()).replace("\n", " ")
+        for s in data.get("slides", [])
+        if s.get("slide_type") == "content" and str(s.get("body") or "").strip()
+    ]
+    if not headline or not points:
+        return ""
+    note = data.get("source_note") or {}
+    source_lines = []
+    if note.get("outlet"):
+        date_text = str(note.get("published") or "").replace("-", ".")
+        source_lines.append(f"출처: {note['outlet']}" + (f" · {date_text}" if date_text else ""))
+    if note.get("url"):
+        source_lines.append(str(note["url"]))
+    tail = "\n".join(source_lines)
+
+    def assemble(n: int) -> str:
+        parts = [headline, "\n".join(points[:n])]
+        if tail:
+            parts.append(tail)
+        return "\n\n".join(parts)
+
+    count = len(points)
+    while count > 1 and len(assemble(count)) > THREADS_MAX_CHARS:
+        count -= 1                      # drop the last key point rather than cut a sentence
+    return assemble(count)
+
+
 def _caption_for(folder: Path) -> str:
-    """The reviewed Instagram caption, cut at a line boundary to fit the Threads limit."""
+    """The Threads text; the reviewed Instagram caption (cut at a line boundary) if it cannot be built."""
+    own = threads_caption(folder)
+    if own:
+        return own
     path = folder / "caption.txt"
     text = path.read_text(encoding="utf-8").strip() if path.exists() else ""
     if len(text) <= THREADS_MAX_CHARS:

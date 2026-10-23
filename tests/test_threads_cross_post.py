@@ -212,3 +212,49 @@ def test_a_token_from_the_wrong_account_never_posts(monkeypatch):
     assert creds.assert_expected_account("tok", "111") == "algo__kr"
     with pytest.raises(ValueError):                                     # right name but a different id
         creds.assert_expected_account("tok", "222")
+
+
+def _script_json(folder: Path, bodies, note=None):
+    import json
+
+    folder.mkdir(parents=True, exist_ok=True)
+    slides = [{"slide_type": "cover", "title": "표지", "body": "후크"}]
+    slides += [{"slide_type": "content", "title": f"소제목{i}", "body": b} for i, b in enumerate(bodies)]
+    slides += [{"slide_type": "cta", "title": "질문", "body": "저장"}]
+    data = {"topic": "오픈AI, 챗GPT 광고 서비스 89개국으로 확대", "slides": slides}
+    if note is not None:
+        data["source_note"] = note
+    (folder / "script.json").write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+
+
+def test_threads_gets_its_own_clean_caption_not_the_instagram_one(tmp_path):
+    folder = tmp_path / "set"
+    _set_cards(folder, ["card_01.png", "card_02.png"])          # caption.txt: hashtags, handle, emoji
+    (folder / "caption.txt").write_text("89개국 확장! 🌍\n\n· 항목\n\n@algo__kr\n#알고 #카드뉴스", encoding="utf-8")
+    _script_json(
+        folder,
+        ["오픈AI가 광고 서비스를 26개국에 추가했다.", "중남미 14개국이 포함된다."],
+        {"outlet": "AI타임스", "published": "2026-10-22", "url": "https://www.aitimes.com/news/articleView.html?idxno=1"},
+    )
+    text = tc.threads_caption(folder)
+    assert text.splitlines()[0] == "오픈AI, 챗GPT 광고 서비스 89개국으로 확대"
+    assert "· 오픈AI가 광고 서비스를 26개국에 추가했다" in text and "추가했다." not in text   # no final period
+    assert "출처: AI타임스 · 2026.10.22" in text
+    assert "https://www.aitimes.com/news/articleView.html?idxno=1" in text
+    assert "#" not in text and "@algo__kr" not in text and "🌍" not in text
+    assert tc._caption_for(folder) == text                       # this is what gets posted
+
+
+def test_threads_caption_stays_within_the_limit_by_dropping_whole_points(tmp_path):
+    folder = tmp_path / "long"
+    _script_json(folder, ["가" * 120 for _ in range(6)], {"outlet": "AI타임스", "published": "2026-10-22", "url": "https://x.test/a"})
+    text = tc.threads_caption(folder)
+    assert len(text) <= tc.THREADS_MAX_CHARS
+    assert text.count("· ") >= 1 and "출처: AI타임스" in text       # points were dropped, the source stayed
+
+
+def test_without_a_script_the_instagram_caption_is_the_fallback(tmp_path):
+    folder = tmp_path / "plain"
+    _set_cards(folder, ["card_01.png"])
+    assert tc.threads_caption(folder) == ""
+    assert tc._caption_for(folder).startswith("첫 줄")
