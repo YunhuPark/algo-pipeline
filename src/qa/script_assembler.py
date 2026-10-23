@@ -92,11 +92,42 @@ def _contextual_cta(topic: str) -> tuple[str, str]:
     )
 
 
+_CTA_FOLLOW = "저장해두고 다음 소식도 받아보세요"
+
+
+def _cta_summary(content_slides: list) -> tuple[str, list[str], list[str]]:
+    """마지막 장 요약: 한 줄 핵심 + 숫자 칩(최대 3개). 새 문장을 쓰지 않고, 이미 검증되어
+    앞 카드에 실린 소제목과 수치만 다시 보여준다."""
+    if not content_slides:
+        return "", [], []
+    takeaway = _shorten(content_slides[0].title, 22)
+    values: list[str] = []
+    labels: list[str] = []
+    for slide in content_slides:
+        if not slide.visual_values:
+            continue
+        value = slide.visual_values[0]
+        if value in values:
+            continue
+        # 라벨은 카드 소제목에서 그 수치를 뺀 말("중남미 14개국 추가" -> "중남미 추가")이 가장 정확하다.
+        # 저장된 라벨은 카드마다 같은 말이 반복되기도 한다.
+        label = re.sub(r"\s+", " ", slide.title.replace(value, " ")).strip()
+        if len(label) < 2:
+            label = slide.visual_labels[0] if slide.visual_labels else slide.title
+        values.append(value)
+        labels.append(_shorten(label, 10))
+        if len(values) == 3:
+            break
+    if len(values) < 2:      # 칩이 하나면 허전하니 그리지 않고 한 줄 핵심만 둔다
+        return takeaway, [], []
+    return takeaway, values, labels
+
+
 class _CoverCopy(BaseModel):
     cover_title: str
     hook: str
     cta_title: str
-    cta_body: str
+    cta_body: str = ""      # 더는 쓰지 않는다: 마지막 장 본문은 검증된 카드 내용에서 조립한다
 
 
 _COVER_COPY_SYSTEM = """
@@ -112,8 +143,9 @@ _COVER_COPY_SYSTEM = """
   새 숫자를 만들거나 바꾸지 마세요. 요점에 없는 과장·낚시("충격", "난리", "역대급")와
   말줄임표는 금지입니다. 숫자가 없으면 가장 구체적인 사건·주체를 앞에 두세요.
 - hook: 40자 이내, 커버 바로 아래 붙는 한 줄 후크
-- cta_title: 20자 이내, 마지막 장 제목 (질문형 또는 저장 유도형)
-- cta_body: 45~130자, 마지막 장 본문 (자연스러운 참여 유도 문구)
+- cta_title: 20자 이내, 마지막 장 제목 (질문형 또는 저장 유도형). 카드 내용을 요약하지 말고
+  독자에게 던지는 짧은 질문이나 한마디로 쓰세요. 기대·전망 표현("기대됩니다")은 금지입니다.
+- cta_body: 쓰지 마세요(빈 문자열). 마지막 장 본문은 시스템이 앞 카드에서 조립합니다.
 
 "개선 피드백"이 주어지면 그 지적을 반드시 반영해 이전과 다르게 쓰세요.
 """
@@ -155,7 +187,7 @@ def _generate_cover_copy(
             }
         )
         if not (result.cover_title.strip() and result.hook.strip()
-                and result.cta_title.strip() and result.cta_body.strip()):
+                and result.cta_title.strip()):
             raise ValueError("cover copy response has an empty field")
         return result
     except Exception as e:
@@ -499,14 +531,24 @@ class ScriptAssembler:
         # the generated (or templated) contextual engagement copy above, which
         # makes no new factual assertion.
         cta_claims = [c for c in verified_claims if c.claim_type == "cta"]
-        cta_body = cta_claims[0].claim_text if cta_claims else generated_cta_body
+        cta_values: list[str] = []
+        cta_labels: list[str] = []
+        if cta_claims:
+            cta_body = cta_claims[0].claim_text
+        else:
+            takeaway, cta_values, cta_labels = _cta_summary(
+                [sl for sl in slides if sl.slide_type == "content"]
+            )
+            cta_body = f"{takeaway}\n{_CTA_FOLLOW}" if takeaway else generated_cta_body
 
         slides.append(Slide(
             slide_number=len(slides) + 1,
             slide_type="cta",
             title=cta_title,
             body=cta_body,
-            emoji="👇"
+            emoji="👇",
+            visual_values=cta_values,
+            visual_labels=cta_labels,
         ))
 
         # Ensure exact requirements for CardNewsScript

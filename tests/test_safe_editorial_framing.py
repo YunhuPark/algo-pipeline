@@ -44,11 +44,39 @@ def test_default_cta_is_contextual_and_within_rule_limits():
     script = ScriptAssembler.assemble(topic, _verified_claims(), num_cards=6)
 
     assert script.cta.title == "가장 눈에 띈 포인트는?"
-    assert "WWDC" in script.cta.body
-    assert "저장" in script.cta.body
+    # the last card is a one-line takeaway (an already verified card headline) plus a save prompt,
+    # not a paragraph that summarizes the whole set again
+    takeaway, follow = script.cta.body.split(chr(10))
+    assert takeaway == script.content_slides[0].title
+    assert "저장" in follow
     assert len(script.cta.title) <= 22
-    assert len(script.cta.body) <= 130
+    assert len(script.cta.body) <= 60
+    assert "기대" not in script.cta.body
 
 
 def test_editorial_pass_threshold_remains_seven():
     assert PASS_THRESHOLD == 7.0
+
+
+def test_cta_chips_reuse_figures_already_shown_on_the_content_cards():
+    from src.qa.script_assembler import _cta_summary
+    from src.schemas.card_news import Slide
+
+    slides = [
+        Slide(slide_number=2, slide_type="content", title="광고 서비스 89개국 확대", body="x" * 40,
+              visual_values=["89개국", "26개국"], visual_labels=["광고 서비스", "추가"]),
+        Slide(slide_number=3, slide_type="content", title="중남미 14개국 추가", body="x" * 40,
+              visual_values=["14개국"], visual_labels=["중남미"]),
+        Slide(slide_number=4, slide_type="content", title="광고주 10만곳 캠페인", body="x" * 40,
+              visual_values=["89개국"], visual_labels=["중복"]),
+        Slide(slide_number=5, slide_type="content", title="광고 매출 10억 달러", body="x" * 40,
+              visual_values=["10억 달러"], visual_labels=["연간 환산 매출"]),
+    ]
+    takeaway, values, labels = _cta_summary(slides)
+    assert takeaway == "광고 서비스 89개국 확대"
+    assert values == ["89개국", "14개국", "10억 달러"]       # first figure per card, no duplicates, max 3
+    assert labels == ["광고 서비스 확대", "중남미 추가", "광고 매출"]   # the headline minus its figure
+
+    only_one = [slides[1]]
+    assert _cta_summary(only_one)[1:] == ([], [])           # a single chip is not drawn
+    assert _cta_summary([]) == ("", [], [])
