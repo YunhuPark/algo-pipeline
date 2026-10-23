@@ -101,10 +101,18 @@ def run_weekly_quality_review(
             "SELECT report_json FROM weekly_quality_reviews WHERE idempotency_key=?",
             (idempotency_key,),
         ).fetchone()
+        stale_review_id: str | None = None
+        recompute_existing = False
         if existing:
             report = json.loads(existing["report_json"])
-            report["idempotent"] = True
-            return report
+            # 데이터 부족으로 끝난 회고는 확정본이 아니다. 나중에 사람 검토가
+            # 쌓였을 때 같은 주를 다시 계산할 수 있어야 하므로 캐시하지 않는다.
+            # 확정(READY)된 회고만 멱등하게 그대로 돌려준다.
+            if report.get("status") != "INSUFFICIENT_DATA":
+                report["idempotent"] = True
+                return report
+            stale_review_id = report.get("review_id")
+            recompute_existing = True
 
         runs = _rows(
             conn,
@@ -234,7 +242,7 @@ def run_weekly_quality_review(
         enough_data = run_count >= MIN_REAL_RUNS and len(decision_events) >= MIN_EDITORIAL_FEEDBACK
         status = "READY" if enough_data else "INSUFFICIENT_DATA"
         report = {
-            "review_id": str(uuid.uuid4()),
+            "review_id": stale_review_id or str(uuid.uuid4()),
             "week_start": start_text,
             "week_end": end_text,
             "status": status,
@@ -252,20 +260,29 @@ def run_weekly_quality_review(
             },
             "idempotent": False,
         }
-        conn.execute(
-            """INSERT INTO weekly_quality_reviews (
-                   review_id, week_start, week_end, status, report_json,
-                   idempotency_key
-               ) VALUES (?, ?, ?, ?, ?, ?)""",
-            (
-                report["review_id"],
-                start_text,
-                end_text,
-                status,
-                json.dumps(report, ensure_ascii=False, sort_keys=True),
-                idempotency_key,
-            ),
-        )
+        report_json = json.dumps(report, ensure_ascii=False, sort_keys=True)
+        if recompute_existing:
+            conn.execute(
+                """UPDATE weekly_quality_reviews
+                   SET status=?, report_json=?
+                   WHERE idempotency_key=?""",
+                (status, report_json, idempotency_key),
+            )
+        else:
+            conn.execute(
+                """INSERT INTO weekly_quality_reviews (
+                       review_id, week_start, week_end, status, report_json,
+                       idempotency_key
+                   ) VALUES (?, ?, ?, ?, ?, ?)""",
+                (
+                    report["review_id"],
+                    start_text,
+                    end_text,
+                    status,
+                    report_json,
+                    idempotency_key,
+                ),
+            )
     return report
 
 

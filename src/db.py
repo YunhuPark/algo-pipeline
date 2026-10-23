@@ -273,6 +273,12 @@ def mark_queue_status(queue_id: int, status: str) -> None:
         conn.execute("UPDATE queue SET status=? WHERE id=?", (status, queue_id))
 
 
+def clear_queue_error(queue_id: int) -> None:
+    """Drop a previous failure's error code after the row was regenerated successfully."""
+    with _conn() as conn:
+        conn.execute("UPDATE queue SET publish_error_code=NULL WHERE id=?", (queue_id,))
+
+
 def claim_queue_row(queue_id: int) -> bool:
     """Atomically move a pending/ready row into a transient 'processing' state.
 

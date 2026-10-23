@@ -18,6 +18,11 @@ def _grounded(i: int) -> nc.NewsItem:
     return _item(f"데이터{i}", f"매출 {i + 1},200억 원으로 전년 대비 {i + 5}% 증가했다.")
 
 
+def _ai_grounded(i: int) -> nc.NewsItem:
+    """AI 직접 기사이면서 본문 수치가 충분한 것."""
+    return _item(f"AI 데이터{i}", f"매출 {i + 1},200억 원으로 전년 대비 {i + 5}% 증가했다.")
+
+
 def _off_persona(i: int) -> nc.NewsItem:
     """Tavily(종합 검색) 출신에 팩트는 많지만 AI·IT·비즈니스와 무관한 기사."""
     return nc.NewsItem(
@@ -72,12 +77,12 @@ def test_selected_index_maps_back_to_the_original_list(monkeypatch):
 
     이 매핑이 어긋나면 검증 없이 다른 기사로 카드뉴스가 만들어진다.
     """
-    items = [_opinion(i) for i in range(5)] + [_grounded(i) for i in range(5)]
+    items = [_opinion(i) for i in range(5)] + [_ai_grounded(i) for i in range(5)]
     _stub_llm(monkeypatch, selected_index=1)   # 압축된 후보의 첫 번째
 
     selected = nc._select_topic_with_gpt(items)
 
-    assert items[selected.selected_index - 1].title == "데이터0"
+    assert items[selected.selected_index - 1].title == "AI 데이터0"
 
 
 def test_off_persona_item_does_not_outrank_on_persona_candidates(monkeypatch):
@@ -108,18 +113,50 @@ def test_on_persona_regex_matches_korean_glued_to_the_abbreviation():
     assert not nc._ON_PERSONA_RE.search("MAINSTREAM 뉴스")
 
 
-def test_falls_back_to_every_candidate_when_few_are_grounded(monkeypatch):
-    """수치 있는 기사가 적다고 생성이 막히면 안 된다.
+def test_no_relevant_news_raises_instead_of_falling_back_to_every_candidate(monkeypatch):
+    """오늘 AI·AI 인접 기사가 없으면 다른 주제로 개수를 채우지 않는다(정직하게 비워 둔다).
 
-    _MIN_ON_PERSONA_POOL(2) 미만으로 남겨야 카테고리 압축 단계도 건너뛰고
-    "전체 후보" 단계까지 떨어진다 — 그래야 이 안전망 자체를 검증한다.
+    예전에는 후보가 모자라면 IT·비즈니스로, 그래도 모자라면 아무 기사나 골랐다. 그래서 예측 시장,
+    스마트폰 기능, 쇼핑 할인이 AI 계정 큐에 들어왔다.
     """
-    items = [_opinion(i) for i in range(8)] + [_grounded(i) for i in range(1)]
+    items = [_opinion(i) for i in range(8)] + [_grounded(i) for i in range(1)]   # 모두 AI와 무관
+    _stub_llm(monkeypatch, selected_index=1)
+
+    import pytest
+
+    with pytest.raises(nc.NoRelevantNews) as exc:
+        nc._select_topic_with_gpt(items)
+
+    assert "AI·AI 인접 기사가 없습니다" in str(exc.value)
+    assert nc.LAST_POOL_STATS["ai"] == 0 and nc.LAST_POOL_STATS["other"] == 9
+
+
+def test_topic_tiers_separate_ai_ai_adjacent_and_everything_else():
+    def tier(title, summary=""):
+        return nc._topic_tier(nc.NewsItem(title=title, summary=summary, source="The Verge", url="u"))
+
+    assert tier("McKinsey is making job applicants spar with a fake AI client") == 1
+    assert tier("Nvidia unveils a new data center GPU") == 1          # 엔비디아는 AI 직접으로 본다
+    assert tier("Amazon deploys one million warehouse robots") == 2
+    assert tier("Topgolf saved $10 million by moving to the cloud") == 2
+    assert tier("Polymarket's $600 million election trade") == 3
+    assert tier("Apple's HomeView smart display gets a price cut") == 3
+    assert tier("Nothing Headphone (a) is half off at Amazon") == 3
+
+
+def test_adjacent_articles_are_used_when_ai_articles_are_scarce(monkeypatch):
+    robot = nc.NewsItem(
+        title="Amazon robots now outnumber 1.5 million workers",
+        summary="Amazon runs 1 million robots and employs 1.5 million people, up 12% this year.",
+        source="Ars Technica", url="https://example.com/robots",
+    )
+    items = [_opinion(i) for i in range(4)] + [robot]
     _stub_llm(monkeypatch, selected_index=1)
 
     selected = nc._select_topic_with_gpt(items)
 
-    assert items[selected.selected_index - 1].title == "논평0"
+    assert items[selected.selected_index - 1] is robot
+    assert nc.LAST_POOL_STATS["adjacent"] == 1
 
 
 def _roundup(i: int) -> nc.NewsItem:

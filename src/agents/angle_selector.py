@@ -51,6 +51,37 @@ class SelectedAngle:
     expected_save_rate: str = "보통"
 
 
+# 모든 게시물에는 이 중 하나의 앵글이 붙어야 한다. 위 docstring의 8가지 + 구버전 호환.
+CANONICAL_ANGLES = (
+    "리스트형", "Before/After", "즉시실행", "몰랐던사실",
+    "공포", "공감", "이익", "사회증거", "편의",
+)
+
+# 앵글을 못 정했을 때(LLM 실패·알 수 없는 이름) 쓰는 기본값. 저장률 1위 앵글이다.
+DEFAULT_ANGLE = "리스트형"
+
+
+def fallback_angle(topic: str, reason: str = "") -> SelectedAngle:
+    """Deterministic default so a post is never published without an angle."""
+
+    return SelectedAngle(
+        angle=DEFAULT_ANGLE,
+        cover_title=topic[:20],
+        hook="",
+        reasoning=f"기본 앵글 사용{f' ({reason})' if reason else ''}",
+        expected_save_rate="보통",
+    )
+
+
+def ensure_valid_angle(selected: SelectedAngle | None, topic: str) -> SelectedAngle:
+    """Return `selected` if it names a known angle, else the default angle."""
+
+    if selected is not None and selected.angle in CANONICAL_ANGLES:
+        return selected
+    got = selected.angle if selected is not None else "없음"
+    return fallback_angle(topic, f"앵글 '{got}'이(가) 유효하지 않음")
+
+
 # ── 프롬프트 ─────────────────────────────────────────────
 
 _SYSTEM = """

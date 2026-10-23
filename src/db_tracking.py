@@ -251,6 +251,25 @@ def init_tracking_db(db_path: Path | None = None) -> None:
             artifact_evidence TEXT,
             reconciler_version TEXT
         );
+
+        -- One row per LLM call (see src/usage_tracker.py). cost_usd is NULL, not 0,
+        -- when the model's price is unknown, so an unpriced call never looks free.
+        CREATE TABLE IF NOT EXISTS api_usage (
+            id            INTEGER PRIMARY KEY AUTOINCREMENT,
+            created_at    TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+            scope         TEXT NOT NULL DEFAULT '',
+            run_id        TEXT,
+            stage         TEXT NOT NULL DEFAULT '',
+            provider      TEXT NOT NULL DEFAULT '',
+            model         TEXT NOT NULL DEFAULT '',
+            input_tokens  INTEGER,
+            output_tokens INTEGER,
+            cost_usd      REAL,
+            ok            INTEGER NOT NULL DEFAULT 1,
+            error         TEXT NOT NULL DEFAULT ''
+        );
+        CREATE INDEX IF NOT EXISTS idx_api_usage_run ON api_usage(run_id);
+        CREATE INDEX IF NOT EXISTS idx_api_usage_created ON api_usage(created_at);
         """)
 
         # Existing installations may have the early P1 table.  Keep this
@@ -306,7 +325,7 @@ def log_step(run_id: str, agent_name: str, step_desc: str, result: str = "") -> 
             (run_id, agent_name, step_desc, result)
         )
 
-def end_run(run_id: str, status: str, cost: float = 0.0, latency: float = 0.0, error: str = "", strategy_id: str = "", grounded_claim_rate: float = 0.0, step_failure_rate: float = 0.0, retry_count: int = 0) -> None:
+def end_run(run_id: str, status: str, cost: float | None = 0.0, latency: float = 0.0, error: str = "", strategy_id: str = "", grounded_claim_rate: float = 0.0, step_failure_rate: float = 0.0, retry_count: int = 0) -> None:
     with _conn() as conn:
         conn.execute(
             "UPDATE content_runs SET status=?, cost_usd=?, latency_sec=?, error_msg=?, strategy_id=?, grounded_claim_rate=?, step_failure_rate=?, retry_count=? WHERE run_id=?",
