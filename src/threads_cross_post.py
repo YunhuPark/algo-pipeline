@@ -10,7 +10,10 @@ DEFAULT_TOPIC_TAG = "AI Threads"
 
 
 def threads_ready() -> bool:
-    return bool(os.getenv("THREADS_ACCESS_TOKEN", "").strip() and os.getenv("THREADS_USER_ID", "").strip())
+    from src import threads_credentials
+
+    token, user_id = threads_credentials.load()
+    return bool(token and user_id)
 
 
 def _caption_for(folder: Path) -> str:
@@ -47,9 +50,10 @@ def cross_post(image_dir: str) -> str:
     base = os.getenv("IG_IMAGE_BASE_URL", "").strip().rstrip("/")
     if not base.lower().startswith("https://"):
         raise ValueError("IG_IMAGE_BASE_URL(공개 https 주소)이 필요합니다.")
-    # the publisher reads credentials at import time; pick up a token refreshed since then
-    tp.THREADS_ACCESS_TOKEN = os.getenv("THREADS_ACCESS_TOKEN", "")
-    tp.THREADS_USER_ID = os.getenv("THREADS_USER_ID", "")
+    # the publisher reads credentials at import time; pick up a token refreshed since then (.env only)
+    from src import threads_credentials
+
+    tp.THREADS_ACCESS_TOKEN, tp.THREADS_USER_ID = threads_credentials.load()
     return tp.publish(
         media, hook="", hashtags=[],
         base_url=f"{base}/output_img/{quote(folder.name)}",

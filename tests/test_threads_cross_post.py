@@ -171,3 +171,34 @@ def test_queue_item_cross_post_only_after_instagram_and_reports_failures(monkeyp
     ok, message = tc.cross_post_queue_item(28)
     assert not ok and "Instagram은 게시됨" in message and "타임아웃" in message
     assert logged and "타임아웃" in logged[0]                           # a durable trace exists
+
+
+def test_credentials_come_from_the_env_file_not_the_process_environment(tmp_path, monkeypatch):
+    from src import threads_credentials as creds
+
+    env_file = tmp_path / ".env"
+    env_file.write_text("THREADS_ACCESS_TOKEN=algo-token\nTHREADS_USER_ID=111\n", encoding="utf-8")
+    monkeypatch.setattr(creds, "ENV_PATH", env_file)
+    monkeypatch.setenv("THREADS_ACCESS_TOKEN", "OTHER-PROJECT-TOKEN")   # e.g. a Windows user-level variable
+    monkeypatch.setenv("THREADS_USER_ID", "999")
+    assert creds.load() == ("algo-token", "111")
+
+
+def test_a_token_from_the_wrong_account_never_posts(monkeypatch):
+    from src import threads_credentials as creds
+
+    class R:
+        def __init__(self, data):
+            self._d = data
+
+        def json(self):
+            return self._d
+
+    monkeypatch.setattr(creds, "expected_username", lambda: "algo__kr")
+    monkeypatch.setattr(creds.httpx, "get", lambda *a, **k: R({"id": "28185725201104923", "username": "onetool_maker"}))
+    with pytest.raises(ValueError, match="달라"):
+        creds.assert_expected_account("tok", "28185725201104923")
+    monkeypatch.setattr(creds.httpx, "get", lambda *a, **k: R({"id": "111", "username": "algo__kr"}))
+    assert creds.assert_expected_account("tok", "111") == "algo__kr"
+    with pytest.raises(ValueError):                                     # right name but a different id
+        creds.assert_expected_account("tok", "222")

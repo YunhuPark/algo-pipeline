@@ -45,8 +45,10 @@ load_dotenv(override=False)
 
 # ── 환경 변수 ─────────────────────────────────────────────
 # Threads 전용 토큰 → 없으면 Instagram 토큰 폴백 (같은 Meta 플랫폼)
-THREADS_ACCESS_TOKEN: str = os.getenv("THREADS_ACCESS_TOKEN", "")
-THREADS_USER_ID: str = os.getenv("THREADS_USER_ID", "")
+# .env only - never the process environment (another project keeps its own Threads token there)
+from src import threads_credentials as _creds  # noqa: E402
+
+THREADS_ACCESS_TOKEN, THREADS_USER_ID = _creds.load()
 # 이미지 공개 URL 베이스 (ngrok 없이 정적 서버 사용 시)
 _IMAGE_BASE_URL: str = os.getenv("IG_IMAGE_BASE_URL", "")
 
@@ -226,6 +228,8 @@ def publish(
         raise EnvironmentError(
             ".env에 THREADS_ACCESS_TOKEN과 THREADS_USER_ID가 없습니다."
         )
+    # a token from the wrong account must never post (see threads_credentials)
+    _creds.assert_expected_account(THREADS_ACCESS_TOKEN, THREADS_USER_ID)
 
     # PNG(이미지)와 MP4(영상 카드)만 사용
     imgs = [p for p in image_paths if p.suffix.lower() in (".png", ".mp4")]
