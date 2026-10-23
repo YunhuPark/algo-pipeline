@@ -122,3 +122,21 @@ def test_names_with_digits_are_not_highlighted_as_figures():
     assert marked("GPT-5 출시") == [] and marked("Gemini 4 공개") == []
     assert marked("5G 시장") == ["5G"] and marked("3.5배, AI") == ["3.5배"]
     assert marked("2,400만 명") == ["2,400만"]
+
+
+def test_hashtags_are_searchable_not_the_whole_headline():
+    from src.qa.hashtag_pool import build_hashtags
+
+    tags = build_hashtags(
+        "오픈AI, 챗GPT 광고 서비스 89개국으로 확대",
+        "오픈AI가 챗GPT 광고 서비스를 26개국에 추가했다 중남미 14개국 광고주 10만곳",
+        ["오픈AI", "챗GPT", "중남미", "미국", "Brian Greenwood"],
+    )
+    assert tags[:2] == ["#알고", "#카드뉴스"]
+    assert "#오픈AI" in tags and "#챗GPT" in tags
+    assert {"#디지털마케팅", "#광고"} & set(tags)                      # topic tags from the keywords
+    assert "#AI뉴스" in tags                                           # broad tag fills the rest
+    assert not any(len(t) > 13 for t in tags)                          # no headline-length tag
+    assert "#중남미" not in tags and "#미국" not in tags               # regions are too broad to help
+    assert "#BrianGreenwood" not in tags
+    assert len(tags) == len({t.lower() for t in tags}) <= 10           # no duplicates, at most 10

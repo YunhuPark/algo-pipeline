@@ -389,7 +389,7 @@ def test_fact_check_hashtag_is_no_longer_added():
     tags = script_assembler._hashtags("Nous Research 15억 달러", [])
 
     assert "#팩트체크" not in tags
-    assert {"#알고", "#카드뉴스", "#뉴스분석", "#인사이트"} <= set(tags)
+    assert {"#알고", "#카드뉴스"} <= set(tags)
 
 
 def test_the_pipeline_builds_the_note_from_the_lineage_and_passes_it_to_the_renderer():
