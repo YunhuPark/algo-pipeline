@@ -13,7 +13,6 @@ from __future__ import annotations
 import io
 import os
 import socket
-from src.db_factory import get_connection
 import subprocess
 import sys
 import time
@@ -28,6 +27,7 @@ from dotenv import load_dotenv
 load_dotenv(ROOT / ".env")
 
 from src.automation_mode import resolve_automation_mode
+from src.db_factory import get_connection
 
 LOG_DIR = ROOT / "logs"
 LOG_DIR.mkdir(exist_ok=True)
