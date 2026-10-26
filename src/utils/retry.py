@@ -6,6 +6,16 @@ import time
 from typing import Any, Callable
 
 
+def _is_fatal(exc: Exception) -> bool:
+    """재시도해도 해결되지 않는 오류인가.
+
+    이 저장소는 설정·토큰이 없을 때 `EnvironmentError` 를 던진다. 그런데 Python 3 에서 `EnvironmentError` 는
+    `OSError` 의 별칭이라 `except EnvironmentError` 는 `ConnectionResetError`·`TimeoutError` 같은
+    *일시적인 네트워크 오류*까지 잡아 재시도 없이 던져 버린다. 그래서 OSError 중 연결·시간초과 계열만 재시도 대상으로 돌린다.
+    """
+    return isinstance(exc, OSError) and not isinstance(exc, (ConnectionError, TimeoutError))
+
+
 def call_with_retry(
     func: Callable,
     *args,
@@ -36,10 +46,8 @@ def call_with_retry(
     for attempt in range(1, max_attempts + 1):
         try:
             return func(*args, **kwargs)
-        except EnvironmentError:
-            raise  # 치명적 오류(토큰 만료 등)는 재시도 불가
         except Exception as e:
-            if attempt == max_attempts:
+            if _is_fatal(e) or attempt == max_attempts:
                 raise
 
             err_str = str(e).lower()
