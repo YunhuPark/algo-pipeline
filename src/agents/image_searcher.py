@@ -174,6 +174,91 @@ def search_pexels(topic: str, randomize: bool = False, page: int = 1) -> Image.I
         return None
 
 
+_PEXELS_VIDEO_CACHE_DIR = DATA_DIR / "pexels_video_cache"
+
+
+def search_pexels_video(
+    topic: str, page: int = 1, min_duration: int = 4, max_duration: int = 20
+) -> tuple[Image.Image, Path] | None:
+    """Pexels 영상 검색 — 유튜브에 실제로 맞는 영상이 없는 슬라이드용 대체 클립.
+
+    엉뚱한 유튜브 영상을 억지로 붙이는 대신, 주제와 맞는 짧은(4~20초) 세로
+    스톡 영상을 다운받아 돌려준다. 반환값은 (카드 렌더링용 미리보기 이미지,
+    로컬에 저장된 mp4 경로) — 실패하면 None (호출부는 정적 사진으로 대체).
+    """
+    if not PEXELS_API_KEY:
+        return None
+
+    query = _generate_pexels_query(topic)
+    print(f"  [Pexels] 영상 검색어: '{query}' (page={page})")
+
+    try:
+        resp = httpx.get(
+            "https://api.pexels.com/videos/search",
+            headers={"Authorization": PEXELS_API_KEY},
+            params={
+                "query": query,
+                "orientation": "portrait",
+                "size": "medium",
+                "per_page": 10,
+                "page": page,
+            },
+            timeout=15,
+        )
+        resp.raise_for_status()
+        videos = resp.json().get("videos", [])
+        if not videos:
+            print("  [Pexels] 영상 검색 결과 없음")
+            return None
+
+        # 카드 한 장에 넣을 용도라 너무 길거나 짧은 클립은 제외한다.
+        # 조건을 만족하는 게 없으면 그냥 상위 결과를 그대로 쓴다.
+        candidates = [v for v in videos if min_duration <= v.get("duration", 0) <= max_duration]
+        video = (candidates or videos)[0]
+
+        # 세로(9:16에 가까운) 파일 중 가장 작은 해상도 — 카드 폭(1080px)이면
+        # 충분하고, 큰 파일을 받으면 다운로드·인코딩 시간만 늘어난다.
+        files = sorted(
+            (
+                f for f in video.get("video_files", [])
+                if f.get("width") and f.get("height") and f["height"] >= f["width"]
+            ),
+            key=lambda f: f.get("width", 9999),
+        )
+        if not files:
+            files = sorted(video.get("video_files", []), key=lambda f: f.get("width", 9999))
+        if not files:
+            return None
+
+        cache_dir = _PEXELS_VIDEO_CACHE_DIR
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        out_path = cache_dir / f"pexels_{video['id']}.mp4"
+        if not out_path.exists():
+            vid_resp = httpx.get(files[0]["link"], timeout=60, follow_redirects=True)
+            vid_resp.raise_for_status()
+            out_path.write_bytes(vid_resp.content)
+
+        preview_img = None
+        preview_url = video.get("image", "")
+        if preview_url:
+            pr = httpx.get(preview_url, timeout=20, follow_redirects=True)
+            if pr.status_code == 200:
+                preview_img = Image.open(io.BytesIO(pr.content)).convert("RGB")
+        if preview_img is None:
+            return None
+
+        photographer = video.get("user", {}).get("name", "unknown")
+        print(
+            f"  [Pexels] 영상 선택: id={video['id']} by {photographer} "
+            f"({video.get('duration', '?')}초)"
+        )
+        return preview_img, out_path
+
+    except Exception as e:
+        print(f"  [Pexels] 영상 검색 실패 ({e})")
+        return None
+
+
 # ── DALL-E 3 ─────────────────────────────────────────────
 
 def generate_dalle_background(topic: str) -> Image.Image:

@@ -70,11 +70,13 @@ $env:ALGO_ENV = "production"
 python main.py --queue-publish --publish
 ```
 
+The command opens the generated image folder and waits for an explicit `y`, `n`, or `r` decision. `y` is recorded as `APPROVED` before the durable remote attempt starts; `n` is recorded as `REJECTED`, marks the queue item skipped, and performs zero remote publish calls.
+
 Success requires all of the following:
 
 - one Instagram carousel exists on the intended account;
 - the Queue row has a non-empty matching `ig_post_id`;
-- `publish_attempt_state` is `CONFIRMED`;
+- `publish_attempt_state` is `REMOTE_ID_CONFIRMED`;
 - Queue status is `published`;
 - no second post was created;
 - no uncertain row was retried.

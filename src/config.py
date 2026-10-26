@@ -30,6 +30,9 @@ OPENAI_API_KEY: str = _require("OPENAI_API_KEY")
 TAVILY_API_KEY: str = _require("TAVILY_API_KEY")
 APIFY_API_KEY: str = _optional("APIFY_API_KEY")
 PEXELS_API_KEY: str = _optional("PEXELS_API_KEY")
+# 없으면 기존 yt-dlp 스크래핑만으로 계속 동작 — 있으면 후보 필터링 단계에서
+# 조회수·좋아요·댓글 수를 한 번의 배치 호출로 더 빠르고 정확하게 가져온다.
+YOUTUBE_API_KEY: str = _optional("YOUTUBE_API_KEY")
 
 # ── 모델 설정 ─────────────────────────────────────────────
 LLM_MODEL: str = _optional("LLM_MODEL", "gpt-4o")

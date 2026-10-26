@@ -5,12 +5,26 @@ YouTube 다운로드 영상과 카드뉴스 PNG 이미지를 합성하여 MP4 �
 from __future__ import annotations
 from pathlib import Path
 
-def create_video_slide(bg_image_path: Path, video_snippet_path: Path, output_path: Path, thumb_ratio: float = 0.45):
+def create_video_slide(
+    bg_image_path: Path,
+    video_snippet_path: Path,
+    output_path: Path,
+    thumb_ratio: float | None = None,
+):
     """
     moviepy를 사용해 배경 이미지(PNG)와 유튜브 클립 영상(MP4)을 합성.
     영상은 카드 상단(0부터 thumb_ratio 비율까지)에 오버레이 됩니다.
+
+    thumb_ratio는 카드 PNG의 썸네일 영역 높이와 반드시 같아야 한다. 값이
+    어긋나면 클립이 디자인의 썸네일 자리를 벗어나 구분선·본문을 덮는다.
+    기본값은 레이아웃을 정의한 design_renderer에서 가져온다.
     """
     from moviepy import ImageClip, VideoFileClip, CompositeVideoClip
+
+    if thumb_ratio is None:
+        from src.agents.design_renderer import SPLIT_THUMB_RATIO
+
+        thumb_ratio = SPLIT_THUMB_RATIO
 
     try:
         # 배경 이미지 (디자인 렌더러가 만들어둔 카드 이미지)
@@ -35,6 +49,17 @@ def create_video_slide(bg_image_path: Path, video_snippet_path: Path, output_pat
             video_clip = video_clip.resized(width=target_w)
             new_h = video_clip.size[1]
             video_clip = video_clip.cropped(y_center=new_h/2, height=target_h)
+
+        # 방송 뉴스 영상은 하단에 자막 바가 붙어 있는 경우가 많다. 그대로
+        # 두면 카드 자체의 제목·본문 바로 위에서 두 텍스트가 겹쳐 보인다
+        # (영상 자체 자막 vs 우리 카드 텍스트). 하단 일부를 잘라내고 다시
+        # 채워서 자막 바가 화면 밖으로 밀려나게 한다.
+        CAPTION_TRIM_RATIO = 0.14  # 하단 14%를 잘라내고 다시 채움
+        trimmed_h = int(target_h * (1 - CAPTION_TRIM_RATIO))
+        video_clip = video_clip.cropped(y1=0, y2=trimmed_h)
+        video_clip = video_clip.resized(height=target_h)
+        if video_clip.size[0] != target_w:
+            video_clip = video_clip.cropped(x_center=video_clip.size[0] / 2, width=target_w)
 
         # 목표 위치(상단)에 영상 배치
         video_clip = video_clip.with_position(("center", "top"))

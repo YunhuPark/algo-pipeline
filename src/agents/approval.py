@@ -63,7 +63,8 @@ def wait_for_approval(
     """
     pngs = [p for p in image_paths if p.suffix.lower() == ".png"]
     if not pngs:
-        return "upload"
+        print("  [Approval] 검토 가능한 PNG가 없어 업로드를 차단합니다.")
+        return "skip"
 
     folder = pngs[0].parent
 

@@ -110,6 +110,14 @@ def init_experiment_db(db_path: str | Path | None = None) -> Path:
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP
             );
 
+            CREATE TABLE IF NOT EXISTS run_publications (
+                run_id TEXT NOT NULL,
+                publication_id TEXT NOT NULL UNIQUE,
+                published_at TEXT NOT NULL,
+                PRIMARY KEY (run_id, publication_id),
+                FOREIGN KEY(run_id) REFERENCES content_runs(run_id)
+            );
+
             CREATE TABLE IF NOT EXISTS recommendation_drafts (
                 draft_id TEXT PRIMARY KEY,
                 experiment_id TEXT NOT NULL,
@@ -133,8 +141,28 @@ def init_experiment_db(db_path: str | Path | None = None) -> Path:
                 action TEXT NOT NULL,
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP
             );
+
+            CREATE TABLE IF NOT EXISTS weekly_quality_reviews (
+                review_id TEXT PRIMARY KEY,
+                week_start TEXT NOT NULL,
+                week_end TEXT NOT NULL,
+                status TEXT NOT NULL,
+                report_json TEXT NOT NULL,
+                idempotency_key TEXT NOT NULL UNIQUE,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            );
             """
         )
+
+        feedback_columns = {
+            row[1]
+            for row in conn.execute("PRAGMA table_info(editorial_feedback_events)")
+        }
+        if "review_duration_sec" not in feedback_columns:
+            conn.execute(
+                "ALTER TABLE editorial_feedback_events "
+                "ADD COLUMN review_duration_sec REAL NOT NULL DEFAULT 0.0"
+            )
     return target
 
 

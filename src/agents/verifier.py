@@ -20,20 +20,27 @@ Phase 2. AI 자기평가 (GPT-4o-mini)
 """
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
+from difflib import SequenceMatcher
 
 from langchain_openai import ChatOpenAI
 from langchain_core.prompts import ChatPromptTemplate
 from pydantic import BaseModel
 
 from src.config import OPENAI_API_KEY
-from src.schemas.card_news import CardNewsScript, Slide
+from src.schemas.card_news import (
+    CardNewsScript,
+    MAX_CONTENT_BODY_CHARS,
+    MIN_CONTENT_BODY_CHARS,
+    Slide,
+)
 from src.persona import Persona
 
 PASS_THRESHOLD = 7.0   # 평균 점수 기준
 MAX_TITLE_LEN  = 22
-MAX_BODY_LEN   = 130
-MIN_BODY_LEN   = 60    # 80 → 60: "짧고 자연스러운 문장" 스타일과 충돌 방지
+MAX_BODY_LEN   = MAX_CONTENT_BODY_CHARS
+MIN_BODY_LEN   = MIN_CONTENT_BODY_CHARS
 
 
 # ── 검증 결과 ─────────────────────────────────────────────
@@ -80,6 +87,8 @@ def _rule_check(script: CardNewsScript, expected_count: int) -> list[str]:
         # 글자 수
         if len(slide.title) > MAX_TITLE_LEN:
             errors.append(f"{label} 제목 {len(slide.title)}자 (최대 {MAX_TITLE_LEN}자)")
+        if slide.title.rstrip().endswith(("…", "...")):
+            errors.append(f"{label} 제목이 말줄임표로 끝남")
         if len(slide.body) > MAX_BODY_LEN:
             errors.append(f"{label} 본문 {len(slide.body)}자 (최대 {MAX_BODY_LEN}자)")
         # content 슬라이드만 최소 길이 체크 (cover/cta는 짧아도 됨)
@@ -91,7 +100,13 @@ def _rule_check(script: CardNewsScript, expected_count: int) -> list[str]:
         errors.append(f"해시태그 {len(script.hashtags)}개 (최소 5개)")
 
     # 막연한 표현 금지 (content 슬라이드)
-    vague_patterns = ["될 전망", "예상된다", "주목된다", "기대된다", "전망이다", "될 것으로"]
+    # 원문이 보도한 사실 대신 추측을 실으면 카드의 정보량이 0에 수렴한다.
+    # "대격변이 예고됩니다" 같은 문장이 그대로 나간 적이 있어 어미까지 포함한다.
+    vague_patterns = [
+        "될 전망", "예상된다", "주목된다", "기대된다", "전망이다", "될 것으로",
+        "예고", "전망입니다", "예상됩니다", "보입니다", "관측",
+        "의견이 많", "목소리가 커지", "일부 전문가",
+    ]
     for slide in script.slides:
         if slide.slide_type == "content":
             for pat in vague_patterns:
@@ -117,6 +132,17 @@ def _rule_check(script: CardNewsScript, expected_count: int) -> list[str]:
                     errors.append(f"슬라이드{slide.slide_number} AI 문체 감지: '{pat}'")
                     break
 
+    # 내용만 조금 바꾼 반복 카드는 정보량을 부풀리므로 차단한다.
+    content_slides = [slide for slide in script.slides if slide.slide_type == "content"]
+    for index, left in enumerate(content_slides):
+        for right in content_slides[index + 1:]:
+            left_copy = re.sub(r"[^0-9a-z가-힣]", "", left.body.lower())
+            right_copy = re.sub(r"[^0-9a-z가-힣]", "", right.body.lower())
+            if SequenceMatcher(None, left_copy, right_copy).ratio() >= 0.84:
+                errors.append(
+                    f"슬라이드{left.slide_number}·{right.slide_number} 내용이 지나치게 유사함"
+                )
+
     return errors
 
 
@@ -132,7 +158,7 @@ class _AIScore(BaseModel):
     feedback: str            # 점수가 낮은 항목에 대한 구체적 개선 피드백 (한국어)
 
 
-_EVAL_SYSTEM = """
+_EVAL_SYSTEM = f"""
 당신은 인스타그램 카드뉴스 품질 심사위원입니다.
 '알고'(@algo.kr) 계정의 뉴스 카드뉴스 스크립트를 평가합니다.
 각 항목을 1~10점으로 채점하고, 개선이 필요한 부분에 대한 구체적 피드백을 한국어로 작성하세요.
@@ -150,6 +176,12 @@ _EVAL_SYSTEM = """
 
 feedback: 7점 미만인 항목에 대해 "슬라이드N: 구체적으로 어떻게 바꿔야 하는지" 형식으로 작성.
           모든 항목이 7점 이상이면 "전반적으로 양호합니다."
+
+제약: content 슬라이드 본문은 렌더링 규칙상 {MIN_CONTENT_BODY_CHARS}자 이상
+      {MAX_CONTENT_BODY_CHARS}자 이하여야 합니다. 이 범위를 벗어나는 대체 문구를
+      제안하면 반영할 수 없으니, 줄이라는 제안도 {MIN_CONTENT_BODY_CHARS}자 이상을
+      유지하는 선에서만 하십시오. 원문 근거에 없는 사실을 새로 지어내라고
+      제안해서도 안 됩니다.
 """
 
 _EVAL_HUMAN = """
@@ -230,7 +262,11 @@ def verify(
         "완성도": ai.completeness,
     }
     avg = sum(scores.values()) / len(scores)
-    passed = avg >= PASS_THRESHOLD
+    # 평균만 보면 한 항목의 치명적인 실패가 다른 점수에 가려질 수 있다.
+    # 모든 편집 품질 축이 기준을 넘어야 렌더링을 허용한다.
+    passed = avg >= PASS_THRESHOLD and all(
+        score >= PASS_THRESHOLD for score in scores.values()
+    )
 
     feedback = ""
     if not passed:
