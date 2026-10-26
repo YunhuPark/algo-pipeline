@@ -58,9 +58,6 @@ def get_connection(db_path: str | Path, **kwargs) -> sqlite3.Connection:
         is_prod_db = db_name in ("algo.db", "tracking.db")
 
     algo_env, allow_persistent = _get_env_vars()
-    if os.environ.get("PYTEST_CURRENT_TEST") and "test_db_contamination_blocked" in os.environ.get("PYTEST_CURRENT_TEST", ""):
-        print(f"DEBUG_ALWAYS: is_prod_db={is_prod_db}, allow_persistent={allow_persistent}, algo_env={algo_env}, resolved_path={resolved_path}, prod_tracking={prod_tracking}")
-
 
     if algo_env in ("test", "synthetic"):
         if is_prod_db and not allow_persistent:
