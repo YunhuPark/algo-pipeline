@@ -661,6 +661,24 @@ def _resolve_visual_layout(
     return visual_type, values, labels
 
 
+# 수치 상자 안 내용의 위치를 기록한다(layout.json·테스트가 상자 중앙 정렬을 확인한다).
+_VISUAL_PROBE: list[dict] = []
+
+
+def _ink_block(draw: ImageDraw.ImageDraw, lines: list[str], font, step: int) -> tuple[int, int, int]:
+    """(first line's ink top offset, last line's ink bottom, total ink height) of stacked lines.
+
+    Ink bounds come from the glyphs themselves, not from the font's line box, so a block placed
+    with them is visually centred whatever the font size is."""
+    if not lines:
+        return 0, 0, 0
+    tops = [draw.textbbox((0, 0), line, font=font)[1] for line in lines]
+    bottoms = [draw.textbbox((0, 0), line, font=font)[3] for line in lines]
+    top_off = tops[0]
+    last_bottom = step * (len(lines) - 1) + bottoms[-1]
+    return top_off, last_bottom, last_bottom - top_off
+
+
 def _render_infographic_content(
     img: Image.Image,
     slide: Slide,
@@ -712,27 +730,44 @@ def _render_infographic_content(
             fill=STYLE["text_muted"],
             width=2,
         )
+        cell_w = (W - PAD * 2) // 2
+        cells = []
         for index, value in enumerate(values[:2]):
-            cell_center = PAD + (W - PAD * 2) * (index * 2 + 1) // 4
             label = labels[index] if index < len(labels) and labels[index] else f"근거 수치 {index + 1}"
             label = _shorten_visual_label(label, 18)
             label_font = _auto_font(label, 24, bold=False, steps=((14, 1.0), (20, 0.85)))
-            label_lines = wrap_text(label, label_font, draw, (W - PAD * 2) // 2 - 44)
-            ly = visual_top + 70
-            for line in label_lines[:2]:
-                lw = int(draw.textlength(line, font=label_font))
-                draw.text((cell_center - lw // 2, ly), line, font=label_font, fill=STYLE["text_muted"])
-                ly += 34
+            label_lines = wrap_text(label, label_font, draw, cell_w - 44)[:2]
             value_font = _auto_font(value, 66, bold=True, steps=((8, 1.0), (13, 0.84), (18, 0.7)))
-            value_lines = wrap_text(value, value_font, draw, (W - PAD * 2) // 2 - 52)
-            _, _, _, value_h = draw.textbbox((0, 0), "123", font=value_font)
-            vy = center_y - max(50, len(value_lines) * int(value_h * 1.08) // 2) + 30
-            for line in value_lines[:2]:
+            value_lines = wrap_text(value, value_font, draw, cell_w - 52)[:2]
+            cells.append((label_font, label_lines, value_font, value_lines))
+        # Ink heights are measured from the glyphs, so the block can be centred exactly in the box.
+        label_step = 34
+        label_block = max(_ink_block(draw, c[1], c[0], label_step)[2] for c in cells)
+        value_blocks = [_ink_block(draw, c[3], c[2], max(1, int(draw.textbbox((0, 0), "123", font=c[2])[3] * 1.08)))
+                        for c in cells]
+        value_block = max(block[2] for block in value_blocks)
+        gap_lv, gap_vb, bar_h = 20, 26, 6
+        block_h = label_block + gap_lv + value_block + gap_vb + bar_h
+        block_top = center_y - block_h // 2
+        _VISUAL_PROBE.append({"box": (visual_top, visual_bottom), "content": (block_top, block_top + block_h)})
+        for index, (label_font, label_lines, value_font, value_lines) in enumerate(cells):
+            cell_center = PAD + (W - PAD * 2) * (index * 2 + 1) // 4
+            ly = block_top
+            for line in label_lines:
+                top_off, _, _ = _ink_block(draw, [line], label_font, label_step)
+                lw = int(draw.textlength(line, font=label_font))
+                draw.text((cell_center - lw // 2, ly - top_off), line, font=label_font, fill=STYLE["text_muted"])
+                ly += label_step
+            vy = block_top + label_block + gap_lv
+            step = max(1, int(draw.textbbox((0, 0), "123", font=value_font)[3] * 1.08))
+            for line in value_lines:
+                top_off, _, _ = _ink_block(draw, [line], value_font, step)
                 vw = int(draw.textlength(line, font=value_font))
-                draw.text((cell_center - vw // 2, vy), line, font=value_font, fill=STYLE["text_primary"])
-                vy += int(value_h * 1.08)
+                draw.text((cell_center - vw // 2, vy - top_off), line, font=value_font, fill=STYLE["text_primary"])
+                vy += step
+            bar_top = block_top + block_h - bar_h
             draw.rounded_rectangle(
-                (cell_center - 54, visual_bottom - 78, cell_center + 54, visual_bottom - 72),
+                (cell_center - 54, bar_top, cell_center + 54, bar_top + bar_h),
                 radius=3,
                 fill=STYLE["accent"] if index == 0 else STYLE["accent2"],
             )
@@ -804,20 +839,29 @@ def _render_infographic_content(
         label_w = int(draw.textlength(label, font=label_font))
         pill_w = min(W - PAD * 2 - 80, label_w + 44)
         pill_left = center_x - pill_w // 2
+        pill_h, gap = 46, 24
+        value_font = _auto_font(value, 88, bold=True, steps=((7, 1.0), (11, 0.84), (16, 0.68)))
+        value_lines = wrap_text(value, value_font, draw, W - PAD * 2 - 90)[:2]
+        step = max(1, int(draw.textbbox((0, 0), "123", font=value_font)[3] * 1.04))
+        _, _, value_block = _ink_block(draw, value_lines, value_font, step)
+        # pill + gap + the number's real glyph height, centred in the box
+        block_h = pill_h + gap + value_block
+        block_top = center_y - block_h // 2
+        _VISUAL_PROBE.append({"box": (visual_top, visual_bottom), "content": (block_top, block_top + block_h)})
         draw.rounded_rectangle(
-            (pill_left, visual_top + 60, pill_left + pill_w, visual_top + 106),
-            radius=23,
+            (pill_left, block_top, pill_left + pill_w, block_top + pill_h),
+            radius=pill_h // 2,
             fill=STYLE["accent"],
         )
-        draw.text((center_x - label_w // 2, visual_top + 71), label, font=label_font, fill=(255, 255, 255))
-        value_font = _auto_font(value, 88, bold=True, steps=((7, 1.0), (11, 0.84), (16, 0.68)))
-        value_lines = wrap_text(value, value_font, draw, W - PAD * 2 - 90)
-        _, _, _, value_h = draw.textbbox((0, 0), "123", font=value_font)
-        vy = center_y - len(value_lines) * value_h // 2 + 42
-        for line in value_lines[:2]:
+        label_box = draw.textbbox((0, 0), label, font=label_font)
+        label_y = block_top + (pill_h - (label_box[3] - label_box[1])) // 2 - label_box[1]
+        draw.text((center_x - label_w // 2, label_y), label, font=label_font, fill=(255, 255, 255))
+        vy = block_top + pill_h + gap
+        for line in value_lines:
+            top_off, _, _ = _ink_block(draw, [line], value_font, step)
             value_w = int(draw.textlength(line, font=value_font))
-            draw.text((center_x - value_w // 2, vy), line, font=value_font, fill=STYLE["text_primary"])
-            vy += int(value_h * 1.04)
+            draw.text((center_x - value_w // 2, vy - top_off), line, font=value_font, fill=STYLE["text_primary"])
+            vy += step
 
     img = _draw_text_panel(img, slide.title, slide.body, with_title=False, top=TEXT_BODY_TOP)
 
