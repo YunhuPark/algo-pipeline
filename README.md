@@ -6,6 +6,8 @@ AI/테크 뉴스를 수집해 출처 근거가 있는 카드뉴스를 생성하�
 
 **Instagram:** [@algo__kr](https://instagram.com/algo__kr)
 
+**프로젝트 회고:** [docs/RETROSPECTIVE.md](docs/RETROSPECTIVE.md) — 5개월간의 문제·원인·해결·결과와 수치([metrics](docs/retrospective/metrics.md))
+
 ## 현재 안전 계약
 
 - Queue Lineage V2가 출처 metadata·schema version·lineage hash를 검증합니다.
