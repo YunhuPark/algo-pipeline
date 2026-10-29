@@ -80,3 +80,20 @@ def test_cta_chips_reuse_figures_already_shown_on_the_content_cards():
     only_one = [slides[1]]
     assert _cta_summary(only_one)[1:] == ([], [])           # a single chip is not drawn
     assert _cta_summary([]) == ("", [], [])
+
+
+def test_cta_chips_skip_values_that_are_not_figures():
+    from src.qa.script_assembler import _cta_summary
+    from src.schemas.card_news import Slide
+
+    slides = [
+        Slide(slide_number=2, slide_type="content", title="MAI 사이버 1.1 플래시 공개", body="x" * 40,
+              visual_values=["MS"], visual_labels=["회사"]),
+        Slide(slide_number=3, slide_type="content", title="스캔 비용 18% 절감", body="x" * 40,
+              visual_values=["18%"], visual_labels=["핵심 수치"]),
+        Slide(slide_number=4, slide_type="content", title="토큰 효율성 20% 향상", body="x" * 40,
+              visual_values=["20%"], visual_labels=["핵심 수치"]),
+    ]
+    takeaway, values, labels = _cta_summary(slides)
+    assert takeaway == "MAI 사이버 1.1 플래시 공개"
+    assert values == ["18%", "20%"] and labels == ["스캔 비용 절감", "토큰 효율성 향상"]
