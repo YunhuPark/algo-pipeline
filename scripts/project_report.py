@@ -59,7 +59,12 @@ def collect() -> dict:
             continue
         regression.append((path.stem, summary.get("articles"), summary.get("success_rate"),
                            summary.get("total_cost"), summary.get("total_retries")))
+    growth = _rows(
+        ROOT / "data" / "growth.db",
+        "select day, platform, followers from account_snapshots where followers is not null order by day",
+    )
     return {
+        "growth": growth,
         "commits": commits,
         "first_commit": first[0] if first else "",
         "src_lines": _lines("src/*.py"),
@@ -104,6 +109,15 @@ def render(stats: dict) -> str:
     for stem, articles, rate, cost, retries in stats["regression"]:
         shown = f"{rate * 100:.0f}%" if isinstance(rate, (int, float)) else "-"
         lines.append(f"- {stem}: 기사 {articles}개, 성공률 {shown}, 비용 ${cost}, 재시도 {retries}회")
+    lines += ["", "## 성장 (data/growth.db, python scripts/growth_snapshot.py)"]
+    by_platform: dict[str, list[tuple[str, int]]] = {}
+    for day, platform, followers in stats.get("growth", []):
+        by_platform.setdefault(platform, []).append((day, followers))
+    for platform, rows in by_platform.items():
+        first, last = rows[0], rows[-1]
+        lines.append(f"- 팔로워 {platform}: {first[1]} ({first[0]}) → {last[1]} ({last[0]}), 기록 {len(rows)}일")
+    if not by_platform:
+        lines.append("- 기록 없음")
     return "\n".join(lines) + "\n"
 
 
