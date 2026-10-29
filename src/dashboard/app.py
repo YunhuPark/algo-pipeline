@@ -1386,6 +1386,8 @@ def queue_generate():
                 f" · 오늘 후보: AI {pool.get('ai', 0)}건, AI 인접 {pool.get('adjacent', 0)}건, "
                 f"그 외 제외 {pool.get('other', 0)}건"
             )
+            if pool.get("security_non_ai"):
+                message += f"(그중 AI가 없는 보안 기사 {pool['security_non_ai']}건)"
         if len(ids) < count and skipped:
             message += " — 제외: " + "; ".join(skipped[:3])
         return redirect(url_for("queue_page", msg=message))

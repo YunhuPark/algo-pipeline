@@ -982,6 +982,18 @@ class DeterministicVerifier:
                 if not _number_supported_by_evidence(num_obj, number_evidence_text):
                     raise QualityGateError("NUMBER_UNSUPPORTED", f"Number '{num_obj.raw_text}' not supported by evidence.", claim.claim_id)
 
+            # 3b. A claim must not state as fact what its source hedges ("정황", "단정할 수 없다", ...)
+            from src.qa.hedge_guard import find_dropped_hedge
+
+            dropped = find_dropped_hedge(claim.claim_text, combined_evidence_text)
+            if dropped:
+                raise QualityGateError(
+                    "CLAIM_HEDGE_DROPPED",
+                    f"The source hedges this with '{dropped}' but the claim states it as fact. "
+                    f"Keep the same qualifier ('{dropped}' or an equivalent such as '~ 정황', '단정할 수 없다') in the claim.",
+                    claim.claim_id,
+                )
+
             # 4. Check Dates
             for date_obj in claim.dates:
                 if not _date_supported_by_evidence(
