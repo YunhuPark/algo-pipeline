@@ -83,7 +83,8 @@ def render_devlog(episode: dict, out_root: Path = Path("output")) -> Path:
         if slide.slide_type == "cover":
             rendered = dr._render_cover(bg_cover, slide, total, handle, hook=script.hook)
         elif slide.slide_type == "cta":
-            rendered = dr._render_cta(bg, slide, total, handle, script.hashtags)
+            # no hashtag pills on the last card: they stay in the caption, and the card reads cleaner
+            rendered = dr._render_cta(bg, slide, total, handle, [])
         else:
             rendered = dr._render_content(bg, slide, total, handle)
             rendered = dr._draw_source_footer(rendered, source, None)
