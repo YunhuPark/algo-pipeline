@@ -107,8 +107,8 @@ def _cta_summary(content_slides: list) -> tuple[str, list[str], list[str]]:
         if not slide.visual_values:
             continue
         value = slide.visual_values[0]
-        if value in values:
-            continue
+        if value in values or not re.search(r"\d", value):
+            continue        # a chip is a figure; a company name there reads as clutter and its label gets cut
         # 라벨은 카드 소제목에서 그 수치를 뺀 말("중남미 14개국 추가" -> "중남미 추가")이 가장 정확하다.
         # 저장된 라벨은 카드마다 같은 말이 반복되기도 한다.
         label = re.sub(r"\s+", " ", slide.title.replace(value, " ")).strip()
