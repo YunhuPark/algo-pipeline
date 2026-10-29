@@ -55,3 +55,57 @@ def test_rubric_matches_the_cover_standard():
     rubric = verifier._EVAL_SYSTEM
     assert "22자 이내" in rubric
     assert "회사명이 없어도 높게 채점" in rubric
+
+
+# ── a cover that meets the output standard cannot fail on the hook score alone ─────────
+
+def _scores(hook, others=8.0, feedback="슬라이드1: 표지를 바꾸세요"):
+    return SimpleNamespace(
+        hook_power=hook, readability=others, brand_tone=others, info_quality=others,
+        naturalness=others, completeness=others, feedback=feedback,
+    )
+
+
+def _with_cover(title):
+    """A script that passes the rule checks, so only the AI scores decide the outcome."""
+    return CardNewsScript(
+        topic="T",
+        hook="h",
+        hashtags=["#알고", "#카드뉴스", "#AI뉴스", "#인공지능", "#테크뉴스"],
+        slides=[
+            Slide(slide_number=1, slide_type="cover", title=title, body="오픈AI가 광고 서비스를 확장합니다"),
+            Slide(slide_number=2, slide_type="content", title="광고 서비스 확대",
+                  body="오픈AI가 챗GPT 광고 서비스를 26개국에 추가로 도입해 전 세계 89개국으로 확대했다"),
+            Slide(slide_number=3, slide_type="content", title="중남미 14개국 추가",
+                  body="이번 확장으로 중남미 14개국에서 광고 서비스를 추가로 제공하게 되었다고 밝혔다"),
+            Slide(slide_number=4, slide_type="cta", title="어디까지 확장될까", body="저장해두고 다음 소식도 받아보세요"),
+        ],
+    )
+
+
+def test_a_standard_cover_is_not_failed_by_a_noisy_hook_score(monkeypatch):
+    monkeypatch.setattr(verifier, "_ai_evaluate", lambda script: _scores(hook=6.0))
+    result = verifier.verify(_with_cover("89개국 광고 서비스"), persona=None)
+    assert result.passed and result.ai_scores["후킹력"] == verifier.HOOK_FLOOR
+    assert verifier.HOOK_FLOOR >= verifier.PASS_THRESHOLD       # the pass line itself did not move
+
+
+def test_a_vague_or_overlong_cover_still_fails_on_the_hook_score(monkeypatch):
+    monkeypatch.setattr(verifier, "_ai_evaluate", lambda script: _scores(hook=6.0))
+    # (a title over 22 chars never reaches the AI scores: the rule check rejects it first)
+    for title in ("AI 혁신 소식", "80%"):
+        result = verifier.verify(_with_cover(title), persona=None)
+        assert not result.passed and result.ai_scores["후킹력"] == 6.0, title
+
+
+def test_a_higher_hook_score_is_never_lowered(monkeypatch):
+    monkeypatch.setattr(verifier, "_ai_evaluate", lambda script: _scores(hook=9.0))
+    result = verifier.verify(_with_cover("89개국 광고 서비스"), persona=None)
+    assert result.ai_scores["후킹력"] == 9.0
+
+
+def test_other_dimensions_are_still_judged_and_the_rewriter_is_told_to_keep_the_cover(monkeypatch):
+    monkeypatch.setattr(verifier, "_ai_evaluate", lambda script: _scores(hook=6.0, others=6.5))
+    result = verifier.verify(_with_cover("89개국 광고 서비스"), persona=None)
+    assert not result.passed and "가독성" in result.feedback
+    assert "표지 제목은 이미 출력 기준" in result.feedback
