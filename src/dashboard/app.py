@@ -775,6 +775,12 @@ document.addEventListener('keydown',e=>{{if(!document.getElementById('lightbox')
 
 @app.route("/")
 def index():
+    try:
+        from src.growth_tracker import ensure_today_async
+
+        ensure_today_async()   # today's follower/post numbers, once a day, in the background (read-only)
+    except Exception:
+        pass
     posts = get_posts(limit=100)
     today = datetime.now().strftime("%Y-%m-%d")
     week_ago = (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d")

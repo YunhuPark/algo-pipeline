@@ -165,3 +165,31 @@ def cross_post_queue_item(queue_id: int) -> tuple[bool, str]:
     insert_post(platform="threads", topic=row["topic"], post_id=post_id, hook=hook, image_dir=image_dir)
     _log(f"#{queue_id} Threads 게시 완료 {post_id}")
     return True, f"Threads 게시 완료: {post_id}"
+
+
+def cross_post_folder(image_dir: str, topic: str) -> tuple[bool, str]:
+    """Post a card folder that is not a queue item (e.g. a devlog episode) to Threads, once.
+
+    Same guarantees as cross_post_queue_item: a duplicate (same folder) is refused, the account guard in
+    the publisher runs first, and the outcome is logged and recorded in the posts table."""
+    import json
+
+    from src.db import get_posts, insert_post
+
+    for post in get_posts(platform="threads", limit=200):
+        if post["image_dir"] == image_dir and post["post_id"]:
+            return False, f"이 폴더는 이미 Threads에 게시되었습니다 ({post['post_id']})"
+    try:
+        post_id = cross_post(image_dir)
+    except Exception as exc:
+        message = f"Threads 게시 실패: {type(exc).__name__}: {str(exc)[:300]}"
+        _log(f"{topic} {message}")
+        return False, message
+    hook = ""
+    try:
+        hook = json.loads((Path(image_dir) / "script.json").read_text(encoding="utf-8")).get("hook", "")
+    except (OSError, ValueError):
+        pass
+    insert_post(platform="threads", topic=topic, post_id=post_id, hook=hook, image_dir=image_dir)
+    _log(f"{topic} Threads 게시 완료 {post_id}")
+    return True, f"Threads 게시 완료: {post_id}"
