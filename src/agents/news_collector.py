@@ -36,6 +36,9 @@ RSS_FEEDS = [
     # 한국 뉴스
     ("연합뉴스 IT",       "https://www.yna.co.kr/rss/it.xml"),
     ("ZDNet Korea",       "https://zdnet.co.kr/rss/"),
+    # 한국 보안 전문 매체: AI가 쓰인 보안 기사(AI 활용 공격, AI가 찾은 취약점, AI 도구의 결함)가 많다.
+    # AI가 없는 일반 보안 사고는 아래 분류(_topic_tier)에서 제외된다.
+    ("데일리시큐",         "https://www.dailysecu.com/rss/allArticle.xml"),
     ("전자신문",           "https://www.etnews.com/rss/allArticleList.xml"),
     ("IT조선",            "https://it.chosun.com/rss/rss.html"),
     ("동아IT",            "https://it.donga.com/rss/index.xml"),
@@ -326,7 +329,7 @@ class NoRelevantNews(RuntimeError):
 
 
 # 마지막 후보 풀의 단계별 개수(대시보드 안내용): AI 직접 / AI 인접 / 그 외(제외) / 수치 부족으로 탈락
-LAST_POOL_STATS: dict = {"ai": 0, "adjacent": 0, "other": 0, "no_facts": 0}
+LAST_POOL_STATS: dict = {"ai": 0, "adjacent": 0, "other": 0, "no_facts": 0, "security_non_ai": 0}
 
 
 def _topic_tier(item: NewsItem) -> int:
@@ -335,6 +338,12 @@ def _topic_tier(item: NewsItem) -> int:
     if _AI_SPECIFIC_RE.search(text):
         return 1
     if _AI_ADJACENT_RE.search(text):
+        # 보안 사고 기사에 "클라우드"·"반도체" 같은 일반 단어가 나온다고 AI 인접이 되지는 않는다.
+        # AI가 쓰이지 않은 보안 기사는 범위 밖이다(AI가 있는 보안 기사는 위에서 이미 1단계).
+        from src.qa.security_scope import PLAIN_SECURITY, classify
+
+        if classify(item.title, item.summary) == PLAIN_SECURITY:
+            return 3
         return 2
     return 3
 
@@ -452,7 +461,14 @@ def _select_topic_with_gpt(items: list[NewsItem]) -> _SelectedTopic:
     adjacent_all = [(idx, it) for idx, it in candidates if tiers[idx] == 2]
     ai_grounded = [(idx, it) for idx, it in ai_all if fact_counts[idx] >= _MIN_FACTS]
     adjacent_grounded = [(idx, it) for idx, it in adjacent_all if fact_counts[idx] >= _MIN_FACTS]
+    from src.qa.security_scope import PLAIN_SECURITY, classify
+
     LAST_POOL_STATS.update(
+        # 보안 기사지만 AI가 쓰이지 않아 제외한 건수(정직하게 보여주기 위해 따로 센다)
+        security_non_ai=sum(
+            1 for idx, it in candidates
+            if tiers[idx] == 3 and classify(it.title, it.summary) == PLAIN_SECURITY
+        ),
         ai=len(ai_all),
         adjacent=len(adjacent_all),
         other=len(candidates) - len(ai_all) - len(adjacent_all),
