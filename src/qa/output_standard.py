@@ -173,7 +173,8 @@ def check_output(out_dir: Path) -> list[Violation]:
             pass
 
     # ── S10 source ─────────────────────────────────────
-    if not script.get("source_note"):
+    # A devlog episode is the project's own record (no article behind it), so it carries no source line.
+    if script.get("kind") != "devlog" and not script.get("source_note"):
         add("S10-source", "출처 정보(source_note)가 기록되지 않았습니다")
 
     return found

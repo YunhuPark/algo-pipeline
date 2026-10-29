@@ -100,10 +100,6 @@
     "#AI뉴스",
     "#테크뉴스"
   ],
-  "source": {
-    "outlet": "알고 운영 기록",
-    "published": "2026-10-29"
-  },
   "evidence": {
     "279회": "git rev-list --count HEAD: 이 회차를 커밋하기 직전(2026-10-29) 기준 279개, 첫 커밋 2026-05-03",
     "202회/115회": "data/tracking.db retry_events: 전체 202건, CLAIM_NUMBER_UNSUPPORTED 115건",

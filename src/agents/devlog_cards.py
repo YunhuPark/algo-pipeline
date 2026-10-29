@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import json
 import re
-from datetime import date, datetime
+from datetime import datetime
 from pathlib import Path
 
 from PIL import Image
@@ -29,14 +29,12 @@ def _gradient_background(size: tuple[int, int] = (1080, 1350)) -> Image.Image:
 
 def caption_for(episode: dict) -> str:
     bullets = "\n".join(f"· {b}" for b in episode["caption_bullets"])
-    note = episode["source"]
-    published = str(note.get("published", "")).replace("-", ".")
+    # no source line: the episode is the project's own record, not an article
     parts = [
         episode["topic"],
         bullets,
         episode["caption_closing"],
         "@algo__kr",
-        f"출처: {note['outlet']} · {published}",
         " ".join(episode["hashtags"]),
     ]
     return strip_sentence_periods("\n\n".join(parts))
@@ -46,7 +44,6 @@ def render_devlog(episode: dict, out_root: Path = Path("output")) -> Path:
     """Draw the episode's cards into a new folder under out_root and return it."""
     from src.agents import design_renderer as dr
     from src.schemas.card_news import CardNewsScript, Slide
-    from src.source_note import SourceNote
 
     persona = dr.load_persona()
     dr.STYLE = dr._build_style(persona)
@@ -68,9 +65,6 @@ def render_devlog(episode: dict, out_root: Path = Path("output")) -> Path:
     ))
     script = CardNewsScript(topic=episode["topic"], hook=cover["hook"], slides=slides, hashtags=episode["hashtags"])
 
-    note = episode["source"]
-    source = SourceNote(outlet=note["outlet"], title="", url="", published=date.fromisoformat(note["published"]))
-
     base = _gradient_background()
     bg, bg_cover = dr._apply_background(base), dr._apply_background(base, for_cover=True)
     safe = re.sub(r"[^\w가-힣]", "_", episode["topic"])[:20]
@@ -86,8 +80,7 @@ def render_devlog(episode: dict, out_root: Path = Path("output")) -> Path:
             # no hashtag pills on the last card: they stay in the caption, and the card reads cleaner
             rendered = dr._render_cta(bg, slide, total, handle, [])
         else:
-            rendered = dr._render_content(bg, slide, total, handle)
-            rendered = dr._draw_source_footer(rendered, source, None)
+            rendered = dr._render_content(bg, slide, total, handle)       # no source footer on a devlog card
         layout.append({
             "slide": slide.slide_number, "type": slide.slide_type, "video": False,
             "panel": dict(dr._PANEL_PROBE[-1]) if dr._PANEL_PROBE else None,
@@ -101,7 +94,7 @@ def render_devlog(episode: dict, out_root: Path = Path("output")) -> Path:
     script_data = {
         "topic": script.topic, "hook": script.hook, "hashtags": script.hashtags,
         "slides": [s.model_dump() for s in slides],
-        "source_note": source.to_dict(),
+        "kind": "devlog",
     }
     (out_dir / "script.json").write_text(json.dumps(script_data, ensure_ascii=False, indent=2), encoding="utf-8")
     (out_dir / "evidence.json").write_text(json.dumps(episode.get("evidence", {}), ensure_ascii=False, indent=2), encoding="utf-8")
