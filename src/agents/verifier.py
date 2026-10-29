@@ -239,6 +239,18 @@ def _ai_evaluate(script: CardNewsScript) -> _AIScore:
 
 # ── 공개 API ──────────────────────────────────────────────
 
+HOOK_FLOOR = 7.5          # 표지가 출력 기준을 지킨 경우 후킹력의 하한(통과선 PASS_THRESHOLD는 그대로)
+COVER_TITLE_MAX = 22
+
+
+def _cover_meets_standard(script: CardNewsScript) -> bool:
+    """표지 제목이 수치와 그 대상이 붙은 구절이고 22자 이내인가(출력 기준 S6과 같은 정의)."""
+    from src.qa.script_assembler import has_complete_figure
+
+    title = (script.cover.title or "").strip()
+    return bool(title) and len(title) <= COVER_TITLE_MAX and has_complete_figure(title)
+
+
 def verify(
     script: CardNewsScript,
     persona: Persona,
@@ -274,6 +286,14 @@ def verify(
         "자연스러움": ai.naturalness,
         "완성도": ai.completeness,
     }
+    # 표지의 구체성은 출력 기준(S6)이 코드로 정의한다: 수치와 그 대상이 붙은 구절, 22자 이내.
+    # 이 기준을 통과한 표지에 판정 AI가 6점을 주고 서로 모순되는 개선안을 내서(회사명을 빼라 → 넣어라)
+    # 생성이 반복 실패하던 일이 있었다(기록된 편집 점수 실패 19건 중 18건이 후킹력). 그래서 기준을 지킨
+    # 표지는 후킹력을 최소 HOOK_FLOOR로 보장하고, 나머지 항목은 계속 AI가 채점한다.
+    hook_lifted = False
+    if _cover_meets_standard(script) and scores["후킹력"] < HOOK_FLOOR:
+        scores["후킹력"] = HOOK_FLOOR
+        hook_lifted = True
     avg = sum(scores.values()) / len(scores)
     # 평균만 보면 한 항목의 치명적인 실패가 다른 점수에 가려질 수 있다.
     # 모든 편집 품질 축이 기준을 넘어야 렌더링을 허용한다.
@@ -288,6 +308,8 @@ def verify(
             f"다음 항목이 기준({PASS_THRESHOLD}점) 미달입니다: {', '.join(low)}\n\n"
             f"개선 방향:\n{ai.feedback}"
         )
+        if hook_lifted:
+            feedback += "\n\n표지 제목은 이미 출력 기준(수치와 대상이 있는 22자 이내 구절)을 통과했으니 바꾸지 마십시오."
 
     return VerifyResult(
         passed=passed,
