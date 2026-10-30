@@ -92,6 +92,27 @@ _TRANSCRIPT_INTERVAL = 12.0  # 자막 요청 최소 간격(초) — 429 rate lim
 
 MAX_RETRIES = 2  # 최대 재시도 횟수
 
+# YouTube가 자막 요청을 429(Too Many Requests)로 막을 때의 대응.
+# - 한 번 막히면 잠깐 쉬었다가(_RATE_LIMIT_BACKOFF 초) 다시 시도한다.
+# - 그래도 막히면 _RATE_LIMIT_COOLDOWN 초 동안 자막 요청을 모두 보류한다: 막힌 상태에서 다른 영상까지
+#   계속 두드리면 제한이 길어지고, 영상마다 같은 실패를 되풀이하게 된다.
+# - 막혀서 못 받은 영상은 "자막 없음"으로 기억하지 않는다(일시적 실패이므로 나중에 다시 시도).
+_RATE_LIMIT_BACKOFF = (20, 60)
+_RATE_LIMIT_COOLDOWN = 600
+_rate_limited_until: float = 0.0
+
+
+def _sleep(seconds: float) -> None:      # 테스트에서 바꿔 끼운다
+    time.sleep(seconds)
+
+
+def _is_rate_limited(message: str) -> bool:
+    return "429" in message or "Too Many" in message
+
+
+def _cooldown_remaining() -> float:
+    return max(0.0, _rate_limited_until - time.time())
+
 
 @dataclass
 class VideoInfo:
@@ -388,7 +409,7 @@ def _get_video_transcript(video_id: str, max_chars: int = 4000) -> str:
       2) 파일 캐시 (_TRANSCRIPT_CACHE_DIR) — 서버 재시작 후에도 재사용
       3) yt-dlp 실제 다운로드 — 요청 간격 최소 1.5초 보장 (429 방지)
     """
-    global _last_transcript_fetch
+    global _last_transcript_fetch, _rate_limited_until
 
     # 1) 인메모리 캐시
     if video_id in _transcript_cache:
@@ -406,6 +427,12 @@ def _get_video_transcript(video_id: str, max_chars: int = 4000) -> str:
             pass
 
     # 3) yt-dlp 다운로드 — 요청 간격 보장
+    remaining = _cooldown_remaining()
+    if remaining > 0:
+        # 막힌 직후다. 요청하지 않고 "보류"로 처리한다(자막 없음으로 기억하지 않는다).
+        raise RuntimeError(
+            f"YouTube transcript paused for {video_id}: rate limit cooldown ({int(remaining)}s left)"
+        )
     elapsed = time.time() - _last_transcript_fetch
     if elapsed < _TRANSCRIPT_INTERVAL:
         time.sleep(_TRANSCRIPT_INTERVAL - elapsed)
@@ -435,8 +462,24 @@ def _get_video_transcript(video_id: str, max_chars: int = 4000) -> str:
                     )
                 },
             }
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                ydl.download([f'https://www.youtube.com/watch?v={video_id}'])
+            for attempt in range(len(_RATE_LIMIT_BACKOFF) + 1):
+                try:
+                    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                        ydl.download([f'https://www.youtube.com/watch?v={video_id}'])
+                    break
+                except Exception as exc:
+                    if not _is_rate_limited(str(exc)):
+                        raise
+                    if attempt >= len(_RATE_LIMIT_BACKOFF):
+                        _rate_limited_until = time.time() + _RATE_LIMIT_COOLDOWN
+                        print(
+                            f"  [YouTubeFetcher] 자막 요청이 계속 막혀 {_RATE_LIMIT_COOLDOWN // 60}분간 "
+                            f"자막 요청을 보류합니다(다른 영상 검증은 건너뜁니다)"
+                        )
+                        raise
+                    wait = _RATE_LIMIT_BACKOFF[attempt]
+                    print(f"  [YouTubeFetcher] 자막 요청 제한(429) — {wait}초 쉬고 다시 시도합니다 ({video_id})")
+                    _sleep(wait)
 
             # vtt 파일 찾기
             vtt_files = [f for f in os.listdir(tmp) if f.endswith('.vtt')]
@@ -474,9 +517,9 @@ def _get_video_transcript(video_id: str, max_chars: int = 4000) -> str:
         err_msg = str(e)
         print(f"  [YouTubeFetcher] 자막 추출 실패 ({video_id}): {err_msg[:80]}")
         # 429는 일시적 — 파일 캐시 저장 안 함 (다음 세션에 재시도 가능하게)
-        is_rate_limit = "429" in err_msg or "Too Many" in err_msg
-        _transcript_cache[video_id] = ""   # 인메모리에만 캐시 (재시도 방지)
+        is_rate_limit = _is_rate_limited(err_msg) or "rate limit cooldown" in err_msg
         if not is_rate_limit:
+            _transcript_cache[video_id] = ""   # 진짜 실패만 기억한다(429는 일시적이라 나중에 다시 시도)
             cache_file.write_text("", encoding='utf-8')
         # 최대 재시도 초과나 429의 경우 즉시 Fail-closed
         raise RuntimeError(f"YouTube transcript unavailable for {video_id}: {err_msg}")
