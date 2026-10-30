@@ -152,6 +152,45 @@ def report(conn: sqlite3.Connection, posts_shown: int = 6) -> str:
     return "\n".join(lines)
 
 
+def topics_by_post(algo_db: Path | None = None) -> dict[tuple[str, str], str]:
+    """{(platform, post_id): topic} for the posts this project published, from data/algo.db."""
+    path = algo_db or (ROOT / "data" / "algo.db")
+    if not path.exists():
+        return {}
+    try:
+        with sqlite3.connect(path) as conn:
+            return {(p, str(pid)): topic for p, pid, topic in conn.execute(
+                "select platform, post_id, topic from posts where post_id is not null and post_id != ''")}
+    except sqlite3.Error:
+        return {}
+
+
+def category_report(conn: sqlite3.Connection, topics: dict[tuple[str, str], str]) -> str:
+    """Average reach per topic category, from each post's latest snapshot. Empty when nothing matches."""
+    from src.qa.topic_category import primary
+
+    conn.executescript(SCHEMA)
+    rows = conn.execute(
+        "select platform, post_id, reach, views, likes, saves, shares from post_snapshots p "
+        "where day = (select max(day) from post_snapshots where platform=p.platform and post_id=p.post_id)"
+    ).fetchall()
+    groups: dict[str, list[tuple]] = {}
+    for platform, post_id, reach, views, likes, saves, shares in rows:
+        topic = topics.get((platform, str(post_id)))
+        if not topic:
+            continue
+        groups.setdefault(primary(topic), []).append((reach, views, likes, saves, shares))
+    if not groups:
+        return ""
+    lines = ["- 분야별 평균 (게시물 수 / 도달·조회 평균 / 좋아요·저장·공유 합) — 표본이 작으면 참고만 하세요"]
+    for category, items in sorted(groups.items(), key=lambda kv: -len(kv[1])):
+        reach = [r if r is not None else v for r, v, *_ in items if (r is not None or v is not None)]
+        avg = sum(reach) / len(reach) if reach else 0
+        reactions = sum((likes or 0) + (saves or 0) + (shares or 0) for _, _, likes, saves, shares in items)
+        lines.append(f"    {category}: {len(items)}개 / 평균 {avg:.1f} / 반응 {reactions}")
+    return "\n".join(lines)
+
+
 def snapshot(day: date | None = None, db_path: Path = DB_PATH, get: Getter = _http_get) -> dict:
     """Collect and store today's numbers; returns what was collected (notes explain what was skipped)."""
     from src import threads_credentials

@@ -24,6 +24,9 @@ def main(argv: list[str]) -> int:
     growth_tracker.DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     with sqlite3.connect(growth_tracker.DB_PATH) as conn:
         print(growth_tracker.report(conn))
+        by_category = growth_tracker.category_report(conn, growth_tracker.topics_by_post())
+        if by_category:
+            print(by_category)
     return 0
 
 

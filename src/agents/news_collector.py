@@ -439,7 +439,26 @@ _HUMAN = """
 위 목록에서 오늘 카드뉴스로 만들 주제 하나를 선택해주세요.
 본문이 비어 있거나 수치가 0개인 항목은 마지막 수단으로만 고르십시오.
 반드시 {today} 기준의 최신 내용만 다루세요. 과거 연도(2025년 등)를 제목에 쓰지 마세요.
+'[분야: …]'와 '[트렌드: …]' 표시는 참고 신호입니다. 다른 조건이 비슷하면 규제·정책, 투자·돈, 일자리,
+환경·전력, 보안·개인정보처럼 사람들이 많이 찾는 분야나 오늘 검색이 많은 키워드와 맞는 기사를 먼저 고르되,
+이 표시 때문에 근거와 수치가 약한 기사를 고르지는 마십시오.
 """
+
+
+def _signal_tags(item: NewsItem, trend_terms: list[str]) -> str:
+    """' [분야: 규제·정책] [트렌드: 비트코인]' — hints for the topic selector; '' when there is nothing to say."""
+    from src.agents import trend_signal
+    from src.qa.topic_category import GENERAL, categorize
+
+    text = f"{item.title} {item.summary[:200]}"
+    tags = ""
+    categories = [c for c in categorize(text) if c != GENERAL]
+    if categories:
+        tags += f" [분야: {', '.join(categories)}]"
+    hits = trend_signal.matches(text, trend_terms)
+    if hits:
+        tags += f" [트렌드: {', '.join(hits[:2])}]"
+    return tags
 
 
 def _select_topic_with_gpt(items: list[NewsItem]) -> _SelectedTopic:
@@ -509,8 +528,13 @@ def _select_topic_with_gpt(items: list[NewsItem]) -> _SelectedTopic:
         )
         pool = non_opinion_pool
 
+    # 참고 신호: 사람들이 관심 갖는 분야와 오늘의 검색 키워드. 기사를 통과시키는 기준이 아니라
+    # 비슷한 후보 중에서 고를 때의 힌트일 뿐이고, 읽지 못하면 표시 없이 그대로 진행한다.
+    from src.agents import trend_signal
+
+    trend_terms = trend_signal.fetch_terms()
     headlines = "\n".join(
-        f"[{n+1}] ({it.source}) {it.title} — 수치 {fact_counts[idx]}개\n"
+        f"[{n+1}] ({it.source}) {it.title} — 수치 {fact_counts[idx]}개{_signal_tags(it, trend_terms)}\n"
         f"    본문: {_excerpt(it.summary)}"
         for n, (idx, it) in enumerate(pool)
     )
