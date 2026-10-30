@@ -96,3 +96,9 @@ def test_the_growth_report_groups_published_posts_by_category(tmp_path):
     assert "일반: 1개 / 평균 0.0" in text
     with sqlite3.connect(tmp_path / "empty.db") as conn:
         assert gt.category_report(conn, {}) == ""
+
+
+def test_security_stories_are_tagged_but_not_favoured_by_the_selector_prompt():
+    # hacking/security news only has to be in the pool; it gets no preference over other topics
+    assert "보안" not in nc._HUMAN.split("참고 신호")[1]
+    assert "환경·전력" in nc._HUMAN
