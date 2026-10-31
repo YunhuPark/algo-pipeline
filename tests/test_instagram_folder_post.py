@@ -24,6 +24,7 @@ def test_a_token_from_another_account_is_refused_before_anything_is_sent(tmp_pat
     monkeypatch.setattr(publisher, "verify_instagram_account", lambda *a, **k: {"username": "someone_else"})
     monkeypatch.setattr(publisher, "publish", lambda *a, **k: sent.append(1))
     monkeypatch.setattr("src.db.get_posts", lambda **kw: [])
+    monkeypatch.setattr(ig, "_log", lambda message: None)       # tests must not write to the real log
     ok, message = ig.post_folder(str(_folder(tmp_path)))
     assert not ok and "알고 계정" in message and not sent
 
