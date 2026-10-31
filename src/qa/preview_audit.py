@@ -91,6 +91,16 @@ def audit_output(out_dir: Path, script_hook: str = "") -> dict[str, Any]:
         except ValueError:
             attention.append("script.json을 읽을 수 없습니다")
 
+    # ── caption figures (rule 2): the opening and key lines must carry the cards' figures ──
+    if caption_path.exists() and script.get("slides"):
+        from src.qa.card_rules import repair_caption_figures
+
+        before = caption_path.read_text(encoding="utf-8")
+        repaired, note = repair_caption_figures(before, script)
+        if note and repaired != before:
+            caption_path.write_text(repaired, encoding="utf-8")
+            fixed.append(note)
+
     mp4_numbers = {
         m.group(1) for p in out_dir.glob("card_*.mp4") if (m := re.match(r"card_(\d+)_", p.name))
     }
