@@ -90,18 +90,29 @@ def clean_cta_title(title: str, fallback: str = _DEFAULT_CTA_TITLE) -> str:
 
 # ── 3. chip labels say what the figure is ──────────────────────────────────────────────
 
+def _cut(text: str, limit: int) -> str:
+    """Shorten to the limit at a word boundary ("AI 모드 광고 확대" -> "AI 모드 광고", not "AI 모드 광고 확")."""
+    text = text.strip()
+    if len(text) <= limit:
+        return text
+    cut = text[:limit]
+    if text[limit] != " " and " " in cut:
+        cut = cut.rsplit(" ", 1)[0]
+    return cut.rstrip()
+
+
 def chip_label(title: str, value: str, labels: list[str], used: list[str], limit: int = 10) -> str:
     """Label for a closing-card figure chip: the card's headline minus the figure when it contains it, else the
     card's own stat label (unless generic or already used by another chip), else the headline."""
     if value and value in title:
         rest = re.sub(r"\s+", " ", title.replace(value, " ")).strip()
         if len(rest) >= 2:
-            return rest[:limit].rstrip()
+            return _cut(rest, limit)
     for label in labels or []:
         label = (label or "").strip()
         if len(label) >= 2 and label not in _GENERIC_LABELS and label not in used:
-            return label[:limit].rstrip()
-    return title[:limit].rstrip()
+            return _cut(label, limit)
+    return _cut(title, limit)
 
 
 # ── 2. the caption's key lines carry the cards' figures ────────────────────────────────
