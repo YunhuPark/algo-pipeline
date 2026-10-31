@@ -1,0 +1,16 @@
+{
+  "_comment": "Regression set. Article texts are NOT stored in git: run `python scripts/regression_seed.py` on a machine whose queue DB still has these rows (it copies each row's source metadata into data/regression/, which is git-ignored). 'expect' is what the pipeline should do today.",
+  "articles": [
+    {"id": 4,  "expect": "success", "why": "published earlier: Apple $250M Siri AI settlement (figures, single event)"},
+    {"id": 5,  "expect": "success", "why": "published earlier: Oura $2.2B IPO (finance figures)"},
+    {"id": 12, "expect": "success", "why": "published earlier: Nous Research $1.5B valuation (AI business)"},
+    {"id": 15, "expect": "success", "why": "Amazon robots vs human workers (people/robot counts, 1.5 million notation)"},
+    {"id": 16, "expect": "success", "why": "Microsoft Maia 300 AI chip (hardware, percentages)"},
+    {"id": 22, "expect": "success", "why": "McKinsey AI client interview (10-minute hyphen notation, 80%)"},
+    {"id": 27, "expect": "success", "why": "G7 AI financial cyber exercise (policy news, few figures)"},
+    {"id": 25, "expect": "unknown", "why": "IMF warning on AI investment (macro, many figures)"},
+    {"id": 18, "expect": "hard", "why": "Topgolf VMware cost saving (previously failed with EMPTY_PIPELINE_RESULT)"},
+    {"id": 19, "expect": "hard", "why": "Nothing Headphone (a) half-off deal (consumer deal; failed at $0.69)"},
+    {"id": 26, "expect": "hard", "why": "Gemini 4 Argon benchmark (49.8% drop; hook score kept failing)"}
+  ]
+}

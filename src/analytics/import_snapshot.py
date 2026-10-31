@@ -81,3 +81,30 @@ def import_performance_snapshot(
         if "unique" in str(exc).lower():
             return -1
         raise
+
+
+def compact_performance_snapshots() -> int:
+    """Keep only the newest snapshot per publication; return rows removed.
+
+    Syncing appends one row per hourly bucket, so a single post piles up many
+    near-identical rows. Reports only ever read the latest one, so the rest is
+    noise. Newest = latest measured_at, ties broken by highest snapshot_id.
+    """
+
+    with get_connection(_path()) as conn:
+        cursor = conn.execute(
+            """
+            DELETE FROM performance_snapshots
+            WHERE snapshot_id IN (
+                SELECT snapshot_id FROM (
+                    SELECT snapshot_id,
+                           ROW_NUMBER() OVER (
+                               PARTITION BY publication_id
+                               ORDER BY datetime(measured_at) DESC, snapshot_id DESC
+                           ) AS snapshot_rank
+                    FROM performance_snapshots
+                ) WHERE snapshot_rank > 1
+            )
+            """
+        )
+        return int(cursor.rowcount or 0)

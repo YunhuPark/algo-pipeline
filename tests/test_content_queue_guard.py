@@ -126,6 +126,7 @@ def test_fill_from_news_excludes_already_queued_and_newly_picked_urls(queue_db):
          ):
         content_queue._fill_from_news(2)
 
+    # 요청한 개수(2번)만 시도한다 — 개수를 채우려고 더 끌어오지 않는다.
     assert len(calls) == 2
     # 첫 호출: 이미 큐에 있던 기사 URL이 먼저 제외돼야 한다
     assert "https://example.com/article" in calls[0]
@@ -741,6 +742,208 @@ def test_cached_publish_normalizes_non_list_hashtags(queue_db, tmp_path):
     publish.assert_called_once_with(image_paths=[out_dir / "card_01_cover.png"], hook="hook text", hashtags=[])
 
 
+def dated_metadata(name: str, published_at: str = "") -> QueueMetadataV2:
+    return QueueMetadataV2(
+        topic=f"검증된 AI 뉴스 {name}",
+        source_title=f"원문 기사 {name}",
+        source_url=f"https://example.com/{name}",
+        context=f"검증에 사용할 충분한 기사 문맥 {name}",
+        evidence=[
+            {
+                "title": f"원문 기사 {name}",
+                "url": f"https://example.com/{name}",
+                "published_at": published_at,
+            }
+        ],
+    )
+
+
+def _ready_with_cards(queue_db, tmp_path, row_id, name):
+    out_dir = tmp_path / f"20261009_{name}"
+    out_dir.mkdir()
+    (out_dir / "card_01_cover.png").write_bytes(b"fake-png")
+    (out_dir / "script.json").write_text('{"hook": "h", "hashtags": ["#a"]}', encoding="utf-8")
+    with sqlite3.connect(queue_db) as conn:
+        conn.execute(
+            "UPDATE queue SET status='ready', image_dir=? WHERE id=?", (str(out_dir), row_id)
+        )
+    return out_dir
+
+
+def _row(queue_db, row_id):
+    with sqlite3.connect(queue_db) as conn:
+        conn.row_factory = sqlite3.Row
+        return conn.execute("SELECT * FROM queue WHERE id=?", (row_id,)).fetchone()
+
+
+def test_the_queue_list_names_each_candidates_outlet_and_date(queue_db):
+    from src.dashboard import app as dashboard
+
+    dated = db.enqueue_v2(
+        dated_metadata("a", "2026-10-07"), CollectionMethod.NEWS_COLLECTOR
+    )
+    legacy = db.enqueue_v2(dated_metadata("b"), CollectionMethod.NEWS_COLLECTOR)
+
+    assert "Example · 2026.10.07" in dashboard._candidate_source_label(db.get_queue_row(dated))
+    assert "Example" in dashboard._candidate_source_label(db.get_queue_row(legacy))
+    assert "2026" not in dashboard._candidate_source_label(db.get_queue_row(legacy))
+
+
+def test_a_row_with_unreadable_metadata_shows_no_label():
+    from src.dashboard import app as dashboard
+
+    assert dashboard._candidate_source_label({"metadata_json": "{not json"}) == ""
+    assert dashboard._candidate_source_label({"metadata_json": None}) == ""
+
+
+def test_a_card_approved_days_later_is_not_posted_if_its_article_went_stale(queue_db, tmp_path):
+    from datetime import date
+
+    row_id = db.enqueue_v2(dated_metadata("a", "2025-07-07"), CollectionMethod.NEWS_COLLECTOR)
+    _ready_with_cards(queue_db, tmp_path, row_id, "a")
+
+    with patch("src.agents.publisher.publish") as publish:
+        result = content_queue.publish_next(publish_to_ig=True)
+
+    assert result is None
+    publish.assert_not_called()
+    row = _row(queue_db, row_id)
+    assert row["publish_error_code"] == "SOURCE_UNSUITABLE_SOURCE_TOO_OLD"
+    assert row["status"] == "ready"  # still reviewable, just not postable
+
+
+def test_a_fresh_card_is_posted_normally(queue_db, tmp_path):
+    from datetime import date
+
+    row_id = db.enqueue_v2(
+        dated_metadata("a", date.today().isoformat()), CollectionMethod.NEWS_COLLECTOR
+    )
+    _ready_with_cards(queue_db, tmp_path, row_id, "a")
+
+    with patch("src.agents.publisher.publish", return_value="ig-1") as publish:
+        result = content_queue.publish_next(publish_to_ig=True)
+
+    assert result["id"] == row_id
+    publish.assert_called_once()
+    assert _row(queue_db, row_id)["status"] == "published"
+
+
+def test_a_legacy_row_without_a_recorded_date_is_checked_against_its_page(
+    queue_db, tmp_path, monkeypatch
+):
+    from datetime import date
+
+    row_id = db.enqueue_v2(dated_metadata("legacy"), CollectionMethod.NEWS_COLLECTOR)
+    _ready_with_cards(queue_db, tmp_path, row_id, "legacy")
+
+    monkeypatch.setattr(content_queue, "fetch_published_date", lambda url, **kw: date(2025, 7, 7))
+    with patch("src.agents.publisher.publish") as publish:
+        assert content_queue.publish_next(publish_to_ig=True) is None
+        publish.assert_not_called()
+    assert _row(queue_db, row_id)["publish_error_code"] == "SOURCE_UNSUITABLE_SOURCE_TOO_OLD"
+
+
+def test_a_legacy_row_whose_page_date_cannot_be_read_is_not_blocked(queue_db, tmp_path):
+    row_id = db.enqueue_v2(dated_metadata("legacy"), CollectionMethod.NEWS_COLLECTOR)
+    _ready_with_cards(queue_db, tmp_path, row_id, "legacy")
+
+    with patch("src.agents.publisher.publish", return_value="ig-1") as publish:
+        assert content_queue.publish_next(publish_to_ig=True)["id"] == row_id
+        publish.assert_called_once()
+
+
+def _three_candidates(queue_db, tmp_path):
+    from datetime import date
+
+    today = date.today().isoformat()
+    ids = [
+        db.enqueue_v2(dated_metadata(n, today), CollectionMethod.NEWS_COLLECTOR)
+        for n in ("a", "b", "c")
+    ]
+    _ready_with_cards(queue_db, tmp_path, ids[0], "a")          # the one that gets posted
+    _ready_with_cards(queue_db, tmp_path, ids[2], "c")          # a candidate with a preview
+    return ids
+
+
+def test_posting_one_candidate_clears_the_others(queue_db, tmp_path):
+    a, b, c = _three_candidates(queue_db, tmp_path)
+
+    with patch("src.agents.publisher.publish", return_value="ig-1"):
+        assert content_queue.publish_next(publish_to_ig=True)["id"] == a
+
+    assert [_row(queue_db, i)["status"] for i in (a, b, c)] == ["published", "skipped", "skipped"]
+
+
+def test_clearing_can_be_turned_off(queue_db, tmp_path, monkeypatch):
+    monkeypatch.setenv("QUEUE_CLEAR_AFTER_PUBLISH", "false")
+    a, b, c = _three_candidates(queue_db, tmp_path)
+
+    with patch("src.agents.publisher.publish", return_value="ig-1"):
+        content_queue.publish_next(publish_to_ig=True)
+
+    assert [_row(queue_db, i)["status"] for i in (a, b, c)] == ["published", "pending", "ready"]
+
+
+def test_a_candidate_being_generated_right_now_is_left_alone(queue_db, tmp_path):
+    a, b, c = _three_candidates(queue_db, tmp_path)
+    assert db.claim_queue_row(b)  # b is mid-generation
+
+    with patch("src.agents.publisher.publish", return_value="ig-1"):
+        content_queue.publish_next(publish_to_ig=True)
+
+    assert [_row(queue_db, i)["status"] for i in (a, b, c)] == ["published", "processing", "skipped"]
+
+
+def test_a_blocked_row_is_kept_for_a_person_to_see_not_swept_away(queue_db, tmp_path):
+    a, b, c = _three_candidates(queue_db, tmp_path)
+    db.mark_queue_error(b, "SOURCE_UNSUITABLE_SOURCE_TOO_OLD")
+
+    with patch("src.agents.publisher.publish", return_value="ig-1"):
+        content_queue.publish_next(publish_to_ig=True)
+
+    assert _row(queue_db, b)["status"] == "pending"
+    assert _row(queue_db, b)["publish_error_code"] == "SOURCE_UNSUITABLE_SOURCE_TOO_OLD"
+    assert _row(queue_db, c)["status"] == "skipped"
+
+
+def test_a_failed_post_does_not_clear_anything(queue_db, tmp_path):
+    a, b, c = _three_candidates(queue_db, tmp_path)
+
+    with patch("src.agents.publisher.publish", side_effect=RuntimeError("instagram down")):
+        content_queue.publish_next(publish_to_ig=True)
+
+    assert _row(queue_db, b)["status"] == "pending"
+    assert _row(queue_db, c)["status"] == "ready"
+
+
+def test_cached_publish_posts_the_caption_the_reviewer_saw(queue_db, tmp_path):
+    """The dashboard previews caption.txt; the post must carry that same text
+    (source attribution included), not a caption rebuilt from hook + hashtags."""
+    row_id = db.enqueue_v2(metadata(), CollectionMethod.NEWS_COLLECTOR)
+    out_dir = tmp_path / "20260922_reviewed"
+    out_dir.mkdir()
+    (out_dir / "card_01_cover.png").write_bytes(b"fake-png")
+    (out_dir / "caption.txt").write_text("검토한 캡션\n\n출처: TechCrunch\n\n#알고", encoding="utf-8")
+    (out_dir / "script.json").write_text(
+        '{"hook": "hook text", "hashtags": ["#알고"]}', encoding="utf-8"
+    )
+    with sqlite3.connect(queue_db) as conn:
+        conn.execute(
+            "UPDATE queue SET status='ready', image_dir=? WHERE id=?",
+            (str(out_dir), row_id),
+        )
+
+    with patch("src.agents.publisher.publish", return_value="ig-1") as publish:
+        content_queue.publish_next(publish_to_ig=True)
+
+    publish.assert_called_once_with(
+        image_paths=[out_dir / "card_01_cover.png"],
+        hook="hook text",
+        hashtags=["#알고"],
+        caption="검토한 캡션\n\n출처: TechCrunch\n\n#알고",
+    )
+
+
 def test_human_rejection_marks_queue_skipped_without_remote_attempt(queue_db):
     row_id = db.enqueue_v2(metadata(), CollectionMethod.NEWS_COLLECTOR)
     rejected = PipelineResult(
@@ -763,3 +966,54 @@ def test_human_rejection_marks_queue_skipped_without_remote_attempt(queue_db):
             "SELECT status FROM queue WHERE id=?", (row_id,)
         ).fetchone()[0]
     assert status == "skipped"
+
+
+def test_collection_reports_the_real_count_and_does_not_pad_with_extra_picks(queue_db):
+    """Regression: the screen said "3개 추가 완료" while only 2 were queued. The report must say what
+    really happened, and a rejected pick must not be replaced by pulling in more articles."""
+    from datetime import datetime
+
+    calls = []
+
+    def fake_collect(exclude_urls=frozenset()):
+        calls.append(1)
+        n = len(calls)
+        return SimpleNamespace(
+            topic=f"주제{n}",
+            selected_item=SimpleNamespace(
+                title=f"기사{n}", url=f"https://example.com/new-{n}", summary="본문",
+                published=datetime.now(),
+            ),
+        )
+
+    def fake_freshness(published, **kw):
+        stale = len(calls) == 2          # the 2nd pick is judged stale; the others are fresh
+        return SimpleNamespace(ok=not stale, code="SOURCE_TOO_OLD", detail="3일 전 기사")
+
+    with patch.object(content_queue, "_collect_news", side_effect=fake_collect),          patch.object(content_queue, "check_freshness", side_effect=fake_freshness),          patch.object(content_queue, "check_source_suitability", return_value=SimpleNamespace(ok=True)),          patch("src.qa.topic_source_guard.topic_matches_source", return_value=True),          patch("src.agents.trend_analyzer.build_locked_source_report"),          patch("src.services.generation_service.build_queue_metadata", side_effect=lambda *a, **k: metadata()),          patch.object(content_queue, "enqueue_v2", side_effect=iter([101, 102, 103])):
+        ids = content_queue._fill_from_news(3)
+
+    assert ids == [101, 102]               # 3 requested, 2 acceptable -> exactly 2, no padding
+    assert len(calls) == 3
+    report = content_queue.LAST_COLLECTION_REPORT
+    assert report["requested"] == 3 and report["added"] == 2
+    assert any("최신 기사가 아님" in reason for reason in report["skipped"])
+
+
+def test_no_relevant_news_stops_collection_and_is_reported_honestly(queue_db):
+    """When today has no AI/AI-adjacent article, nothing is padded in and the reason is reported."""
+    from src.agents.news_collector import NoRelevantNews
+
+    calls = []
+
+    def fake_collect(exclude_urls=frozenset()):
+        calls.append(1)
+        raise NoRelevantNews("AI·AI 인접 기사가 없습니다 (수집 20건 중 AI 0, AI 인접 0, 그 외 20, 수치 부족 0)")
+
+    with patch.object(content_queue, "_collect_news", side_effect=fake_collect):
+        ids = content_queue._fill_from_news(3)
+
+    assert ids == [] and len(calls) == 1          # no point retrying the same empty pool
+    report = content_queue.LAST_COLLECTION_REPORT
+    assert report["requested"] == 3 and report["added"] == 0
+    assert "AI·AI 인접 기사가 없습니다" in report["skipped"][0]

@@ -139,6 +139,9 @@ def pipeline_seams(tmp_path, monkeypatch):
          patch("src.pipeline.design_renderer.render_card_set", return_value=[out_dir / "card_01_cover.png"]), \
          patch("src.agents.fact_checker.check_script", return_value=fact_report), \
          patch("src.agents.youtube_fetcher.fetch_video_candidates", return_value=[]), \
+         patch("src.agents.youtube_fetcher.find_verified_video_for_slide", return_value=(None, 0)), \
+         patch("src.agents.image_searcher.search_pexels_video", return_value=None), \
+         patch("src.agents.angle_selector.select_angle", return_value=None), \
          patch("src.agents.publisher.get_post_permalink", return_value="https://instagram.test/p/123"), \
          patch("subprocess.run"):
         creator.return_value.run.return_value = script

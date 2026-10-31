@@ -92,6 +92,27 @@ _TRANSCRIPT_INTERVAL = 12.0  # 자막 요청 최소 간격(초) — 429 rate lim
 
 MAX_RETRIES = 2  # 최대 재시도 횟수
 
+# YouTube가 자막 요청을 429(Too Many Requests)로 막을 때의 대응.
+# - 한 번 막히면 잠깐 쉬었다가(_RATE_LIMIT_BACKOFF 초) 다시 시도한다.
+# - 그래도 막히면 _RATE_LIMIT_COOLDOWN 초 동안 자막 요청을 모두 보류한다: 막힌 상태에서 다른 영상까지
+#   계속 두드리면 제한이 길어지고, 영상마다 같은 실패를 되풀이하게 된다.
+# - 막혀서 못 받은 영상은 "자막 없음"으로 기억하지 않는다(일시적 실패이므로 나중에 다시 시도).
+_RATE_LIMIT_BACKOFF = (20, 60)
+_RATE_LIMIT_COOLDOWN = 600
+_rate_limited_until: float = 0.0
+
+
+def _sleep(seconds: float) -> None:      # 테스트에서 바꿔 끼운다
+    time.sleep(seconds)
+
+
+def _is_rate_limited(message: str) -> bool:
+    return "429" in message or "Too Many" in message
+
+
+def _cooldown_remaining() -> float:
+    return max(0.0, _rate_limited_until - time.time())
+
 
 @dataclass
 class VideoInfo:
@@ -157,7 +178,7 @@ def _get_video_metadata(video_id: str) -> dict:
 
     result: dict = {
         'available': False, 'view_count': 0, 'duration': 0,
-        'channel': '', 'chapters': [], 'description': '', 'language': '',
+        'channel': '', 'chapters': [], 'description': '', 'language': '', 'license': '',
     }
     try:
         import yt_dlp
@@ -178,6 +199,8 @@ def _get_video_metadata(video_id: str) -> dict:
             'duration': info.get('duration') or 0,
             'channel': info.get('channel') or info.get('uploader', ''),
             'channel_follower_count': info.get('channel_follower_count') or 0,
+            # 쓰는 쪽이 재사용을 허락했는지 판단하는 근거(예: "Creative Commons Attribution license (reuse allowed)")
+            'license': info.get('license') or '',
             # 자막을 받을 때 이 언어 하나만 요청하면 자동 번역 트랙을 건드리지 않는다.
             'language': (info.get('language') or '').split('-')[0],
             'chapters': [
@@ -195,6 +218,35 @@ def _get_video_metadata(video_id: str) -> dict:
 
     _video_meta_cache[video_id] = result
     return result
+
+
+def _allowed_channels(env_path: Path | None = None) -> set[str]:
+    """허락을 받았거나 공식 배포 채널로 직접 정한 채널 이름(.env VIDEO_ALLOWED_CHANNELS, 쉼표 구분)."""
+    from dotenv import dotenv_values
+
+    path = env_path or (Path(__file__).resolve().parents[2] / ".env")
+    raw = (dotenv_values(path).get("VIDEO_ALLOWED_CHANNELS") or "") if path.exists() else ""
+    return {c.strip().casefold() for c in raw.split(",") if c.strip()}
+
+
+def video_use_permitted(video_id: str) -> tuple[bool, str]:
+    """다른 사람의 영상을 카드에 쓸 수 있는가.
+
+    출처를 적는 것은 허락이 아니다. 그래서 쓰는 쪽이 재사용을 허락했음이 분명한 경우만 쓴다:
+      - 영상의 라이선스가 크리에이티브 커먼즈일 때(유튜브가 영상마다 알려 준다)
+      - 허락을 받았거나 공식 배포 채널로 직접 정해 둔 채널(.env VIDEO_ALLOWED_CHANNELS)일 때
+    그 밖에는 영상을 쓰지 않고 문장 카드로 둔다. 라이선스를 알 수 없어도 쓰지 않는다.
+    반환: (허용 여부, 사유)
+    """
+    meta = _get_video_metadata(video_id) or {}
+    license_text = str(meta.get("license") or "")
+    if "creative commons" in license_text.casefold():
+        return True, f"라이선스: {license_text[:40]}"
+    channel = str(meta.get("channel") or "").strip()
+    if channel and channel.casefold() in _allowed_channels():
+        return True, f"허락된 채널: {channel}"
+    shown = license_text[:30] if license_text else "표준 라이선스 또는 확인 불가"
+    return False, f"재사용 허락 없음(라이선스: {shown}, 채널: {channel or '?'})"
 
 
 def _parse_description_timestamps(description: str) -> list[dict]:
@@ -388,7 +440,7 @@ def _get_video_transcript(video_id: str, max_chars: int = 4000) -> str:
       2) 파일 캐시 (_TRANSCRIPT_CACHE_DIR) — 서버 재시작 후에도 재사용
       3) yt-dlp 실제 다운로드 — 요청 간격 최소 1.5초 보장 (429 방지)
     """
-    global _last_transcript_fetch
+    global _last_transcript_fetch, _rate_limited_until
 
     # 1) 인메모리 캐시
     if video_id in _transcript_cache:
@@ -406,6 +458,12 @@ def _get_video_transcript(video_id: str, max_chars: int = 4000) -> str:
             pass
 
     # 3) yt-dlp 다운로드 — 요청 간격 보장
+    remaining = _cooldown_remaining()
+    if remaining > 0:
+        # 막힌 직후다. 요청하지 않고 "보류"로 처리한다(자막 없음으로 기억하지 않는다).
+        raise RuntimeError(
+            f"YouTube transcript paused for {video_id}: rate limit cooldown ({int(remaining)}s left)"
+        )
     elapsed = time.time() - _last_transcript_fetch
     if elapsed < _TRANSCRIPT_INTERVAL:
         time.sleep(_TRANSCRIPT_INTERVAL - elapsed)
@@ -435,8 +493,24 @@ def _get_video_transcript(video_id: str, max_chars: int = 4000) -> str:
                     )
                 },
             }
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                ydl.download([f'https://www.youtube.com/watch?v={video_id}'])
+            for attempt in range(len(_RATE_LIMIT_BACKOFF) + 1):
+                try:
+                    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                        ydl.download([f'https://www.youtube.com/watch?v={video_id}'])
+                    break
+                except Exception as exc:
+                    if not _is_rate_limited(str(exc)):
+                        raise
+                    if attempt >= len(_RATE_LIMIT_BACKOFF):
+                        _rate_limited_until = time.time() + _RATE_LIMIT_COOLDOWN
+                        print(
+                            f"  [YouTubeFetcher] 자막 요청이 계속 막혀 {_RATE_LIMIT_COOLDOWN // 60}분간 "
+                            f"자막 요청을 보류합니다(다른 영상 검증은 건너뜁니다)"
+                        )
+                        raise
+                    wait = _RATE_LIMIT_BACKOFF[attempt]
+                    print(f"  [YouTubeFetcher] 자막 요청 제한(429) — {wait}초 쉬고 다시 시도합니다 ({video_id})")
+                    _sleep(wait)
 
             # vtt 파일 찾기
             vtt_files = [f for f in os.listdir(tmp) if f.endswith('.vtt')]
@@ -474,9 +548,9 @@ def _get_video_transcript(video_id: str, max_chars: int = 4000) -> str:
         err_msg = str(e)
         print(f"  [YouTubeFetcher] 자막 추출 실패 ({video_id}): {err_msg[:80]}")
         # 429는 일시적 — 파일 캐시 저장 안 함 (다음 세션에 재시도 가능하게)
-        is_rate_limit = "429" in err_msg or "Too Many" in err_msg
-        _transcript_cache[video_id] = ""   # 인메모리에만 캐시 (재시도 방지)
+        is_rate_limit = _is_rate_limited(err_msg) or "rate limit cooldown" in err_msg
         if not is_rate_limit:
+            _transcript_cache[video_id] = ""   # 진짜 실패만 기억한다(429는 일시적이라 나중에 다시 시도)
             cache_file.write_text("", encoding='utf-8')
         # 최대 재시도 초과나 429의 경우 즉시 Fail-closed
         raise RuntimeError(f"YouTube transcript unavailable for {video_id}: {err_msg}")
@@ -648,6 +722,24 @@ def find_best_start_time(
     return 0
 
 
+def _is_playable_video(path: Path) -> bool:
+    """True if the file opens and yields a frame.
+
+    An interrupted download (connection reset) leaves a truncated mp4 with no
+    index ("moov atom not found"). It still exists on disk, so a cache check
+    based on existence alone kept reusing it, and every later run failed the same
+    way while the card quietly fell back to a still thumbnail.
+    """
+    try:
+        from moviepy import VideoFileClip
+
+        with VideoFileClip(str(path)) as clip:
+            clip.get_frame(min(0.5, max(clip.duration - 0.1, 0.0)))
+        return True
+    except Exception:
+        return False
+
+
 def download_video_snippet(
     video_id: str,
     duration: int = 15,
@@ -658,8 +750,12 @@ def download_video_snippet(
     cache_key = f"{video_id}_t{start_time}_{duration}"
     out_path = _CACHE_DIR / f"{cache_key}_snippet.mp4"
     if out_path.exists():
-        print(f"  [YouTubeFetcher] 캐시 사용: {cache_key}")
-        return out_path
+        if _is_playable_video(out_path):
+            print(f"  [YouTubeFetcher] 캐시 사용: {cache_key}")
+            return out_path
+        # 깨진 캐시는 버리고 새로 받는다 (끊긴 다운로드가 남긴 파일일 수 있다).
+        print(f"  [YouTubeFetcher] 캐시된 클립이 손상되어 다시 받습니다: {cache_key}")
+        out_path.unlink(missing_ok=True)
 
     try:
         import yt_dlp
@@ -687,9 +783,18 @@ def download_video_snippet(
             ydl.download([f'https://www.youtube.com/watch?v={video_id}'])
 
         if out_path.exists():
-            return out_path
+            if _is_playable_video(out_path):
+                return out_path
+            # 끊긴 다운로드는 파일이 남아도 재생되지 않는다. 캐시에 남기지 않는다.
+            print(f"  [YouTubeFetcher] 다운로드한 클립이 재생되지 않아 버립니다: {cache_key}")
+            out_path.unlink(missing_ok=True)
     except Exception as e:
         print(f"  [YouTubeFetcher] 영상 다운로드 실패: {e}")
+        # 중간에 끊겼다면 반쯤 받은 파일이 남아 있을 수 있다.
+        try:
+            out_path.unlink(missing_ok=True)
+        except OSError:
+            pass
     return None
 
 
@@ -960,6 +1065,32 @@ def match_videos_to_slides(slides: list, candidates: list[VideoInfo]) -> list[Vi
                 for i in range(len(content_slides))]
 
 
+def _clip_start_for(vi, start: int, slide_title: str, slide_body: str) -> int:
+    """검증 단계에서 시작 시점이 0이면 합성 단계와 똑같이 다시 찾는다(0초는 보통 인트로)."""
+
+    if start > 0:
+        return start
+    try:
+        start = int(find_best_start_time(vi.video_id, slide_title, slide_body, vi.title) or 0)
+    except Exception:
+        start = 0
+    if start == 0 and getattr(vi, "duration", 0) and vi.duration > 60:
+        start = 30   # 합성 단계의 "인트로 스킵"과 같은 값
+    return start
+
+
+def _has_motion_at(video_id: str, start: int) -> bool:
+    """그 구간 15초가 실제로 움직이는지. 확인이 실패하면(다운로드 등) 통과로 본다."""
+
+    try:
+        clip = download_video_snippet(video_id, duration=15, start_time=start)
+    except Exception:
+        return True
+    if not clip:
+        return True
+    return has_visible_motion(clip)
+
+
 def find_verified_video_for_slide(
     slide_title: str,
     slide_body: str,
@@ -980,9 +1111,17 @@ def find_verified_video_for_slide(
     3. 없으면 (None, 0)
     """
     try:
+        import os as _os
+
         from langchain_openai import ChatOpenAI
         from src.config import OPENAI_API_KEY
         llm = ChatOpenAI(model="gpt-4o-mini", temperature=0, api_key=OPENAI_API_KEY)
+        # 자막이 슬라이드 내용과 정말 맞는지 판정하는 호출은 더 정확한 모델로 한다. 저렴한 모델은
+        # "맥킨지 + 시뮬레이션"이라는 단어만 겹쳐도 맥킨지 입사 시험 게임 영상을 AI 면접 카드에 붙였다.
+        # 판정은 후보 몇 개에만 부르므로 비용 증가는 호출당 1센트 안팎이다.
+        judge_llm = ChatOpenAI(
+            model=_os.getenv("VIDEO_JUDGE_MODEL", "gpt-4o"), temperature=0, api_key=OPENAI_API_KEY
+        )
     except Exception as e:
         print(f"  [YouTubeFetcher] LLM 초기화 실패: {e}")
         return None, 0
@@ -1019,6 +1158,10 @@ def find_verified_video_for_slide(
         "ground", "based", "level", "type", "data", "model",
         "korean", "english", "chinese", "japanese", "global",
         "agent", "agents", "system", "platform", "solution",
+        # 기사 제목 첫 단어로 흔한 일반어. "Inside Amazon's ..."에서 'Inside'가 엔티티로
+        # 잡혀, 아마존과 무관한 "Inside the robot ..." 영상이 엔티티 게이트를 통과했다.
+        "inside", "behind", "meet", "exclusive", "breaking", "watch", "report",
+        "reports", "report:", "explained", "revealed", "reveals", "inside:",
         "demo", "tutorial", "guide", "review", "update",
         "part", "step", "time", "year", "month", "week",
     }
@@ -1056,6 +1199,13 @@ def find_verified_video_for_slide(
         if vi.video_id in _used:
             return False, 0   # 이미 다른 슬라이드에 배정된 영상 제외
 
+        # 쓰는 쪽이 재사용을 허락했음이 분명한 영상만 쓴다. 자막 요청보다 먼저 확인해서, 허락 없는
+        # 영상에는 자막 요청도 보내지 않는다(429 부담도 줄어든다).
+        permitted, why = video_use_permitted(vi.video_id)
+        if not permitted:
+            print(f"  [YouTubeFetcher] ✗ {why}: '{vi.title[:40]}'")
+            return False, 0
+
         try:
             transcript = _get_video_transcript(vi.video_id)
         except Exception as exc:
@@ -1070,21 +1220,13 @@ def find_verified_video_for_slide(
             return False, 0
 
         if not transcript:
-            # 자막 없음 → 엔티티 게이트 먼저
-            if not _entity_gate(vi.title, vi.snippet, "자막없음"):
-                return False, 0
-            # 한국어 주제(엔티티 게이트 비활성) + 자막 없음 = 내용 검증 불가 → 거절
-            # (키워드 2개 매칭만으론 "ChatGPT Plus vs Free" 같은 엉뚱한 영상이 통과됨)
-            if not _entity_gate_active:
-                print(f"  [YouTubeFetcher] ✗ 자막없음+한국어주제(검증불가): '{vi.title[:40]}'")
-                return False, 0
-            # 영어 주제 + 자막 없음: 키워드 매칭 (임계값 3으로 강화)
-            combined = f"{vi.title} {vi.snippet}".lower()
-            core_kws = [k for k in slide_keywords if any(c.isdigit() for c in k) or k.isascii()][:8]
-            hits = sum(1 for k in core_kws if k.lower() in combined)
-            matched = hits >= 3
-            print(f"  [YouTubeFetcher] {'✓' if matched else '✗'} 자막없음·키워드매칭({hits}/{len(core_kws)}): '{vi.title[:40]}'")
-            return matched, 0
+            # 자막 없음 = 영상이 슬라이드를 실제로 다루는지 확인할 방법이 없다.
+            # 제목·스니펫 키워드 매칭으로 통과시키던 예전 방식은 "Unicorn Kingdom
+            # Gameplay" 같은 게임 영상이 칩 기사 카드에 붙는 사고를 냈다(짧은 영어
+            # 토큰이 부분 문자열로 맞아떨어짐). 검증 못 한 영상은 쓰지 않고, 그
+            # 슬라이드는 문장 카드로 둔다.
+            print(f"  [YouTubeFetcher] ✗ 자막없음(내용 검증 불가): '{vi.title[:40]}'")
+            return False, 0
 
         # 자막이 있어도 엔티티 게이트: 기사 핵심 기업/제품명이 자막에 없으면 즉시 탈락
         # (hyperbrowser가 "cloud"를 언급해도 "Cloudflare"가 없으면 탈락)
@@ -1116,13 +1258,18 @@ def find_verified_video_for_slide(
             f"   - 슬라이드='Cloudflare Workers AI 실시간 배포' → 'AI 학습 데이터 필요성'는 match=false\n"
             f"   - 슬라이드='OpenAI 모델 가격' → 'AGI 철학적 토론'은 match=false\n"
             f"5. 인트로/광고/자기소개 구간 제외\n"
-            f"6. 슬라이드가 한국어라도 영어 자막에서 동일 의미를 찾으세요\n\n"
+            f"6. 슬라이드가 한국어라도 영어 자막에서 동일 의미를 찾으세요\n"
+            f"7. 투자 권유·종목/코인 홍보·\"지금 사라\" 식의 선동, 상품 판매·광고가 주된 영상은 "
+            f"주제가 겹쳐도 match=false (뉴스 카드에 붙이기에 신뢰를 해친다)\n"
+            f"8. 슬라이드가 말하는 구체적인 대상(예: 'AI 모의 클라이언트와의 면접 시뮬레이션')이 영상의 "
+            f"주제여야 한다. 같은 회사·분야의 다른 주제(예: 입사 시험 게임 풀이, 일반 회사 소개)는 "
+            f"단어가 겹쳐도 match=false\n\n"
             f"JSON만 출력 (다른 텍스트 금지):\n"
             f"{{\"match\": true/false, \"start_seconds\": 관련내용 첫 등장 초(정수, 없으면 0), "
             f"\"reason\": \"한 줄 근거\"}}"
         )
         try:
-            result = llm.invoke(prompt)
+            result = judge_llm.invoke(prompt)
             raw = re.sub(r"```[a-z]*\n?", "", result.content.strip()).strip("`").strip()
             # JSON 블록만 추출
             m = re.search(r'\{.*\}', raw, re.DOTALL)
@@ -1134,6 +1281,15 @@ def find_verified_video_for_slide(
             reason   = str(data.get("reason", ""))[:60]
             mark = "✓ 매칭" if matched else "✗ 불일치"
             print(f"  [YouTubeFetcher] {mark}: '{vi.title[:35]}' → {reason} (→{start}초)")
+            if matched:
+                # 자막이 슬라이드와 맞아도 화면이 멈춘 영상(슬라이드쇼·타이틀 카드)이면
+                # 카드에 붙일 수 없다. 이 판단을 합성 단계(4.1)까지 미루면 이 영상 하나 때문에
+                # 슬라이드가 영상 없이 끝나므로, 여기서 움직임까지 확인해 정지 화면이면
+                # 다음 후보로 넘어가게 한다. 합성 단계가 쓸 시작 시점과 같은 값을 쓴다.
+                start = _clip_start_for(vi, start, slide_title, slide_body)
+                if not _has_motion_at(vi.video_id, start):
+                    print(f"  [YouTubeFetcher] ✗ 정지 화면 영상이라 제외: '{vi.title[:35]}' ({start}초 부근)")
+                    return False, 0
             return matched, start
         except Exception as e:
             print(f"  [YouTubeFetcher] 자막 판단 실패({e}): '{vi.title[:30]}'")

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import os
 import sys
+from datetime import date
 from pathlib import Path
 from typing import Any
 
@@ -72,6 +73,10 @@ def update_env_token(new_token: str) -> None:
             output.append(line)
     if not replaced:
         output.append(f"IG_ACCESS_TOKEN={new_token}")
+    stamp = f"IG_TOKEN_REFRESHED={date.today().isoformat()}"
+    output = [stamp if l.startswith("IG_TOKEN_REFRESHED=") else l for l in output]
+    if stamp not in output:
+        output.append(stamp)
     ENV_PATH.write_text("\n".join(output).rstrip("\n") + "\n", encoding="utf-8")
 
 

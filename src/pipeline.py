@@ -113,6 +113,20 @@ def run_pipeline(
         if res is not None:
             return replace(res, retry_count=retry)
 
+        if notes_state.get("give_up_source"):
+            notes_state["give_up_source"] = False
+            if trend_context or source_lineage is not None:
+                print("  ⚠️ 편집 점수 미달이 반복되어 이 기사는 카드로 만들기 어렵다고 판단하고 중단합니다.")
+                break
+            failed_title = notes_state.get("last_article_title", "")
+            if failed_title:
+                ignored_titles.add(failed_title)
+                print(f"  → 편집 점수 미달로 '{failed_title[:40]}' 포기, 다음 기사 시도")
+            notes_state["last"] = ""
+            notes_state["last_article_title"] = ""
+            fact_check_retries = 0
+            continue
+
         # 기사 교체 없이 재시도 = 팩트체크 실패 (같은 기사 재시도)
         if ignored_titles == prev_ignored:
             fact_check_retries += 1
@@ -170,6 +184,10 @@ def _run_once(
     from src.agents.approval import wait_for_approval
     from src.agents.design_templates import get_template, get_template_for_topic
 
+    # 중지 요청이 있으면 새 시도(재생성 포함)를 시작하지 않는다.
+    from src.cancellation import raise_if_requested
+    raise_if_requested()
+
     start = datetime.now()
     _sep = "=" * 55
     retry_label = f" (재생성 {retry_num}회차)" if retry_num > 0 else ""
@@ -208,24 +226,26 @@ def _run_once(
             print(f"  ⚠️ 주제 정제 스킵 ({e})")
 
     # ── Phase 0: 앵글 선택 ───────────────────────────────
-    # select_angle=True 또는 시사성 높은 주제 키워드 감지 시 자동 활성화
-    selected_angle = None
-    auto_angle = any(kw in topic for kw in _ANGLE_AUTO_KEYWORDS)
-    should_select_angle = select_angle or auto_angle
+    # 모든 게시물에 앵글이 필수다. 예전에는 select_angle=True이거나 주제에
+    # 시사성 키워드가 있을 때만 골라서, 키워드가 없는 주제는 앵글이 빈 채로
+    # 게시돼 앵글별 성과 분석에서 빠졌다. select_angle 인자는 호환용으로만 남긴다.
+    from src.agents.angle_selector import ensure_valid_angle, fallback_angle
 
-    if should_select_angle:
-        reason = "자동 (시사성 높은 주제)" if auto_angle and not select_angle else "수동"
-        print(f"\n[0] 마케팅 앵글 선택 중... ({reason})")
+    reason = "자동 (시사성 높은 주제)" if any(kw in topic for kw in _ANGLE_AUTO_KEYWORDS) else "필수"
+    if select_angle:
+        reason = "수동"
+    print(f"\n[0] 마케팅 앵글 선택 중... ({reason})")
 
-        # 이 계정의 실제 게시물 성과(analytics.sync_all_insights로 쌓인 데이터)를
-        # 반영 — 데이터가 아직 없거나 조회 자체가 실패해도 앵글 선택을 막지 않는다.
-        performance_hints = ""
-        try:
-            from src.agents.analytics import get_performance_hints
-            performance_hints = get_performance_hints()
-        except Exception as e:
-            print(f"  [AngleSelector] 성과 데이터 조회 실패({type(e).__name__}) — 일반 기준으로 진행")
+    # 이 계정의 실제 게시물 성과(analytics.sync_all_insights로 쌓인 데이터)를
+    # 반영 — 데이터가 아직 없거나 조회 자체가 실패해도 앵글 선택을 막지 않는다.
+    performance_hints = ""
+    try:
+        from src.agents.analytics import get_performance_hints
+        performance_hints = get_performance_hints()
+    except Exception as e:
+        print(f"  [AngleSelector] 성과 데이터 조회 실패({type(e).__name__}) — 일반 기준으로 진행")
 
+    try:
         selected_angle = pick_angle(
             topic=topic,
             trend_summary=trend_context or topic,
@@ -233,6 +253,11 @@ def _run_once(
             auto=auto,
             performance_hints=performance_hints,
         )
+    except Exception as e:
+        # 앵글 때문에 생성 전체가 실패하면 안 되고, 앵글이 빈 채로 가서도 안 된다.
+        print(f"  [AngleSelector] 앵글 생성 실패({type(e).__name__}) — 기본 앵글로 진행")
+        selected_angle = fallback_angle(topic, type(e).__name__)
+    selected_angle = ensure_valid_angle(selected_angle, topic)
 
     # ── Phase 1: Trend Analyzer ──────────────────────────
     from src.schemas.card_news import TrendReport, TrendResult
@@ -366,6 +391,11 @@ def _run_once(
         print(f"  → {len(script.slides)}장 생성 완료")
     except QualityGateError as e:
         print(f"  ⚠️ Quality Gate 실패 (생성 중): {e.error_code} - {e}")
+        from src.agents.content_creator import is_editorial_score_failure
+
+        if notes_state is not None and is_editorial_score_failure(e):
+            # 이미 한 번 다시 써도 점수가 안 오른 기사다. 같은 기사로 바깥 재시도를 반복하지 않는다.
+            notes_state["give_up_source"] = True
         # run_pipeline()의 바깥 재시도 루프는 이 함수가 None을 돌려줘야만
         # "기사 교체 없이 재시도 = 팩트체크 실패" 분기(같은 기사에 피드백을
         # 실어 재시도하고, MAX_FACT_RETRIES를 넘기면 이 기사를 블랙리스트에
@@ -527,9 +557,14 @@ def _run_once(
     _CONCRETE_VISUAL_TYPES = {"hero_stat", "comparison", "process"}
     pexels_preview_map: dict[int, "Image.Image"] = {}
     pexels_video_paths: dict[int, Path] = {}
+    # 스톡 영상은 주제와 어울리는지 검증할 방법이 없어서(카드에 무관한 회로 영상이
+    # 붙은 사례) 기본으로 끈다. 결정은 "자막이 검증된 영상이거나, 아니면 문장 카드".
+    # 다시 쓰려면 환경변수 STOCK_VIDEO_FALLBACK=on.
+    _stock_enabled = os.getenv("STOCK_VIDEO_FALLBACK", "").strip().lower() in {"on", "1", "true", "yes"}
     no_video_slides = [
         s for i, s in enumerate(content_slides_list)
-        if (i >= len(video_infos) or video_infos[i] is None)
+        if _stock_enabled
+        and (i >= len(video_infos) or video_infos[i] is None)
         and s.visual_type in _CONCRETE_VISUAL_TYPES
     ]
     if no_video_slides:
@@ -560,6 +595,7 @@ def _run_once(
     print(f"  → {bg.size[0]}×{bg.size[1]}px 준비 완료")
 
     # ── Phase 4: Design Renderer ─────────────────────────
+    raise_if_requested()   # 렌더링·영상 합성은 오래 걸리니 시작 전에 한 번 더 확인한다
     print(f"\n[4] 카드 렌더링 중... (템플릿: {tmpl_name})")
 
     # 템플릿 색상을 persona에 임시 적용
@@ -571,10 +607,22 @@ def _run_once(
     p_tmpl.accent_color = "#{:02X}{:02X}{:02X}".format(r2, g2, b2)
     p_tmpl.overlay_darkness = tmpl["overlay_alpha"]
 
+    # 출처(매체·기사 제목·발행일)를 마지막 카드와 캡션에 싣는다. 출처 계보가 없는
+    # 경로(수동 실행 등)에서는 알 수 없으므로 표기하지 않는다.
+    source_note = None
+    if source_lineage is not None:
+        try:
+            from src.source_note import from_lineage
+
+            source_note = from_lineage(source_lineage)
+        except Exception as e:
+            print(f"  ⚠️ 출처 표기 생성 실패({type(e).__name__}) — 출처 없이 렌더링합니다")
+
     paths = design_renderer.render_card_set(
         script=script, background=bg, handle=h, persona=p_tmpl,
         video_infos=video_infos,
         pexels_video_map=pexels_preview_map or None,
+        source=source_note,
     )
 
     # ── Phase 2.6 후처리: script.json에 영상 매핑 결과 저장 ──
@@ -593,6 +641,14 @@ def _run_once(
                         v = video_infos[vi_idx]
                         script_data["slides"][ci]["video_id"] = v.video_id
                         script_data["slides"][ci]["video_title"] = v.title
+                        # 카드 맨 아래 영상 출처 표기에 쓴다 (슬라이드 수정 때 다시 그릴 수 있게).
+                        script_data["slides"][ci]["video_creator"] = getattr(v, "creator", "") or ""
+                        # find_verified_video_for_slide만이 영상을 돌려주고 자막 없는
+                        # 영상은 거절하므로, 여기까지 온 영상은 자막 검증을 통과했다.
+                        # 자동 점검(preview_audit)은 이 기록이 있을 때만 "검증됨"이라 말한다.
+                        script_data["slides"][ci]["video_verified"] = True
+                        # 검증 단계에서 화면이 실제로 움직이는지도 확인한다(정지 화면 영상은 후보에서 제외).
+                        script_data["slides"][ci]["video_motion_checked"] = True
                 script_json_path.write_text(
                     _json.dumps(script_data, ensure_ascii=False, indent=2),
                     encoding="utf-8",
@@ -670,6 +726,20 @@ def _run_once(
                 if snippet_path:
                     out_mp4 = target_path.with_suffix(".mp4")
                     res = create_video_slide(target_path, snippet_path, out_mp4)
+                    if not res:
+                        # 합성이 실패했다면 클립이 깨졌을 수 있다. 캐시를 버리고
+                        # 새로 받아 딱 한 번 더 시도한다 (네트워크가 끊긴 순간의
+                        # 반쪽짜리 파일이 캐시에 남아 매번 같은 실패를 내던 문제).
+                        print(f"  [4.1] 슬라이드 {slide_script.slide_number}: 합성 실패 → 클립을 새로 받아 재시도")
+                        try:
+                            snippet_path.unlink(missing_ok=True)
+                        except OSError:
+                            pass
+                        retry_path = download_video_snippet(
+                            v_info.video_id, duration=15, start_time=best_t
+                        )
+                        if retry_path:
+                            res = create_video_slide(target_path, retry_path, out_mp4)
                     if res:
                         return target_idx, res, best_t, slide_script.slide_number
             except Exception as e:
@@ -680,14 +750,52 @@ def _run_once(
             print(f"\n[4.1] 비디오 슬라이드 병렬 합성 중 ({len(tasks)}개)...")
             max_workers = min(4, len(tasks))
             start_time_map: dict[int, int] = {}   # {slide_number: start_seconds}
+            without_video: list[tuple] = []   # (slide_script, target_path)
             with ThreadPoolExecutor(max_workers=max_workers) as executor:
                 futures = {executor.submit(_process_video_slide, t): t for t in tasks}
                 for future in as_completed(futures):
                     target_idx, result_path, best_t, slide_num = future.result()
                     if result_path:
                         paths[target_idx] = result_path
+                    else:
+                        task = futures[future]
+                        without_video.append((task[0], task[2]))
                     if best_t > 0 and slide_num > 0:
                         start_time_map[slide_num] = best_t
+
+            # 영상을 끝내 만들지 못한 슬라이드(정지 화면, 다운로드 실패 등)는 재생 버튼이
+            # 붙은 썸네일 이미지로 두지 않는다 — 재생되지 않는데 영상처럼 보이고, 같은
+            # 세트의 다른 카드와 일관되지 않는다. 영상 없는 카드는 문장 카드로 통일한다.
+            if without_video:
+                from src.agents import design_renderer as _dr
+
+                for slide_script, target_path in without_video:
+                    try:
+                        _dr.render_text_card(
+                            target_path, slide_script, len(script.slides), h, bg,
+                            source=source_note,
+                        )
+                        print(
+                            f"  [4.1] 슬라이드 {slide_script.slide_number}: 영상 없음 → 문장 카드로 대체"
+                        )
+                    except Exception as e:
+                        print(f"  ⚠️ 슬라이드 {slide_script.slide_number} 문장 카드 대체 실패: {e}")
+                # 대시보드가 이 슬라이드를 다시 그릴 때 썸네일 레이아웃으로 되돌아가지 않도록
+                # script.json의 영상 매핑도 지운다.
+                try:
+                    sc_json = paths[0].parent / "script.json"
+                    if sc_json.exists():
+                        sc_data = _json.loads(sc_json.read_text(encoding="utf-8"))
+                        dropped = {s.slide_number for s, _ in without_video}
+                        for sl in sc_data.get("slides", []):
+                            if sl.get("slide_number") in dropped:
+                                for key in ("video_id", "video_title", "video_creator", "start_seconds"):
+                                    sl.pop(key, None)
+                        sc_json.write_text(
+                            _json.dumps(sc_data, ensure_ascii=False, indent=2), encoding="utf-8"
+                        )
+                except Exception as e:
+                    print(f"  ⚠️ script.json 영상 매핑 정리 실패: {e}")
 
             # start_seconds를 script.json에 저장 (대시보드 preview에서 활용)
             if start_time_map:
@@ -744,6 +852,21 @@ def _run_once(
                     target_idx, result_path = future.result()
                     if result_path:
                         paths[target_idx] = result_path
+
+    # ── Phase 4.4: 미리보기 자동 점검 ─────────────────────
+    # 승인 화면에 올리기 전에 캡션·영상·출처를 점검하고, 안전하게 고칠 수 있는
+    # 것(잘린 캡션 첫 줄)은 고치며, 자동 판단이 불가능한 것(스톡 영상·배경)은
+    # 사람이 볼 곳으로 표시한다. LLM 호출이 없어 비용이 들지 않는다.
+    try:
+        from src.qa.preview_audit import audit_output
+
+        _audit = audit_output(paths[0].parent, script_hook=script.hook)
+        for _msg in _audit["fixed"]:
+            print(f"  [4.4] 자동 수정: {_msg}")
+        for _msg in _audit["attention"]:
+            print(f"  [4.4] 확인 필요: {_msg}")
+    except Exception as e:
+        print(f"  ⚠️ 미리보기 자동 점검 실패({type(e).__name__}) — 건너뜁니다")
 
     # ── Phase 4.5: Reels MP4 생성 ────────────────────────
     if make_reels:
@@ -842,11 +965,18 @@ def _run_once(
         else:
             attempt_state = PublishAttemptState.STARTED
         try:
+            # 검토한 캡션(caption.txt, 출처 포함)을 그대로 올린다. 없으면 기존 조합.
+            publish_kwargs = {}
+            if paths:
+                reviewed_caption = ig_publisher.read_card_caption(paths[0].parent)
+                if isinstance(reviewed_caption, str) and reviewed_caption:
+                    publish_kwargs["caption"] = reviewed_caption
             ig_post_id = ig_publisher.publish(
                 image_paths=paths,
                 hook=script.hook,
                 hashtags=script.hashtags,
                 base_url=ig_base_url,
+                **publish_kwargs,
             )
             if not ig_post_id:
                 attempt_state = PublishAttemptState.UNKNOWN

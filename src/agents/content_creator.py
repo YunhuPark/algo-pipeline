@@ -7,6 +7,7 @@ Step 3: 통과된 사실만으로 카드뉴스 생성
 """
 from __future__ import annotations
 
+import os
 from typing import Optional
 
 from src.schemas.card_news import (
@@ -52,6 +53,7 @@ _FACTUAL_CLAIM_QUALITY_ERRORS = {
     "CTA_ORDER_INVALID",
     "CTA_POLICY_VIOLATION",
     "CLAIM_CONTRADICTED",
+    "CLAIM_HEDGE_DROPPED",
     "CLAIM_INSUFFICIENT_EVIDENCE",
 }
 
@@ -132,6 +134,12 @@ def _failure_class(error_code: str) -> str:
 def _is_listicle_topic(topic: str) -> bool:
     import re
     return bool(re.search(r'\d+가지|\d+대|TOP\s*\d+|탑\s*\d+|\d+선|이유\s*\d+', topic, re.IGNORECASE))
+
+
+def is_editorial_score_failure(exc: QualityGateError) -> bool:
+    """편집 심사가 "점수 미달"로 막았는가(형식 규칙 위반과 구분)."""
+
+    return exc.error_code == "EDITORIAL_QUALITY_FAILED" and str(exc).lstrip().startswith("다음 항목이 기준")
 
 
 class ContentCreator:
@@ -248,15 +256,29 @@ class ContentCreator:
 
                 failure_class = _failure_class(exc.error_code)
                 error_repairs = repair_counts.get(exc.error_code, 0)
+                # 점수(후킹력 등)가 기준에 못 미쳐서 막힌 경우는 한 번만 다시 써 본다. 중립적인 기술
+                # 뉴스는 다시 써도 점수가 안 오르고(심사가 "더 자극적으로"를 요구하는데 우리 사실 검사는
+                # 과장을 금지해 서로 부딪힌다), 재시도마다 $0.06 안팎이 든다. 형식 규칙 위반("말줄임표로
+                # 끝남" 등)은 고치기 쉬우니 기존 횟수를 그대로 쓴다.
+                is_score_failure = is_editorial_score_failure(exc)
+                repair_limit = (
+                    int(os.getenv("EDITORIAL_SCORE_RETRIES", "1")) if is_score_failure
+                    else MAX_CLAIM_QUALITY_REPAIRS_PER_ERROR
+                )
                 if (
                     attempt >= MAX_CLAIM_QUALITY_ATTEMPTS
                     or exc.error_code not in _RETRYABLE_CLAIM_QUALITY_ERRORS
-                    or error_repairs >= MAX_CLAIM_QUALITY_REPAIRS_PER_ERROR
+                    or error_repairs >= repair_limit
                 ):
                     raise
                 error_repairs += 1
                 repair_counts[exc.error_code] = error_repairs
 
+                from src.usage_tracker import record_retry
+
+                record_retry(
+                    "content_creator.quality_gate", exc.error_code, str(exc), attempt
+                )
                 claim_label = f" (claim_id={exc.claim_id})" if exc.claim_id else ""
                 print(
                     "[QualityGate] Claim 또는 편집 품질 검증에 실패하여 "

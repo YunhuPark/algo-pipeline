@@ -775,6 +775,12 @@ document.addEventListener('keydown',e=>{{if(!document.getElementById('lightbox')
 
 @app.route("/")
 def index():
+    try:
+        from src.growth_tracker import ensure_today_async
+
+        ensure_today_async()   # today's follower/post numbers, once a day, in the background (read-only)
+    except Exception:
+        pass
     posts = get_posts(limit=100)
     today = datetime.now().strftime("%Y-%m-%d")
     week_ago = (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d")
@@ -796,8 +802,10 @@ def index():
     # 최근 게시물 5개
     recent = list(posts)[:5]
 
+    from src.token_status import banner_html as _ig_banner, threads_banner_html as _th_banner
+
     # stat cards
-    stats = f"""
+    stats = f"""{_ig_banner()}{_th_banner()}
     <div class="stat-grid">
       <div class="stat-card">
         <div class="val">{today_cnt}</div>
@@ -994,7 +1002,7 @@ def queue_page():
 
     trs = "".join(
         f"<tr><td style='color:var(--muted);font-size:12px'>#{r['id']}</td>"
-        f"<td style='font-weight:500'>{escape(r['topic'])}{_error_cell(r)}</td>"
+        f"<td style='font-weight:500'>{escape(r['topic'])}{_candidate_source_label(r)}{_error_cell(r)}</td>"
         f"<td>{_badge(r['status'])}</td>"
         f"<td style='color:var(--muted);font-size:12px'>{r['scheduled_at'] or '다음 차례'}</td>"
         f"<td>{_prepare_btn(r)}<form method='post' action='/queue/skip/{r['id']}' style='margin:0;display:inline'>"
@@ -1067,7 +1075,11 @@ def queue_page():
       <div class="panel">
         <div class="panel-header">
           <div class="panel-title" id="qProgressTitle">준비 중...</div>
-          <span id="qProgressBadge" class="badge badge-pending">실행 중</span>
+          <div style="display:flex;gap:10px;align-items:center">
+            <button id="qStopBtn" type="button" class="btn btn-danger"
+                    style="padding:4px 12px;font-size:12px">⏹ 중지</button>
+            <span id="qProgressBadge" class="badge badge-pending">실행 중</span>
+          </div>
         </div>
         <div class="progress-bar"><div class="progress-fill" style="width:100%"></div></div>
         <div id="qLogBox" class="logbox"></div>
@@ -1079,6 +1091,9 @@ def queue_page():
         <div class="panel-header">
           <div class="panel-title" id="qPreviewTitle">미리보기</div>
           <div style="display:flex;gap:8px">
+            <label style="display:inline-flex;align-items:center;gap:6px;margin-right:10px;font-size:13px">
+              <input type="checkbox" id="qThreadsChk"> Threads에도 게시
+            </label>
             <button id="qApproveBtn" class="btn btn-primary">✅ 승인해서 발행</button>
             <button id="qRejectBtn" class="btn btn-danger">❌ 거절</button>
           </div>
@@ -1120,6 +1135,34 @@ fetch('/queue/current_job')
   }})
   .catch(() => {{}});
 
+// ── 중지 버튼 ────────────────────────────────────────────
+// 위의 진행 표시 로직은 건드리지 않는다. 버튼은 "실행 중" 배지와 제목만 보고
+// 보였다 숨는다 (게시 중에는 중지할 수 없어서 숨긴다).
+const qStopBtn = document.getElementById('qStopBtn');
+function qSyncStopBtn() {{
+  const running = document.getElementById('qProgressBadge').textContent.trim() === '실행 중';
+  const publishing = document.getElementById('qProgressTitle').textContent.includes('발행');
+  qStopBtn.style.display = (running && !publishing) ? '' : 'none';
+  if (running) {{ qStopBtn.disabled = false; qStopBtn.textContent = '⏹ 중지'; }}
+}}
+['qProgressBadge', 'qProgressTitle'].forEach(id => {{
+  new MutationObserver(qSyncStopBtn).observe(document.getElementById(id), {{
+    childList: true, characterData: true, subtree: true,
+  }});
+}});
+qSyncStopBtn();
+qStopBtn.addEventListener('click', () => {{
+  if (!confirm('생성을 중지할까요?\\n이미 호출된 AI 비용은 돌려받을 수 없고, 지금부터의 새 호출만 멈춥니다.')) return;
+  qStopBtn.disabled = true;
+  qStopBtn.textContent = '중지 요청 중...';
+  fetch('/queue/cancel', {{method: 'POST'}})
+    .then(r => r.json())
+    .then(d => {{
+      if (d.error) {{ qLogErr(d.error); qSyncStopBtn(); }}
+    }})
+    .catch(() => {{ qStopBtn.disabled = false; qStopBtn.textContent = '⏹ 중지'; }});
+}});
+
 function qStartPrepare(queueId) {{
   document.getElementById('qProgressPanel').style.display = 'block';
   document.getElementById('qPreviewPanel').style.display = 'none';
@@ -1158,7 +1201,7 @@ document.getElementById('qApproveBtn').addEventListener('click', () => {{
     qLogErr('발행할 항목을 확인하지 못했습니다. 미리보기를 다시 생성해 주세요.');
     return;
   }}
-  if (!confirm('실제 Instagram 계정(@algo__kr)에 지금 바로 게시됩니다. 진행할까요?')) return;
+  if (!confirm(document.getElementById('qThreadsChk').checked ? '실제 Instagram과 Threads 계정(@algo__kr)에 지금 바로 게시됩니다. 진행할까요?' : '실제 Instagram 계정(@algo__kr)에 지금 바로 게시됩니다. 진행할까요?')) return;
   document.getElementById('qApproveBtn').disabled = true;
   document.getElementById('qRejectBtn').disabled = true;
   document.getElementById('qProgressPanel').style.display = 'block';
@@ -1170,7 +1213,7 @@ document.getElementById('qApproveBtn').addEventListener('click', () => {{
   fetch('/queue/approve_publish', {{
     method: 'POST',
     headers: {{'Content-Type': 'application/json'}},
-    body: JSON.stringify({{queue_id: qQueueId}}),
+    body: JSON.stringify({{queue_id: qQueueId, threads: document.getElementById('qThreadsChk').checked}}),
   }})
     .then(r => r.json())
     .then(data => {{
@@ -1298,6 +1341,9 @@ def queue_skip(qid: int):
     # 발행은 이 시점엔 막을 방법이 없다. 조용히 "건너뜀"이라고 속이지 않고
     # 정확한 상태를 알려준다.
     if try_mark_queue_skipped(qid):
+        # 렌더링된 카드를 사람이 거절한 경우엔 검토 결정으로 남긴다 (회고 집계용).
+        # 렌더링 전 항목이나 이미 발행 중이라 건너뛸 수 없던 경우는 기록하지 않는다.
+        _record_queue_review(qid, "REJECTED")
         return redirect(url_for("queue_page", msg=f"#{qid} 건너뜀"))
     return redirect(url_for(
         "queue_page",
@@ -1328,9 +1374,23 @@ def queue_retry(qid: int):
 def queue_generate():
     count = int(request.form.get("count", 3))
     try:
+        from src.agents import content_queue
         from src.agents.content_queue import bulk_generate
-        bulk_generate(count=count, auto_news=True)
-        return redirect(url_for("queue_page", msg=f"{count}개 자동 추가 완료"))
+        ids = bulk_generate(count=count, auto_news=True)
+        # 실제로 들어온 개수와 제외 사유를 그대로 보여준다("3개 완료"라고만 하면 2개만 들어와도 모른다).
+        skipped = content_queue.LAST_COLLECTION_REPORT.get("skipped", [])
+        message = f"{len(ids)}개 추가 (요청 {count}개)"
+        pool = content_queue.LAST_COLLECTION_REPORT.get("pool") or {}
+        if pool:
+            message += (
+                f" · 오늘 후보: AI {pool.get('ai', 0)}건, AI 인접 {pool.get('adjacent', 0)}건, "
+                f"그 외 제외 {pool.get('other', 0)}건"
+            )
+            if pool.get("security_non_ai"):
+                message += f"(그중 AI가 없는 보안 기사 {pool['security_non_ai']}건)"
+        if len(ids) < count and skipped:
+            message += " — 제외: " + "; ".join(skipped[:3])
+        return redirect(url_for("queue_page", msg=message))
     except Exception as e:
         return redirect(url_for("queue_page", err=str(e)))
 
@@ -1341,6 +1401,9 @@ def queue_generate():
 # 하고 화면에 보여준 뒤(이때 image_dir가 큐 행에 저장돼 'ready' 상태가
 # 된다), 사람이 승인을 누르면 그제서야 그 렌더링을 그대로 발행한다 —
 # 재생성하지 않으므로 승인한 화면과 실제로 올라가는 카드가 항상 같다.
+
+_PREPARE_LOG = Path(__file__).resolve().parents[2] / "logs" / "prepare_jobs.log"
+
 
 def _run_queue_prepare_job(job_id: str, queue_id: int | None = None) -> None:
     global _ACTIVE_QUEUE_JOB
@@ -1354,9 +1417,20 @@ def _run_queue_prepare_job(job_id: str, queue_id: int | None = None) -> None:
             if s.strip():
                 job["logs"].append(s.rstrip())
                 _emit(q, "log", s.rstrip().replace("\n", " "))
+                # 화면 로그는 서버가 재시작되면 사라진다. 생성 결과에 문제가
+                # 있을 때 "왜 이 영상/문장이 통과했나"를 나중에 추적할 수 있게
+                # 파일에도 남긴다(실패해도 생성에는 영향 없음).
+                try:
+                    with open(_PREPARE_LOG, "a", encoding="utf-8") as fh:
+                        fh.write(f"[{job_id} q={queue_id}] {s.rstrip()}\n")
+                except OSError:
+                    pass
             return len(s)
         def flush(self): pass
 
+    from src import cancellation
+
+    cancellation.reset()   # 이전 작업의 중지 요청이 남아 이번 작업을 막지 않게 한다
     old_stdout = sys.stdout
     sys.stdout = _StreamCapture()
     try:
@@ -1395,6 +1469,15 @@ def _run_queue_prepare_job(job_id: str, queue_id: int | None = None) -> None:
             job["status"] = "error"
             job["error"] = "대기 중인 큐 항목이 없거나 생성에 실패했습니다."
             _emit(q, "error", job["error"])
+    except cancellation.GenerationCancelled as stopped:
+        # 운영자가 중지했거나, 한 번의 생성 비용 상한을 넘어 시스템이 멈췄다.
+        sys.stdout = old_stdout
+        job["status"] = "cancelled"
+        if isinstance(stopped, cancellation.RunBudgetExceeded):
+            job["error"] = f"{stopped} — 이 기사는 비용 대비 생성이 어려워 보류됩니다."
+        else:
+            job["error"] = "사용자가 중지했습니다. 항목은 대기 상태로 돌아갔습니다."
+        _emit(q, "error", "⏹ " + job["error"] + " (이미 호출된 AI 비용은 환불되지 않습니다)")
     except Exception as e:
         sys.stdout = old_stdout
         tb = traceback.format_exc()
@@ -1405,9 +1488,35 @@ def _run_queue_prepare_job(job_id: str, queue_id: int | None = None) -> None:
         _emit(q, "error", str(e))
     finally:
         sys.stdout = old_stdout
+        cancellation.reset()
         q.put(None)
         _ACTIVE_QUEUE_JOB = None
         _GENERATION_LOCK.release()
+
+
+@app.route("/queue/cancel", methods=["POST"])
+def queue_cancel():
+    """Ask the running preview generation to stop before its next paid LLM call.
+
+    Only a *prepare* job can be stopped. A publish job is mid-upload to Instagram
+    and must be allowed to finish so the post and its record stay consistent.
+    """
+    from src import cancellation
+
+    active = _ACTIVE_QUEUE_JOB
+    if active is None:
+        return {"error": "진행 중인 작업이 없습니다."}, 409
+    if active.get("mode") != "prepare":
+        return {"error": "게시 중에는 중지할 수 없습니다. 인스타그램 업로드가 끝날 때까지 기다려 주세요."}, 409
+    cancellation.request_cancel()
+    job = _JOBS.get(active["job_id"])
+    message = "⏹ 중지 요청을 받았습니다 — 진행 중인 AI 호출이 끝나는 대로 멈춥니다."
+    if job is not None:
+        job["logs"].append(message)
+        q = _JOB_QUEUES.get(active["job_id"])
+        if q is not None:
+            _emit(q, "log", message)
+    return {"ok": True, "job_id": active["job_id"]}
 
 
 @app.route("/queue/prepare_next", methods=["POST"])
@@ -1444,7 +1553,126 @@ def queue_prepare_next():
     return {"job_id": job_id}
 
 
-def _run_queue_publish_job(job_id: str, queue_id: int) -> None:
+def _audit_panel_html(out_dir) -> str:
+    """"자동 점검" panel: what the audit fixed, and what the operator must look at."""
+
+    path = Path(out_dir) / "audit.json"
+    if not path.exists():
+        return ""
+    try:
+        report = json.loads(path.read_text(encoding="utf-8"))
+    except ValueError:
+        return ""
+
+    def _items(entries, color):
+        return "".join(
+            f'<li style="color:{color};margin:4px 0">{html.escape(str(e))}</li>' for e in entries
+        )
+
+    parts = []
+    if report.get("fixed"):
+        parts.append('<div class="panel-sub">자동으로 고친 것</div><ul style="margin:6px 0 12px 18px">'
+                     + _items(report["fixed"], "var(--green, #3fb950)") + "</ul>")
+    if report.get("attention"):
+        parts.append('<div class="panel-sub">직접 확인할 것</div><ul style="margin:6px 0 12px 18px">'
+                     + _items(report["attention"], "var(--yellow, #d29922)") + "</ul>")
+    if report.get("checks"):
+        parts.append('<div class="panel-sub">통과한 점검</div><ul style="margin:6px 0 0 18px">'
+                     + _items([f'{c["item"]}: {c["result"]}' for c in report["checks"]], "var(--muted)")
+                     + "</ul>")
+    body = "".join(parts).replace("{", "{{").replace("}", "}}")
+    return (
+        '<div class="panel" style="margin-top:20px"><div class="panel-header">'
+        '<div class="panel-title">자동 점검</div></div>' + body + "</div>"
+    )
+
+
+def _candidate_source_label(row) -> str:
+    """Small "TechCrunch · 2026.10.07" line shown under a queued candidate.
+
+    Candidates are collected together and one is picked per day, so the list has
+    to say where each came from and how fresh it is. Pure data from the row; no
+    network. Items queued before the date was recorded show the outlet only.
+    """
+
+    try:
+        data = json.loads(row["metadata_json"] or "{}")
+        url = str(data.get("source_url") or "")
+        evidence = data.get("evidence") or []
+        published = str((evidence[0].get("published_at") if evidence else "") or "")
+    except (KeyError, IndexError, TypeError, ValueError, AttributeError):
+        return ""
+    from src.qa.source_freshness import parse_date
+    from src.source_note import outlet_from_url
+
+    parts = [outlet_from_url(url)]
+    day = parse_date(published)
+    if day:
+        parts.append(day.strftime("%Y.%m.%d"))
+    text = " · ".join(part for part in parts if part)
+    if not text:
+        return ""
+    return f"<div style='color:var(--muted);font-size:11px;margin-top:2px'>{escape(text)}</div>"
+
+
+def _record_queue_approval(queue_id: int) -> bool:
+    """Log the operator's approval for a queue item before it is published."""
+    return _record_queue_review(queue_id, "APPROVED")
+
+
+def _record_queue_review(queue_id: int, decision: str) -> bool:
+    """Log the operator's APPROVED/REJECTED decision for a rendered queue card.
+
+    The queue page is where a human signs off on (or rejects) a card, but it
+    never wrote an editorial_feedback_events row — so the weekly review saw zero
+    review decisions and stayed INSUFFICIENT_DATA no matter how many cards were
+    handled. The idempotency key is shared with /generate/review, so handling
+    the same card through both paths counts once.
+
+    Best-effort and observational only: it never blocks publishing or skipping.
+    A card that was never rendered (no image_dir/meta.json) has nothing to
+    review, so it records nothing.
+    """
+    try:
+        from src.db import get_queue_row
+        from src.analytics.feedback import log_editorial_feedback
+
+        row = get_queue_row(queue_id)
+        image_dir = str((row["image_dir"] if row else "") or "").strip()
+        if not image_dir:
+            return False
+        dir_name = Path(image_dir).name
+        meta_path = _resolve_output_file(dir_name, "meta.json")
+        if not meta_path.exists():
+            return False
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        run_id = str(meta.get("run_id") or "")
+        if not run_id:
+            return False
+        decision = decision.strip().upper()
+        # Approving needs verified evidence (same rule as /generate/review);
+        # rejecting never does — declining an unverified card is always fine.
+        if decision == "APPROVED" and str(
+            meta.get("editorial_validation_status") or ""
+        ) not in {"ORIGINAL_VERIFIED", "EDIT_VERIFIED"}:
+            return False
+        log_editorial_feedback(
+            content_id=dir_name,
+            run_id=run_id,
+            editor_id="dashboard_user",
+            approval_decision=decision,
+            edit_reason_category=(
+                "review_rejection" if decision == "REJECTED" else ""
+            ),
+            idempotency_key=f"review:{dir_name}:{decision}",
+        )
+        return True
+    except Exception as exc:
+        print(f"  [Tracking] 큐 검토 기록 실패({decision}): {type(exc).__name__}")
+        return False
+
+
+def _run_queue_publish_job(job_id: str, queue_id: int, with_threads: bool = False) -> None:
     global _ACTIVE_QUEUE_JOB
     _ACTIVE_QUEUE_JOB = {"job_id": job_id, "mode": "publish"}
     q = _JOB_QUEUES[job_id]
@@ -1475,10 +1703,25 @@ def _run_queue_publish_job(job_id: str, queue_id: int) -> None:
         # 렌더링을 그대로 올리는 _publish_cached_render라 애초에 승인
         # 단계를 타지 않지만, image_dir가 없어 전체 파이프라인으로 떨어지는
         # 예외 상황까지 대비해 명시한다.
+        _record_queue_approval(queue_id)
+        try:
+            from src.token_refresh import ensure_fresh
+            for note in ensure_fresh():
+                _emit(q, "log", note)
+        except Exception:
+            pass   # a failed auto-refresh only leaves the dashboard warning in place
         result = publish_specific(
             queue_id, publish_to_ig=True, require_human_approval=False
         )
         sys.stdout = old_stdout
+
+        if result and with_threads:
+            # Threads is a courtesy copy: its failure never undoes or hides the Instagram post. The
+            # outcome is kept in the job log and logs/threads_cross_post.log, and duplicates are refused.
+            from src.threads_cross_post import cross_post_queue_item
+            ok, note = cross_post_queue_item(queue_id)
+            job["logs"].append(note)
+            _emit(q, "log", note)
 
         if result:
             job["status"] = "done"
@@ -1538,6 +1781,21 @@ def queue_approve_publish():
     except (TypeError, ValueError):
         return {"error": "발행할 항목을 확인하지 못했습니다. 미리보기를 다시 생성해 주세요."}, 400
 
+    # 출력 기준(src/qa/output_standard.py)의 block 항목이 남은 세트는 게시하지 않는다.
+    try:
+        from src.db import get_queue_row
+        from src.qa.output_standard import blocking, check_output
+
+        row = get_queue_row(queue_id)
+        image_dir = (row["image_dir"] if row is not None else "") or ""
+        if image_dir and Path(image_dir).is_dir():
+            blockers = blocking(check_output(Path(image_dir)))
+            if blockers:
+                lines = "; ".join(f"[{v.rule}] {v.message}" for v in blockers[:4])
+                return {"error": f"출력 기준을 통과하지 못해 게시할 수 없습니다 — {lines}"}, 422
+    except Exception:
+        pass   # 점검 자체의 오류로 정상 게시까지 막지는 않는다(점검은 생성 단계에서도 표시된다)
+
     if not _GENERATION_LOCK.acquire(blocking=False):
         return {"error": "이미 다른 작업이 진행 중입니다. 완료 후 다시 시도해 주세요."}, 409
 
@@ -1550,7 +1808,7 @@ def queue_approve_publish():
         "image_dir": "", "caption": "", "error": "", "queue_id": None,
     }
     t = threading.Thread(
-        target=_run_queue_publish_job, args=(job_id, queue_id), daemon=True
+        target=_run_queue_publish_job, args=(job_id, queue_id, bool(data.get("threads"))), daemon=True
     )
     try:
         t.start()
@@ -2481,6 +2739,8 @@ def preview_page(dir_name: str):
   <pre id="captionText" style="font-size:12px;color:var(--muted);white-space:pre-wrap;line-height:1.7">{cap_safe}</pre>
 </div>''' if cap_txt else ""
 
+    audit_html = _audit_panel_html(d)
+
     reels_html = ""
     reels_path = d / "reels.mp4"
     if reels_path.exists():
@@ -2505,6 +2765,7 @@ def preview_page(dir_name: str):
   </div>
 </div>
 {caption_html}
+{audit_html}
 {reels_html}
 
 <div class="panel" style="margin-top:20px">
@@ -2862,6 +3123,10 @@ def edit_slide():
 
         total = len(updated_slides)
         slide_data = slides[slide_index]
+        # 렌더 때 보관해 둔 출처 — 마지막 카드와 캡션을 다시 만들 때 빠지지 않게 한다.
+        from src.source_note import SourceNote
+
+        source_note = SourceNote.from_dict(script_data.get("source_note"))
 
         # video 매핑이 있는 content 슬라이드 → split 레이아웃 유지
         if (
@@ -2881,9 +3146,20 @@ def edit_slide():
         elif target_slide.slide_type == "cover":
             rendered = _dr._render_cover(rendered_bg, target_slide, total, persona.handle, hook=updated_script.hook)
         elif target_slide.slide_type == "cta":
-            rendered = _dr._render_cta(rendered_bg, target_slide, total, persona.handle, updated_script.hashtags)
+            rendered = _dr._render_cta(
+                rendered_bg, target_slide, total, persona.handle, updated_script.hashtags,
+            )
         else:
             rendered = _dr._render_content(rendered_bg, target_slide, total, persona.handle)
+
+        # 내용 카드의 맨 아래 출처 한 줄도 다시 단다 (수정해도 사라지지 않게).
+        if target_slide.slide_type == "content":
+            has_video = bool(slide_data.get("video_id"))
+            rendered = _dr._draw_source_footer(
+                rendered,
+                source_note,
+                (slide_data.get("video_creator") or "") if has_video else None,
+            )
 
         fname = f"card_{target_slide.slide_number:02d}_{target_slide.slide_type}.png"
         fpath = d / fname
@@ -2892,6 +3168,12 @@ def edit_slide():
         # 캡션도 갱신
         from src.agents.design_renderer import _generate_caption
         new_caption = _generate_caption(updated_script, persona.handle)
+        if source_note is not None:
+            from src.source_note import insert_into_caption
+
+            new_caption = insert_into_caption(
+                new_caption, source_note.caption_block(), " ".join(updated_script.hashtags[:15])
+            )
         (d / "caption.txt").write_text(new_caption, encoding="utf-8")
         script_json = _json.dumps(script_data, ensure_ascii=False, indent=2)
         script_path.write_text(script_json, encoding="utf-8")

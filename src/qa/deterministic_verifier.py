@@ -76,6 +76,8 @@ _SCALE_FACTORS = {
     "thousand": Decimal("1000"),
     "m": Decimal("1000000"),
     "million": Decimal("1000000"),
+    "mn": Decimal("1000000"),
+    "bn": Decimal("1000000000"),
     "b": Decimal("1000000000"),
     "billion": Decimal("1000000000"),
     "t": Decimal("1000000000000"),
@@ -83,11 +85,11 @@ _SCALE_FACTORS = {
 }
 
 _KOREAN_SCALE_PATTERN = r"(?:천억|백억|십억|천만|백만|십만|조|억|만|천)"
-_ENGLISH_SCALE_PATTERN = r"(?:trillion|billion|million|thousand|[kmbt](?![A-Za-z]))"
+_ENGLISH_SCALE_PATTERN = r"(?:trillion|billion|million|thousand|bn|mn|[kmbt](?![A-Za-z]))"
 _UNIT_PATTERN = (
-    r"(?:퍼센트|percentage|percent|%|달러|dollars?|usd|원|krw|won|"
-    r"명|people|persons?|users?|customers?|employees?|개|items?|parameters?|"
-    r"tokens?|companies?|models?|곳|places?|locations?|개월|months?|년|years?|"
+    r"(?:퍼센트|percentage|per\s*cent|percent|%|달러|dollars?|usd|원|krw|won|"
+    r"명|people|persons?|users?|customers?|employees?|개월|개|items?|parameters?|"
+    r"tokens?|companies?|models?|곳|places?|locations?|offices?|sites?|branches|stores?|months?|년|years?|"
     r"일|days?|시간|hours?|분|minutes?|초|seconds?|배|times?|x(?![A-Za-z]))"
 )
 _NUMBER_PATTERN = r"\d[\d,]*(?:\.\d+)?"
@@ -121,10 +123,13 @@ _KOREAN_COMPOUND_NUMBER_RE = re.compile(
     rf"\s*(?P<unit>{_UNIT_PATTERN})?",
     re.IGNORECASE,
 )
+# 숫자와 단위/배수 사이에는 공백 하나 또는 하이픈 하나가 올 수 있다. "a 10-minute conversation"이나
+# "a 5-million-dollar deal"처럼 영어 복합 수식어는 하이픈으로 붙어 있는데, 예전에는 이 단위를 읽지
+# 못해 "10분"을 근거 없는 숫자로 거부하고 같은 주장을 13번 다시 생성하는 비용($0.25)이 들었다.
 _NUMBER_MENTION_RE = re.compile(
     rf"(?<![\w.])(?P<currency>[$₩])?\s*"
-    rf"(?P<number>{_NUMBER_PATTERN})\s*"
-    rf"(?P<scale>{_KOREAN_SCALE_PATTERN}|{_ENGLISH_SCALE_PATTERN})?\s*"
+    rf"(?P<number>{_NUMBER_PATTERN})(?:\s+|-)?"
+    rf"(?P<scale>{_KOREAN_SCALE_PATTERN}|{_ENGLISH_SCALE_PATTERN})?(?:\s+|-)?"
     rf"(?P<unit>{_UNIT_PATTERN})?",
     re.IGNORECASE,
 )
@@ -265,13 +270,14 @@ def _canonical_unit(raw_unit: str = "", currency: str = "") -> str:
         return "usd"
     if currency == "₩" or unit in {"원", "krw", "won"}:
         return "krw"
-    if unit in {"%", "퍼센트", "percent", "percentage"}:
+    if unit in {"%", "퍼센트", "percent", "percentage"} or re.fullmatch(r"per\s*cent", unit):
         return "percent"
     if unit in {"명", "people", "person", "persons", "user", "users", "customer", "customers", "employee", "employees"}:
         return "people"
     if unit in {"개", "item", "items", "parameter", "parameters", "token", "tokens", "company", "companies", "model", "models"}:
         return "count"
-    if unit in {"곳", "place", "places", "location", "locations"}:
+    if unit in {"곳", "place", "places", "location", "locations", "office", "offices", "site", "sites",
+                "branch", "branches", "store", "stores"}:
         return "place"
     if unit in {"일", "day", "days"}:
         return "day"
@@ -290,9 +296,39 @@ def _canonical_unit(raw_unit: str = "", currency: str = "") -> str:
     return ""
 
 
+_WORD_NUMBERS = {
+    "one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7, "eight": 8,
+    "nine": 9, "ten": 10, "eleven": 11, "twelve": 12, "thirteen": 13, "fourteen": 14,
+    "fifteen": 15, "sixteen": 16, "seventeen": 17, "eighteen": 18, "nineteen": 19,
+    "twenty": 20, "thirty": 30, "forty": 40, "fifty": 50, "sixty": 60, "seventy": 70,
+    "eighty": 80, "ninety": 90,
+}
+_TENS = "twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety"
+_ONES = "one|two|three|four|five|six|seven|eight|nine"
+_NUMBER_WORD = "|".join(_WORD_NUMBERS)
+# Only a number word that is followed by a unit or scale is a figure ("five days", "ten percent",
+# "one million"); "one of the", "the two sides" stay words.
+_WORD_NUMBER_UNIT_AHEAD = (
+    r"(?=[\s-]+(?:days?|weeks?|months?|years?|hours?|minutes?|seconds?|percent|per\s*cent|"
+    r"people|persons?|employees?|workers?|users?|customers?|engineers?|developers?|"
+    r"million|billion|trillion|thousand|times|offices?|countries|cities|stores?)\b)"
+)
+_TENS_ONES_RE = re.compile(rf"\b({_TENS})[- ]({_ONES})\b{_WORD_NUMBER_UNIT_AHEAD}", re.IGNORECASE)
+_WORD_NUMBER_RE = re.compile(rf"\b({_NUMBER_WORD})\b{_WORD_NUMBER_UNIT_AHEAD}", re.IGNORECASE)
+
+
+def _spelled_numbers_to_digits(text: str) -> str:
+    """"more than five days" -> "more than 5 days"; "twenty-five employees" -> "25 employees"."""
+
+    text = _TENS_ONES_RE.sub(
+        lambda m: str(_WORD_NUMBERS[m.group(1).lower()] + _WORD_NUMBERS[m.group(2).lower()]), text
+    )
+    return _WORD_NUMBER_RE.sub(lambda m: str(_WORD_NUMBERS[m.group(1).lower()]), text)
+
+
 def _extract_number_mentions(text: str) -> Iterable[Tuple[Decimal, str]]:
     """Yield canonical numeric values and semantic units from Korean/English text."""
-    normalized = unicodedata.normalize("NFKC", text or "")
+    normalized = _spelled_numbers_to_digits(unicodedata.normalize("NFKC", text or ""))
     compound_spans: list[tuple[int, int]] = []
 
     # Korean large numbers are often additive (for example, 1억 500만 = 105M).
@@ -579,10 +615,59 @@ def _number_supported_by_evidence(num_obj, evidence_text: str) -> bool:
         value = num_obj.normalized_value
         qual = declared_unit
 
-    return any(
+    if any(
         value == evidence_value and qual == evidence_unit
         for evidence_value, evidence_unit in _extract_number_mentions(evidence_text)
-    )
+    ):
+        return True
+    # 범용 개수 단위("650개")는 근거에서 단위가 인식되지 않은 명사("650 VxRail hosts", "12,000 virtual
+    # machines")와도 맞는다. 명사를 일일이 사전에 넣을 수 없어서, 단위가 비어 있는 같은 값이면 인정한다
+    # (퍼센트·금액·사람 등 다른 단위로 읽힌 값은 여전히 안 맞는다).
+    if qual == "count" and any(
+        value == evidence_value and evidence_unit == ""
+        for evidence_value, evidence_unit in _extract_number_mentions(evidence_text)
+    ):
+        return True
+    # 단위 없이 값만 쓴 숫자("24 million")는 근거에서 같은 값이면 단위가 무엇이든("2,400만 명") 맞는 것으로 본다.
+    if not qual and not declared_unit and any(
+        value == evidence_value for evidence_value, _unit in _extract_number_mentions(evidence_text)
+    ):
+        return True
+    # "1.5 million full-time and part-time human workers"처럼 사람 명사가 수식어
+    # 뒤에 오면 위 추출은 단위를 못 읽어서 "150만 명"을 근거 없는 숫자로 거부했다.
+    # 값이 정확히 같고 바로 뒤(수식어 몇 단어 안)에 사람 명사가 있을 때만 "명"으로 인정한다.
+    return qual == "people" and _count_followed_by_people_noun(value, evidence_text)
+
+
+_PEOPLE_NOUNS = frozenset({
+    "workers", "worker", "employees", "employee", "staff", "people", "persons",
+    "users", "customers", "residents", "members", "citizens", "students",
+    "workforce", "jobs", "developers", "engineers", "researchers", "scientists",
+    "teachers", "participants", "attendees", "subscribers", "players", "drivers",
+    "applicants", "candidates", "patients", "consumers", "shoppers", "creators",
+    "artists", "voters", "victims", "passengers", "visitors", "professionals",
+    "managers", "executives", "contractors", "freelancers", "farmers", "gamers",
+})
+_PEOPLE_NOUN_MAX_GAP_WORDS = 6
+
+
+def _count_followed_by_people_noun(value: Decimal, evidence_text: str) -> bool:
+    """True if `value` appears in the evidence with a people noun within a few words after it."""
+
+    normalized = unicodedata.normalize("NFKC", evidence_text or "")
+    for match in _NUMBER_MENTION_RE.finditer(normalized):
+        if match.group("unit"):
+            continue
+        number = _to_decimal(match.group("number"))
+        if number is None:
+            continue
+        scale = (match.group("scale") or "").lower()
+        if number * _SCALE_FACTORS.get(scale, Decimal("1")) != value:
+            continue
+        words = re.findall(r"[A-Za-z]+(?:-[A-Za-z]+)*", normalized[match.end():match.end() + 90])
+        if any(word.lower() in _PEOPLE_NOUNS for word in words[:_PEOPLE_NOUN_MAX_GAP_WORDS]):
+            return True
+    return False
 
 
 def _plain_decimal(value: Decimal) -> str:
@@ -645,7 +730,7 @@ def repair_source_backed_numeric_localizations(
             evidence_map[evidence_id].text
             for evidence_id in claim.evidence_ids
             if evidence_id in evidence_map
-        )
+        ) + f" {getattr(lineage, 'source_title', '') or ''}"
         replacements: dict[str, tuple[str, Decimal]] = {}
         repaired_numbers = []
         for number in claim.numbers:
@@ -891,10 +976,23 @@ class DeterministicVerifier:
                 if not found:
                     raise QualityGateError("ENTITY_UNSUPPORTED", f"Entity '{entity}' not found in evidence.", claim.claim_id)
 
-            # 3. Check Numbers
+            # 3. Check Numbers (the article's own headline is part of its evidence)
+            number_evidence_text = f"{combined_evidence_text} {getattr(lineage, 'source_title', '') or ''}"
             for num_obj in claim.numbers:
-                if not _number_supported_by_evidence(num_obj, combined_evidence_text):
+                if not _number_supported_by_evidence(num_obj, number_evidence_text):
                     raise QualityGateError("NUMBER_UNSUPPORTED", f"Number '{num_obj.raw_text}' not supported by evidence.", claim.claim_id)
+
+            # 3b. A claim must not state as fact what its source hedges ("정황", "단정할 수 없다", ...)
+            from src.qa.hedge_guard import find_dropped_hedge
+
+            dropped = find_dropped_hedge(claim.claim_text, combined_evidence_text)
+            if dropped:
+                raise QualityGateError(
+                    "CLAIM_HEDGE_DROPPED",
+                    f"The source hedges this with '{dropped}' but the claim states it as fact. "
+                    f"Keep the same qualifier ('{dropped}' or an equivalent such as '~ 정황', '단정할 수 없다') in the claim.",
+                    claim.claim_id,
+                )
 
             # 4. Check Dates
             for date_obj in claim.dates:
