@@ -178,7 +178,7 @@ def _get_video_metadata(video_id: str) -> dict:
 
     result: dict = {
         'available': False, 'view_count': 0, 'duration': 0,
-        'channel': '', 'chapters': [], 'description': '', 'language': '',
+        'channel': '', 'chapters': [], 'description': '', 'language': '', 'license': '',
     }
     try:
         import yt_dlp
@@ -199,6 +199,8 @@ def _get_video_metadata(video_id: str) -> dict:
             'duration': info.get('duration') or 0,
             'channel': info.get('channel') or info.get('uploader', ''),
             'channel_follower_count': info.get('channel_follower_count') or 0,
+            # 쓰는 쪽이 재사용을 허락했는지 판단하는 근거(예: "Creative Commons Attribution license (reuse allowed)")
+            'license': info.get('license') or '',
             # 자막을 받을 때 이 언어 하나만 요청하면 자동 번역 트랙을 건드리지 않는다.
             'language': (info.get('language') or '').split('-')[0],
             'chapters': [
@@ -216,6 +218,35 @@ def _get_video_metadata(video_id: str) -> dict:
 
     _video_meta_cache[video_id] = result
     return result
+
+
+def _allowed_channels(env_path: Path | None = None) -> set[str]:
+    """허락을 받았거나 공식 배포 채널로 직접 정한 채널 이름(.env VIDEO_ALLOWED_CHANNELS, 쉼표 구분)."""
+    from dotenv import dotenv_values
+
+    path = env_path or (Path(__file__).resolve().parents[2] / ".env")
+    raw = (dotenv_values(path).get("VIDEO_ALLOWED_CHANNELS") or "") if path.exists() else ""
+    return {c.strip().casefold() for c in raw.split(",") if c.strip()}
+
+
+def video_use_permitted(video_id: str) -> tuple[bool, str]:
+    """다른 사람의 영상을 카드에 쓸 수 있는가.
+
+    출처를 적는 것은 허락이 아니다. 그래서 쓰는 쪽이 재사용을 허락했음이 분명한 경우만 쓴다:
+      - 영상의 라이선스가 크리에이티브 커먼즈일 때(유튜브가 영상마다 알려 준다)
+      - 허락을 받았거나 공식 배포 채널로 직접 정해 둔 채널(.env VIDEO_ALLOWED_CHANNELS)일 때
+    그 밖에는 영상을 쓰지 않고 문장 카드로 둔다. 라이선스를 알 수 없어도 쓰지 않는다.
+    반환: (허용 여부, 사유)
+    """
+    meta = _get_video_metadata(video_id) or {}
+    license_text = str(meta.get("license") or "")
+    if "creative commons" in license_text.casefold():
+        return True, f"라이선스: {license_text[:40]}"
+    channel = str(meta.get("channel") or "").strip()
+    if channel and channel.casefold() in _allowed_channels():
+        return True, f"허락된 채널: {channel}"
+    shown = license_text[:30] if license_text else "확인 불가"
+    return False, f"재사용 허락 없음(라이선스: {shown}, 채널: {channel or '?'})"
 
 
 def _parse_description_timestamps(description: str) -> list[dict]:
@@ -1167,6 +1198,13 @@ def find_verified_video_for_slide(
         """자막 다운로드(캐시 우선) → GPT로 슬라이드 내용 포함 여부 + 타임스탬프 확인"""
         if vi.video_id in _used:
             return False, 0   # 이미 다른 슬라이드에 배정된 영상 제외
+
+        # 쓰는 쪽이 재사용을 허락했음이 분명한 영상만 쓴다. 자막 요청보다 먼저 확인해서, 허락 없는
+        # 영상에는 자막 요청도 보내지 않는다(429 부담도 줄어든다).
+        permitted, why = video_use_permitted(vi.video_id)
+        if not permitted:
+            print(f"  [YouTubeFetcher] ✗ {why}: '{vi.title[:40]}'")
+            return False, 0
 
         try:
             transcript = _get_video_transcript(vi.video_id)

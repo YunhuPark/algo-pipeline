@@ -20,6 +20,7 @@ def test_video_without_transcript_is_never_accepted(monkeypatch):
         snippet="AI Microsoft chip Maia 300 Nvidia gameplay",
     )
     monkeypatch.setattr(yf, "_get_video_transcript", lambda _id: "")
+    monkeypatch.setattr(yf, "video_use_permitted", lambda _id: (True, "test"))   # licensing has its own tests
     monkeypatch.setattr(yf, "_search_youtube", lambda *a, **k: [video])
     monkeypatch.setattr(yf, "_validate_candidates", lambda c, **k: c)
     monkeypatch.setattr(yf, "_generate_search_keywords", lambda *a, **k: ["maia 300"])
@@ -49,6 +50,7 @@ def _verified_slide_search(monkeypatch, moving: bool):
         snippet="Amazon robot warehouse",
     )
     monkeypatch.setattr(yf, "_get_video_transcript", lambda _id: "Amazon robots move packages in the warehouse " * 20)
+    monkeypatch.setattr(yf, "video_use_permitted", lambda _id: (True, "test"))
     monkeypatch.setattr(yf, "_search_youtube", lambda *a, **k: [video])
     monkeypatch.setattr(yf, "_validate_candidates", lambda c, **k: c)
     monkeypatch.setattr(yf, "_generate_search_keywords", lambda *a, **k: ["amazon robots"])
