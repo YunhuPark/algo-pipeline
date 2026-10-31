@@ -95,7 +95,7 @@ def test_generic_or_repeated_labels_fall_back_to_the_headline():
 
 
 def test_a_long_chip_label_is_cut_at_a_word_boundary():
-    assert cr.chip_label("구글 AI 모드 광고 10개국 확대", "10개국", [], []) == "구글 AI 모드 광고"
+    assert cr.chip_label("구글 AI 모드 광고 10개국 확대", "10개국", [], []) == "구글 AI 모드"      # 11 chars would not fit
     assert cr.chip_label("확대", "10개국", ["AI 모드 광고 확대"], []) == "AI 모드 광고"
     assert cr._cut("한국어라벨열글자넘는경우", 10) == "한국어라벨열글자넘는"      # no space to cut at: hard cut
 
