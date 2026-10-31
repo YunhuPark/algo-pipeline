@@ -245,7 +245,7 @@ def video_use_permitted(video_id: str) -> tuple[bool, str]:
     channel = str(meta.get("channel") or "").strip()
     if channel and channel.casefold() in _allowed_channels():
         return True, f"허락된 채널: {channel}"
-    shown = license_text[:30] if license_text else "확인 불가"
+    shown = license_text[:30] if license_text else "표준 라이선스 또는 확인 불가"
     return False, f"재사용 허락 없음(라이선스: {shown}, 채널: {channel or '?'})"
 
 
