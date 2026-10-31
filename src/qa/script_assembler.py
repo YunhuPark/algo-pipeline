@@ -109,13 +109,12 @@ def _cta_summary(content_slides: list) -> tuple[str, list[str], list[str]]:
         value = slide.visual_values[0]
         if value in values or not re.search(r"\d", value):
             continue        # a chip is a figure; a company name there reads as clutter and its label gets cut
-        # 라벨은 카드 소제목에서 그 수치를 뺀 말("중남미 14개국 추가" -> "중남미 추가")이 가장 정확하다.
-        # 저장된 라벨은 카드마다 같은 말이 반복되기도 한다.
-        label = re.sub(r"\s+", " ", slide.title.replace(value, " ")).strip()
-        if len(label) < 2:
-            label = slide.visual_labels[0] if slide.visual_labels else slide.title
+        # 라벨: 소제목에 그 수치가 있으면 소제목에서 수치를 뺀 말("중남미 14개국 추가" -> "중남미 추가"),
+        # 없으면 그 카드의 수치 라벨(이미 다른 칩이 쓴 말이나 "핵심 수치" 같은 일반어는 제외).
+        from src.qa.card_rules import chip_label
+
         values.append(value)
-        labels.append(_shorten(label, 10))
+        labels.append(chip_label(slide.title, value, list(slide.visual_labels), labels))
         if len(values) == 3:
             break
     if len(values) < 2:      # 칩이 하나면 허전하니 그리지 않고 한 줄 핵심만 둔다
@@ -470,6 +469,18 @@ class ScriptAssembler:
             elif _FIGURE_PHRASE_RE.search(cover_title) and content_claims:
                 # 숫자만 덩그러니 있는 제목("80%")은 버리고 첫 카드의 소제목을 쓴다.
                 cover_title = _fit_cover_title(_claim_headline(content_claims[0]), 22)
+
+        # 기사 제목에 수치가 있는데 표지가 다른 수치(예: 요금제 가격)를 내세우면, 제목의 수치로 바꾼다.
+        # 제목에서 잘라낸 구절이 "수치 + 대상" 조건을 만족할 때만 바꾼다(아니면 그대로 둔다).
+        from src.qa.card_rules import clean_cta_title, cover_has_headline_figure, headline_figure_phrase
+
+        if not cover_has_headline_figure(cover_title, topic):
+            phrase = headline_figure_phrase(topic)
+            if phrase and has_complete_figure(phrase):
+                cover_title = _fit_cover_title(_natural_korean_figures(phrase), 22)
+
+        # 마지막 장 제목이 답 없는 질문이거나 문장 중간에서 끊기면 고정 제목으로 바꾼다.
+        cta_title = clean_cta_title(cta_title)
 
         slides = []
 
