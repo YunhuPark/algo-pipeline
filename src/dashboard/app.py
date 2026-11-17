@@ -15,6 +15,9 @@ from __future__ import annotations
 import io
 import json
 import os
+import re
+import secrets
+from urllib.parse import urlsplit
 import queue
 import sys
 import threading
@@ -28,7 +31,7 @@ from pathlib import Path
 ROOT = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(ROOT))
 
-from flask import Flask, request, redirect, url_for, send_file, Response, stream_with_context
+from flask import Flask, request, redirect, url_for, send_file, Response, stream_with_context, abort
 
 from src.db import (
     get_posts, get_analytics, get_queue,
@@ -36,6 +39,51 @@ from src.db import (
 )
 
 app = Flask(__name__)
+
+@app.before_request
+def require_dashboard_admin():
+    # Media is intentionally public for Instagram fetches; management is private.
+    if request.endpoint in {"output_img", "output_video"} and request.method in {"GET", "HEAD"}:
+        return None
+    expected = os.getenv("ADMIN_TOKEN", "")
+    supplied = request.headers.get("X-Admin-Token", "")
+    auth = request.authorization
+    if not supplied and auth and auth.type == "basic":
+        supplied = auth.password or ""
+    if not expected or not supplied or not secrets.compare_digest(supplied.encode(), expected.encode()):
+        return Response("Administrator credentials required", 401,
+                        {"WWW-Authenticate": 'Basic realm="Algo Dashboard", charset="UTF-8"'})
+    if request.headers.get("Sec-Fetch-Site") not in {None, "same-origin", "none"}:
+        abort(403)
+    if request.method not in {"GET", "HEAD", "OPTIONS"}:
+        origin = request.headers.get("Origin")
+        if origin:
+            parsed = urlsplit(origin)
+            if parsed.scheme != request.scheme or parsed.netloc != request.host:
+                abort(403)
+        elif not request.headers.get("X-Admin-Token"):
+            # Basic credentials are browser ambient authority; require Origin.
+            abort(403)
+    return None
+
+
+def _safe_path(base: Path, *parts: str) -> Path:
+    for part in parts:
+        if (not isinstance(part, str) or not part or part in {".", ".."}
+                or any(char in part for char in ("/", "\\", ":", "\0"))):
+            abort(404)
+    root = base.resolve()
+    candidate = root.joinpath(*parts).resolve()
+    try:
+        candidate.relative_to(root)
+    except ValueError:
+        abort(404)
+    return candidate
+
+
+def _output_path(*parts: str) -> Path:
+    return _safe_path(_safe_path(ROOT, "output"), *parts)
+
 
 # ── 생성 작업 상태 저장 (job_id → dict) ───────────────────
 _JOBS: dict[str, dict] = {}   # {job_id: {status, logs, paths, script, error}}
@@ -1591,14 +1639,16 @@ def generate_stream(job_id: str):
 
 @app.route("/output_img/<dir_name>/<filename>")
 def output_img(dir_name: str, filename: str):
-    img_path = ROOT / "output" / dir_name / filename
+    img_path = _output_path(dir_name, filename)
+    if img_path.suffix.lower() not in {".png", ".jpg", ".jpeg", ".webp", ".mp4"}:
+        abort(404)
     if not img_path.exists():
         # 파일명 패턴 탐색
-        parent = ROOT / "output" / dir_name
+        parent = _output_path(dir_name)
         candidates = list(parent.glob(filename.rsplit("_", 1)[0] + "*.*"))
         cans = [c for c in candidates if c.suffix.lower() in [".png", ".mp4"]]
         if cans:
-            img_path = cans[0]
+            img_path = _output_path(dir_name, cans[0].name)
         else:
             return "not found", 404
             
@@ -1608,7 +1658,7 @@ def output_img(dir_name: str, filename: str):
 
 @app.route("/caption/<dir_name>")
 def caption(dir_name: str):
-    p = ROOT / "output" / dir_name / "caption.txt"
+    p = _output_path(dir_name, "caption.txt")
     if p.exists():
         return p.read_text(encoding="utf-8")
     return ""
@@ -1618,7 +1668,7 @@ def caption(dir_name: str):
 
 @app.route("/preview/<dir_name>")
 def preview_page(dir_name: str):
-    d = ROOT / "output" / dir_name
+    d = _output_path(dir_name)
     if not d.exists():
         return "폴더 없음", 404
 
@@ -1626,7 +1676,7 @@ def preview_page(dir_name: str):
     topic = dir_name[16:].replace("_", " ").strip()
 
     # 슬라이드별 수정 UI (script.json 있을 때만)
-    script_path = d / "script.json"
+    script_path = _safe_path(d, "script.json")
     has_script = script_path.exists()
     dir_name_js = json.dumps(dir_name)
 
@@ -1702,7 +1752,7 @@ def preview_page(dir_name: str):
         )
     cards_html = "".join(cards_html_parts)
 
-    cap_path = d / "caption.txt"
+    cap_path = _safe_path(d, "caption.txt")
     cap_txt = cap_path.read_text(encoding="utf-8") if cap_path.exists() else ""
     # f-string 안전 처리 (중괄호 escape)
     cap_safe = cap_txt.replace("{", "{{").replace("}", "}}")
@@ -1825,17 +1875,19 @@ function regenerateCaption() {{
 def subtitle(video_id: str):
     """캐시된 트랜스크립트를 한국어로 번역해 WebVTT 반환"""
     import re as _re
-    _TRANSCRIPT_DIR = ROOT / "data" / "yt_cache" / "transcripts"
-    _KO_DIR = _TRANSCRIPT_DIR / "ko"
+    if not re.fullmatch(r"[A-Za-z0-9_-]{1,80}", video_id):
+        abort(404)
+    _TRANSCRIPT_DIR = _safe_path(ROOT, "data", "yt_cache", "transcripts")
+    _KO_DIR = _safe_path(_TRANSCRIPT_DIR, "ko")
     _KO_DIR.mkdir(parents=True, exist_ok=True)
 
     # 1) 한국어 번역 캐시 확인
-    ko_path = _KO_DIR / f"{video_id}.vtt"
+    ko_path = _safe_path(_KO_DIR, f"{video_id}.vtt")
     if ko_path.exists():
         return Response(ko_path.read_text(encoding="utf-8"), mimetype="text/vtt")
 
     # 2) 원본 트랜스크립트 로드
-    src_path = _TRANSCRIPT_DIR / f"{video_id}.txt"
+    src_path = _safe_path(_TRANSCRIPT_DIR, f"{video_id}.txt")
     if not src_path.exists() or src_path.stat().st_size == 0:
         return Response("WEBVTT\n\n", mimetype="text/vtt")
 
@@ -1895,7 +1947,9 @@ def subtitle(video_id: str):
 
 @app.route("/output_video/<dir_name>/<filename>")
 def output_video(dir_name: str, filename: str):
-    p = ROOT / "output" / dir_name / filename
+    p = _output_path(dir_name, filename)
+    if p.suffix.lower() != ".mp4":
+        abort(404)
     if not p.exists():
         return "not found", 404
     return send_file(str(p), mimetype="video/mp4")
@@ -1914,8 +1968,8 @@ def edit_slide():
     if not dir_name or not instruction:
         return {"success": False, "error": "dir_name / instruction 필수"}
 
-    d = ROOT / "output" / dir_name
-    script_path = d / "script.json"
+    d = _output_path(dir_name)
+    script_path = _safe_path(d, "script.json")
     if not script_path.exists():
         return {"success": False, "error": "script.json 없음 (이전 버전 생성물)"}
 
@@ -1984,7 +2038,7 @@ def edit_slide():
         )
 
         # 기존 배경 이미지 재사용
-        bg_path = d / "background.png"
+        bg_path = _safe_path(d, "background.png")
         if bg_path.exists():
             from PIL import Image
             bg = Image.open(str(bg_path))
@@ -2030,13 +2084,13 @@ def edit_slide():
             rendered = _dr._render_content(rendered_bg, target_slide, total, persona.handle)
 
         fname = f"card_{target_slide.slide_number:02d}_{target_slide.slide_type}.png"
-        fpath = d / fname
+        fpath = _safe_path(d, fname)
         rendered.save(str(fpath), "PNG", optimize=True)
 
         # 캡션도 갱신
         from src.agents.design_renderer import _generate_caption
         new_caption = _generate_caption(updated_script, persona.handle)
-        (d / "caption.txt").write_text(new_caption, encoding="utf-8")
+        _safe_path(d, "caption.txt").write_text(new_caption, encoding="utf-8")
 
         return {
             "success": True,
@@ -2054,7 +2108,7 @@ def edit_slide():
 
 @app.route("/publish_page/<dir_name>")
 def publish_page(dir_name: str):
-    d = ROOT / "output" / dir_name
+    d = _output_path(dir_name)
     pngs = sorted(d.glob("card_*.png"))
     mp4s = sorted(d.glob("card_*.mp4"))
     # MP4와 동일 번호의 PNG가 있으면 중복 → 업로드는 PNG만
@@ -2065,7 +2119,7 @@ def publish_page(dir_name: str):
 
     topic = dir_name[16:].replace("_", " ").strip()
 
-    cap_path = d / "caption.txt"
+    cap_path = _safe_path(d, "caption.txt")
     caption_txt = cap_path.read_text(encoding="utf-8") if cap_path.exists() else ""
 
     ig_status = (
@@ -2148,4 +2202,4 @@ if __name__ == "__main__":
     prepare_queue_runtime()
     port = int(os.environ.get("PORT", 5001))
     print(f"알고 대시보드: http://localhost:{port}")
-    app.run(host="0.0.0.0", port=port, debug=False, threaded=True)
+    app.run(host="127.0.0.1", port=port, debug=False, threaded=True)

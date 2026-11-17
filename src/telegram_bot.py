@@ -81,9 +81,20 @@ def _recent_summary(limit: int = 5) -> str:
     return "\n".join(lines)
 
 
+def _authorized(update: Update) -> bool:
+    # Explicit user identity is required even when the configured chat is a group.
+    user = os.getenv("TELEGRAM_ALLOWED_USER_ID", "")
+    chat = update.effective_chat
+    sender = update.effective_user
+    return bool(CHAT_ID and user and chat and sender
+                and str(chat.id) == CHAT_ID and str(sender.id) == user)
+
+
 # ── 커맨드 핸들러 ─────────────────────────────────────────
 
 async def _cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not _authorized(update):
+        return
     text = (
         "안녕하세요! 알고 카드뉴스 봇입니다 👋\n\n"
         "사용 가능한 명령어:\n"
@@ -96,6 +107,8 @@ async def _cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
 
 async def _cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not _authorized(update):
+        return
     pending = queue_count("pending")
     ready = queue_count("ready")
     published = queue_count("published")
@@ -114,6 +127,8 @@ async def _cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
 
 async def _cmd_generate(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not _authorized(update):
+        return
     args = context.args
     topic = " ".join(args).strip() if args else ""
 
@@ -168,6 +183,8 @@ async def _cmd_generate(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
 
 async def _cmd_queue(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not _authorized(update):
+        return
     rows = get_queue("pending")
     if not rows:
         await update.message.reply_text("대기 중인 큐가 없습니다.")
@@ -182,6 +199,8 @@ async def _cmd_queue(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
 
 async def _cmd_skip(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not _authorized(update):
+        return
     from src.db import dequeue_next
 
     row = dequeue_next()
@@ -196,6 +215,8 @@ async def _cmd_skip(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 # ── 인라인 버튼 콜백 ──────────────────────────────────────
 
 async def _callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not _authorized(update):
+        return
     query = update.callback_query
     await query.answer()
 
