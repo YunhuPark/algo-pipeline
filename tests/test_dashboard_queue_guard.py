@@ -50,11 +50,13 @@ def test_verified_news_route_keeps_v2_bulk_ingestion():
     assert "bulk_generate" in _calls("queue_generate")
 
 
-def test_direct_dashboard_publish_endpoint_fails_closed():
+def test_direct_dashboard_publish_endpoint_fails_closed(monkeypatch):
     from src.dashboard.app import app
+    monkeypatch.setenv("ADMIN_TOKEN", "synthetic-direct-publish-admin")
 
     response = app.test_client().post(
         "/publish_now",
+        headers={"X-Admin-Token": "synthetic-direct-publish-admin"},
         json={"dir_name": "legacy-output", "caption": "unsafe"},
     )
     payload = response.get_json()
