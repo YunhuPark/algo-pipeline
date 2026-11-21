@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
 
+from src.cancellation import GenerationCancelled
 from src.schemas.card_news import SourceLineage, TrendReport
 from src.schemas.content_package import PipelineResult
 from src.schemas.queue_schemas import (
@@ -246,11 +247,16 @@ def _finish_tracking(
         return
     try:
         from src.db_tracking import end_run, link_run_publication, log_quality_check
+        from src.usage_tracker import run_totals
 
         status = "SUCCESS" if result.generation_succeeded else "FAILED"
+        # None (stored as NULL) when any call in the run had no known price:
+        # writing a partial sum — or the old default 0.0 — would pass for a cost.
+        totals = run_totals(run_id)
         end_run(
             run_id,
             status,
+            cost=totals["cost_usd"] if totals["calls"] else None,
             latency=elapsed,
             error=result.error_code or "",
             strategy_id=strategy_id,
@@ -267,6 +273,32 @@ def _finish_tracking(
             link_run_publication(run_id, result.ig_post_id)
     except Exception as exc:
         print(f"  [Tracking] 실행 기록 종료 실패: {type(exc).__name__}")
+
+
+def _close_cancelled_run(run_id: str | None, elapsed: float, strategy_id: str, reason=None) -> None:
+    """Mark a stopped run CANCELLED, keeping what it already spent."""
+
+    if not run_id:
+        return
+    try:
+        from src.db_tracking import end_run
+        from src.usage_tracker import run_totals
+
+        totals = run_totals(run_id)
+        end_run(
+            run_id,
+            "CANCELLED",
+            cost=totals["cost_usd"] if totals["calls"] else None,
+            latency=elapsed,
+            error=(
+                "RUN_BUDGET_EXCEEDED"
+                if type(reason).__name__ == "RunBudgetExceeded"
+                else "CANCELLED_BY_OPERATOR"
+            ),
+            strategy_id=strategy_id,
+        )
+    except Exception as exc:
+        print(f"  [Tracking] 취소된 실행 기록 실패: {type(exc).__name__}")
 
 
 def _record_editorial_review(result: PipelineResult, run_id: str | None) -> None:
@@ -349,26 +381,30 @@ def execute_generation(
         context = f"{context}\n[앵글 힌트] {angle_hint}".strip()
 
     try:
-        result = pipeline.run_pipeline(
-            topic=topic,
-            persona=load_persona(),
-            num_cards=num_cards,
-            handle=handle,
-            force_dalle=force_dalle,
-            force_refresh=force_refresh,
-            trend_context=context,
-            publish=publish,
-            auto=auto,
-            make_reels=make_reels,
-            template=template,
-            select_angle=select_angle,
-            human_approval=human_approval,
-            topic_refined=True,
-            source_lineage=source_lineage,
-            publish_attempt_id=publish_attempt_id,
-            before_publish=before_publish,
-            on_remote_id=on_remote_id,
-        )
+        from src.usage_tracker import usage_scope
+
+        # Every LLM call made while this run is active is recorded against it.
+        with usage_scope("generation", run_id):
+            result = pipeline.run_pipeline(
+                topic=topic,
+                persona=load_persona(),
+                num_cards=num_cards,
+                handle=handle,
+                force_dalle=force_dalle,
+                force_refresh=force_refresh,
+                trend_context=context,
+                publish=publish,
+                auto=auto,
+                make_reels=make_reels,
+                template=template,
+                select_angle=select_angle,
+                human_approval=human_approval,
+                topic_refined=True,
+                source_lineage=source_lineage,
+                publish_attempt_id=publish_attempt_id,
+                before_publish=before_publish,
+                on_remote_id=on_remote_id,
+            )
         if result is None:
             result = PipelineResult(
                 image_paths=[],
@@ -382,6 +418,11 @@ def execute_generation(
                 publish_attempt_state=PublishAttemptState.NOT_ATTEMPTED,
                 publish_attempt_id=publish_attempt_id,
             )
+    except GenerationCancelled as cancelled:
+        # 운영자가 중지했다(또는 한 번의 생성 비용 상한을 넘어 시스템이 멈췄다). 실패가 아니라 "취소"로 닫고, 그때까지 쓴 호출 비용은
+        # 그대로 남긴다 (이미 나간 호출은 청구되므로). 예외는 다시 던져 위에서 처리한다.
+        _close_cancelled_run(run_id, time.monotonic() - started, strategy_id, cancelled)
+        raise
     except Exception:
         if run_id:
             failed = PipelineResult(

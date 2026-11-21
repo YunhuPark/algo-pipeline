@@ -22,6 +22,7 @@ from uuid import uuid4
 from src.db import (
     enqueue_v2,
     claim_queue_row,
+    clear_queue_error,
     dequeue_next,
     get_queue_row,
     insert_post,
@@ -34,7 +35,15 @@ from src.db import (
     unclaim_queue_row,
     queue_count,
     get_queue,
+    try_mark_queue_skipped,
 )
+from src.qa.source_freshness import (
+    check_freshness,
+    fetch_published_date,
+    parse_date,
+    resolve_published,
+)
+from src.qa.source_suitability import check_source_suitability
 from src.schemas.queue_schemas import CollectionMethod, PublishAttemptState, QueueMetadataV2
 
 
@@ -74,6 +83,72 @@ def _collect_news(exclude_urls: frozenset[str] = frozenset()):
     from src.agents.news_collector import collect_and_select
 
     return collect_and_select(exclude_urls=exclude_urls)
+
+
+def _stamp_published(metadata: Any, published: Any) -> None:
+    """Record the article's publication date on its primary evidence item.
+
+    Without it the queue cannot tell later (at generation time) that an item
+    that waited a few days has gone stale. Best-effort: the date is an extra,
+    so a metadata object that cannot take it is left untouched.
+    """
+
+    try:
+        metadata.evidence[0].published_at = published.isoformat()
+    except (AttributeError, IndexError, TypeError):
+        pass
+
+
+def _row_freshness(metadata: Any):
+    """Is this queued item's article still fresh *now*?
+
+    Items wait in the queue for days (a few candidates are collected, one is
+    posted per day), so freshness has to be re-checked when the item is used,
+    not only when it was collected. Rows queued before the publication date was
+    recorded have none: ask the article page. An age that cannot be read at all
+    is allowed (the rule only blocks what it can show is old).
+    """
+
+    recorded = (
+        parse_date(metadata.evidence[0].published_at) if metadata.evidence else None
+    )
+    if recorded is None:
+        recorded = fetch_published_date(getattr(metadata, "source_url", "") or "")
+    return check_freshness(recorded, allow_unknown=True)
+
+
+def _clear_unpicked_candidates(picked_id: int) -> int:
+    """After a post goes out, drop the other healthy waiting candidates.
+
+    Candidates are collected together and one is posted per day. The rest would
+    only age, so they are skipped automatically and tomorrow starts from fresh
+    news. Rows carrying an error code are left alone: a corrupted or blocked row
+    is a signal a person should see, not something to sweep away silently.
+    Turn off with QUEUE_CLEAR_AFTER_PUBLISH=false. Never raises: the post is
+    already out and this is housekeeping.
+    """
+
+    import os
+
+    if os.getenv("QUEUE_CLEAR_AFTER_PUBLISH", "true").strip().lower() in {
+        "0", "false", "no", "off",
+    }:
+        return 0
+    cleared = 0
+    try:
+        for row in get_queue():
+            if (
+                row["id"] != picked_id
+                and row["status"] in ("pending", "ready")
+                and not row["publish_error_code"]
+            ):
+                if try_mark_queue_skipped(row["id"]):
+                    cleared += 1
+        if cleared:
+            print(f"  [ContentQueue] 게시한 항목 외 후보 {cleared}개를 정리했습니다 (오래되기 전에 비움)")
+    except Exception as exc:
+        print(f"  [ContentQueue] 후보 정리 실패(무시): {type(exc).__name__}")
+    return cleared
 
 
 def _queued_source_urls() -> set[str]:
@@ -126,7 +201,10 @@ def bulk_generate(
         raise ValueError("직접 주제는 출처 attestation이 없어 Queue V2에 등록할 수 없습니다.")
 
     elif auto_news:
-        ids.extend(_fill_from_news(count))
+        from src.usage_tracker import usage_scope
+
+        with usage_scope("collection"):
+            ids.extend(_fill_from_news(count))
 
     else:
         print("  [ContentQueue] topics와 auto_news 모두 없음 — 아무것도 추가하지 않습니다.")
@@ -135,9 +213,22 @@ def bulk_generate(
     return ids
 
 
+# 마지막 수집의 결과 보고. 화면 메시지가 "3개 추가 완료"라고만 하면 실제로는 2개만 들어와도
+# 알 수 없으므로, 몇 개를 요청해 몇 개가 들어왔고 왜 제외됐는지를 남긴다.
+LAST_COLLECTION_REPORT: dict = {"requested": 0, "added": 0, "skipped": []}
+
+
 def _fill_from_news(count: int) -> list[int]:
-    """뉴스 수집을 count번 반복해 큐에 저장."""
+    """뉴스 수집을 count번 시도해 큐에 저장한다.
+
+    한 번의 시도는 기사 하나를 고르고, 최신성·적합성·출처 검사를 통과해야 큐에 들어간다. 검사에
+    걸린 시도는 그냥 빠진다 — 개수를 채우려고 기준에 못 미치는 기사를 더 끌어오지 않는다. 오늘 맞는
+    기사가 2개뿐이면 2개만 넣고, 몇 개를 요청해 몇 개가 들어왔는지와 제외 사유를
+    LAST_COLLECTION_REPORT와 logs/collection.log에 있는 그대로 남긴다.
+    """
     ids: list[int] = []
+    skipped: list[str] = []
+    LAST_COLLECTION_REPORT.update(requested=count, added=0, skipped=skipped)
     seen_topics: set[str] = set()
     # 이미 큐에 있는 기사 + 이번 일괄 수집에서 방금 고른 기사를 계속 누적해
     # 다음 반복에서 제외한다 — 안 그러면 "자동 수집 시작"을 여러 번 눌러도
@@ -145,9 +236,13 @@ def _fill_from_news(count: int) -> list[int]:
     # 다시 고르게 된다.
     excluded_urls: set[str] = set(_queued_source_urls())
 
-    for i in range(count):
+    attempts = 0
+    max_attempts = max(count, 1)   # 개수를 채우려고 기준에 못 미치는 기사를 더 끌어오지 않는다
+    while len(ids) < count and attempts < max_attempts:
+        i = attempts
+        attempts += 1
         try:
-            print(f"  [ContentQueue] 뉴스 수집 중 ({i+1}/{count})...")
+            print(f"  [ContentQueue] 뉴스 수집 중 (시도 {i+1}, 목표 {len(ids)}/{count})...")
             news = _collect_news(exclude_urls=frozenset(excluded_urls))
 
             # A selected headline without a real source cannot become
@@ -156,6 +251,7 @@ def _fill_from_news(count: int) -> list[int]:
             selected_item = getattr(news, "selected_item", None)
             if selected_item is None:
                 print("  [ContentQueue] 검증 가능한 뉴스 출처 없음 — 큐 추가 생략")
+                skipped.append("검증 가능한 출처 없음")
                 continue
 
             excluded_urls.add(selected_item.url)
@@ -169,6 +265,36 @@ def _fill_from_news(count: int) -> list[int]:
                     "  [ContentQueue] 주제-출처 불일치 감지, 큐 추가 생략: "
                     f"'{news.topic}' vs '{selected_item.title}'"
                 )
+                skipped.append(f"주제와 기사가 맞지 않음: {news.topic[:30]}")
+                continue
+
+            # 최신 기사만 쓴다. 발행일은 피드 값을, 없으면 기사 페이지의 메타데이터를
+            # 읽는다. 끝내 알 수 없으면 최신 기사임을 보장할 수 없으므로 거른다.
+            published = resolve_published(
+                getattr(selected_item, "published", None), selected_item.url
+            )
+            freshness = check_freshness(published)
+            if not freshness.ok:
+                print(
+                    f"  [ContentQueue] 최신 기사가 아님, 큐 추가 생략 "
+                    f"({freshness.code}): '{news.topic}' — {freshness.detail}"
+                )
+                skipped.append(f"최신 기사가 아님: {news.topic[:30]} ({freshness.detail})")
+                continue
+
+            # 생성 단계에서 아홉 번 재시도하고도 반드시 실패하는 항목(주제가 너무 막연하거나, 원문이
+            # 답을 다음 편으로 미루는 경우)은 큐에 쌓기 전에 거른다. 원문 길이는 RSS 요약(300자 안팎)이
+            # 아니라 실제로 생성에 쓰이는 전체 기사 본문으로 판단해야 한다 — 요약이 짧은 매체(AI타임스,
+            # The Decoder 등)의 정상 기사가 "원문이 300자로 너무 짧다"며 전부 탈락하던 문제가 있었다.
+            suitability = check_source_suitability(
+                news.topic, selected_item.summary, selected_item.title, check_length=False
+            )
+            if not suitability.ok:
+                print(
+                    f"  [ContentQueue] 생성이 불가능한 항목, 큐 추가 생략 "
+                    f"({suitability.code}): '{news.topic}' — {suitability.detail}"
+                )
+                skipped.append(f"생성이 어려운 기사: {news.topic[:30]} ({suitability.detail})")
                 continue
 
             # 중복 주제 회피
@@ -182,13 +308,32 @@ def _fill_from_news(count: int) -> list[int]:
             from src.agents import trend_analyzer
             from src.services.generation_service import build_queue_metadata
 
-            report = trend_analyzer.build_locked_source_report(
-                topic,
-                title=selected_item.title,
-                url=selected_item.url,
-                content=selected_item.summary,
-            )
+            try:
+                report = trend_analyzer.build_locked_source_report(
+                    topic,
+                    title=selected_item.title,
+                    url=selected_item.url,
+                    content=selected_item.summary,
+                )
+            except ValueError as exc:
+                print(f"  [ContentQueue] 원문 본문을 확보하지 못해 큐 추가 생략: '{topic}' ({exc})")
+                skipped.append(f"원문을 가져오지 못함: {news.topic[:30]} ({exc})")
+                continue
+            results = getattr(report, "results", None) or []
+            first_content = getattr(results[0], "content", None) if results else None
+            # 보강된 전체 본문이 있으면 그것으로, 없으면 피드 요약으로 판단한다.
+            full_text = first_content if isinstance(first_content, str) else selected_item.summary
+            length_check = check_source_suitability(topic, full_text, selected_item.title)
+            if not length_check.ok:
+                print(
+                    f"  [ContentQueue] 생성이 불가능한 항목, 큐 추가 생략 "
+                    f"({length_check.code}): '{topic}' — {length_check.detail}"
+                )
+                skipped.append(f"생성이 어려운 기사: {news.topic[:30]} ({length_check.detail})")
+                continue
+
             metadata = build_queue_metadata(topic, report)
+            _stamp_published(metadata, published)
             row_id = enqueue_v2(
                 metadata,
                 CollectionMethod.NEWS_COLLECTOR,
@@ -196,9 +341,40 @@ def _fill_from_news(count: int) -> list[int]:
             ids.append(row_id)
             print(f"  [ContentQueue] 뉴스 큐 추가: {topic}")
         except Exception as e:
-            print(f"  [ContentQueue] 뉴스 수집 실패 ({i+1}/{count}): {e}")
+            from src.agents.news_collector import NoRelevantNews
 
+            if isinstance(e, NoRelevantNews):
+                # 같은 풀에서 다시 골라도 같은 결과이므로 더 시도하지 않고, 사유를 그대로 남긴다.
+                print(f"  [ContentQueue] {e}")
+                skipped.append(str(e))
+                break
+            print(f"  [ContentQueue] 뉴스 수집 실패 (시도 {i+1}): {e}")
+            skipped.append(f"수집 실패: {str(e)[:60]}")
+
+    LAST_COLLECTION_REPORT["added"] = len(ids)
+    try:
+        from src.agents.news_collector import LAST_POOL_STATS
+
+        LAST_COLLECTION_REPORT["pool"] = dict(LAST_POOL_STATS)
+    except Exception:
+        pass
+    _log_collection(count, len(ids), skipped)
     return ids
+
+
+def _log_collection(requested: int, added: int, skipped: list[str]) -> None:
+    """수집 결과를 파일에도 남긴다(대시보드 요청 안에서 돌아 화면 로그가 남지 않으므로)."""
+
+    try:
+        from datetime import datetime
+
+        log_path = Path(__file__).resolve().parents[2] / "logs" / "collection.log"
+        with open(log_path, "a", encoding="utf-8") as fh:
+            fh.write(f"[{datetime.now():%Y-%m-%d %H:%M:%S}] 요청 {requested}개 → {added}개 추가\n")
+            for reason in skipped:
+                fh.write(f"    제외: {reason}\n")
+    except OSError:
+        pass
 
 
 def publish_next(
@@ -371,6 +547,21 @@ def _process_claimed_row(
                 print("  [ContentQueue] PNG 없음 — 전체 파이프라인 실행")
                 res = run_full_pipeline()
             elif publish_to_ig:
+                # 미리보기를 만들어 두고 며칠 뒤 승인하는 경우, 그 사이 기사가
+                # 오래된 것이 됐을 수 있다. 올리기 직전에 최신성을 다시 확인한다.
+                freshness = _row_freshness(metadata)
+                if not freshness.ok:
+                    print(
+                        f"  [ContentQueue] 게시 차단 ({freshness.code}): "
+                        f"'{topic}' — {freshness.detail}"
+                    )
+                    mark_queue_error(
+                        queue_id,
+                        freshness.error_code,
+                        increment_retry=False,
+                        preserve_attempt=True,
+                    )
+                    return None
                 # 사람이 이미 검토·승인한 바로 그 렌더링을 그대로 올린다 —
                 # 여기서 다시 생성하면 승인한 화면과 실제 게시물이 달라질 수 있다.
                 return _publish_cached_render(
@@ -380,6 +571,25 @@ def _process_claimed_row(
                 print("  [ContentQueue] 이미 준비됨 — 재생성 없이 그대로 반환")
                 return {"id": queue_id, "topic": topic, "paths": paths}
         else:
+            # 이미 큐에 들어와 있는 항목도 생성 전에 한 번 거른다 — 반드시
+            # 실패할 항목에 재시도 예산(LLM 호출 수십 번)을 쓰지 않도록.
+            suitability = check_source_suitability(topic, context, check_length=False)
+            if suitability.ok:
+                # 큐에서 기다리는 동안 오래된 기사가 될 수 있다. 기록된 발행일을
+                # 쓰고, 기록 이전에 쌓인 항목은 기사 페이지에서 읽어 확인한다.
+                suitability = _row_freshness(metadata)
+            if not suitability.ok:
+                print(
+                    f"  [ContentQueue] 생성 불가 항목 ({suitability.code}): "
+                    f"'{topic}' — {suitability.detail}"
+                )
+                mark_queue_error(
+                    queue_id,
+                    suitability.error_code,
+                    increment_retry=False,
+                    preserve_attempt=True,
+                )
+                return None
             res = run_full_pipeline()
 
         if res and hasattr(res, 'image_paths') and res.image_paths:
@@ -391,6 +601,7 @@ def _process_claimed_row(
                 if res.publish_succeeded and res.ig_post_id:
                     complete_queue_publish(queue_id, attempt_id, res.ig_post_id)
                     print(f"  [ContentQueue] 발행 완료: {topic} ({len(res.image_paths)}장)")
+                    _clear_unpicked_candidates(queue_id)
                     return {"id": queue_id, "topic": topic, "paths": res.image_paths}
                 else:
                     print(f"  [ContentQueue] 게시 실패 (큐 id={queue_id}): {res.error_code}")
@@ -410,6 +621,11 @@ def _process_claimed_row(
                 if res.image_paths:
                     set_queue_image_dir(queue_id, str(res.image_paths[0].parent))
                 mark_queue_status(queue_id, "ready")
+                # 이전 시도의 실패 코드(EMPTY_PIPELINE_RESULT 등)가 새로 만든 미리보기에 남지 않게 한다.
+                try:
+                    clear_queue_error(queue_id)
+                except Exception:
+                    pass   # 표시용 정리일 뿐이라 실패해도 미리보기는 그대로 둔다
                 return {"id": queue_id, "topic": topic, "paths": res.image_paths}
         elif type(res) == list and len(res) > 0: # fallback for paths directly
             # shouldn't happen but just in case
@@ -423,6 +639,12 @@ def _process_claimed_row(
     except Exception as e:
         print(f"  [ContentQueue] 파이프라인 오류 (큐 id={queue_id}): {e}")
         mark_queue_error(queue_id, "UNKNOWN_PIPELINE_EXCEPTION")
+        raise
+    except BaseException as stopped:
+        # 한 번의 생성 비용 상한을 넘으면 이 기사는 같은 방식으로 또 실패하므로 사유를
+        # 남겨 자동 재시도 대상에서 뺀다. 운영자의 중지(GenerationCancelled)는 그냥 대기로 돌린다.
+        if type(stopped).__name__ == "RunBudgetExceeded":
+            mark_queue_error(queue_id, "RUN_BUDGET_EXCEEDED", increment_retry=False)
         raise
     finally:
         # 다른 경로(mark_queue_status/complete_queue_publish)가 이미 최종
@@ -486,7 +708,15 @@ def _publish_cached_render(
             return None
 
     try:
-        ig_post_id = ig_publisher.publish(image_paths=paths, hook=hook, hashtags=hashtags)
+        # 사람이 검토한 캡션(caption.txt)을 그대로 올린다 — 승인한 것과 게시되는
+        # 것이 같도록. 파일이 없으면 기존처럼 hook + 해시태그로 조합한다.
+        extra = {}
+        reviewed_caption = ig_publisher.read_card_caption(folder)
+        if isinstance(reviewed_caption, str) and reviewed_caption:
+            extra["caption"] = reviewed_caption
+        ig_post_id = ig_publisher.publish(
+            image_paths=paths, hook=hook, hashtags=hashtags, **extra
+        )
     except Exception as e:
         print(f"  [ContentQueue] 캐시 렌더링 발행 실패 (큐 id={queue_id}): {e}")
         mark_queue_error(queue_id, "REMOTE_PUBLISH_PERSISTENCE_UNCERTAIN")
@@ -514,6 +744,7 @@ def _publish_cached_render(
     )
     complete_queue_publish(queue_id, attempt_id, ig_post_id)
     print(f"  [ContentQueue] 캐시 렌더링 발행 완료: {topic} ({len(paths)}장)")
+    _clear_unpicked_candidates(queue_id)
     return {"id": queue_id, "topic": topic, "paths": paths}
 
 

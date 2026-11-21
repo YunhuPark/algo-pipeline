@@ -200,8 +200,10 @@ def test_empty_id_is_failure(mock_pipeline_agents):
 
 
 def _attested_row() -> dict:
+    # 구체적인 대상이 있는 주제여야 한다 — "T" 같은 막연한 주제는 생성 전
+    # 사전 검사(source_suitability)가 TOPIC_TOO_GENERIC으로 막는다.
     metadata = QueueMetadataV2(
-        topic="T",
+        topic="Snorkel AI 35억 달러 투자 유치",
         source_title="Source",
         source_url="https://example.com/source",
         context="verified context",
