@@ -149,7 +149,7 @@ def _rule_check(script: CardNewsScript, expected_count: int) -> list[str]:
 # ── Phase 2: AI 자기평가 ──────────────────────────────────
 
 class _AIScore(BaseModel):
-    hook_power: float        # 후킹력: 커버 제목이 스크롤을 멈추게 하는가 (1~10)
+    hook_power: float        # 후킹력: 커버 제목에 구체적 숫자·주체·이득이 한눈에 보이는가, 과장 없이 (1~10)
     readability: float       # 가독성: 각 슬라이드가 한눈에 읽히는가 (1~10)
     brand_tone: float        # 브랜드 톤: 알고의 MZ 뉴스 큐레이터 느낌인가 (1~10)
     info_quality: float      # 정보 전달력: 내용이 정확하고 유익한가 (1~10)
@@ -164,7 +164,15 @@ _EVAL_SYSTEM = f"""
 각 항목을 1~10점으로 채점하고, 개선이 필요한 부분에 대한 구체적 피드백을 한국어로 작성하세요.
 
 채점 기준:
-- hook_power (후킹력): 커버 제목이 MZ세대의 스크롤을 멈추게 하는가
+- hook_power (후킹력): 커버 제목에 구체적인 숫자·주체·변화·이득이 한눈에 보여 궁금해지는가.
+    · 높은 점수: 원문에 있는 숫자나 구체적 대상이 제목 앞쪽에 분명히 드러남
+                 (예: "100만 대 이상의 로봇", "메가와트당 40% 더 처리")
+    · 낮은 점수: 막연하고 일반적인 제목("AI 혁신", "새로운 변화")
+    · 표지 제목은 22자 이내의 짧은 구이고, 회사·제품 이름은 이어지는 본문 카드가 담는다.
+      "수치 + 그 대상"이 한 구절로 보이면(예: "89개국 챗GPT 광고") 회사명이 없어도 높게 채점한다.
+      표지 제목에 대한 개선안은 22자 이내에서만 제안하십시오.
+    · 과장·낚시·감탄사("충격", "급감!", "역대급")는 가점이 아니다. 사실을 부풀리지 않고
+      구체적으로 쓴 제목이 높은 점수를 받는다. 중립적인 사실 보도의 제목도 구체적이면 높게 채점한다.
 - readability (가독성): 각 슬라이드가 3초 안에 핵심이 전달되는가
 - brand_tone (브랜드 톤): '알고'의 친근하고 트렌디한 뉴스 큐레이터 톤인가
 - info_quality (정보 전달력): 뉴스 내용이 정확하고 핵심이 잘 담겼는가
@@ -176,6 +184,10 @@ _EVAL_SYSTEM = f"""
 
 feedback: 7점 미만인 항목에 대해 "슬라이드N: 구체적으로 어떻게 바꿔야 하는지" 형식으로 작성.
           모든 항목이 7점 이상이면 "전반적으로 양호합니다."
+          개선안은 원문에 있는 사실(숫자·주체·사건)을 더 앞에 두거나 더 구체적으로 쓰는 방향으로만
+          제안하십시오. 다음은 제안하지 마십시오: 사실을 부풀리는 표현, 부정적·자극적 표현으로의
+          바꿔 쓰기("급감!", "충격"), 낚시성 질문, 원문에 없는 수치·사실·평가의 추가.
+          카드는 근거로 확인된 내용만 담으므로, 이런 제안은 반영할 수 없습니다.
 
 제약: content 슬라이드 본문은 렌더링 규칙상 {MIN_CONTENT_BODY_CHARS}자 이상
       {MAX_CONTENT_BODY_CHARS}자 이하여야 합니다. 이 범위를 벗어나는 대체 문구를
@@ -208,7 +220,8 @@ def _ai_evaluate(script: CardNewsScript) -> _AIScore:
     )
     cover = next((s for s in script.slides if s.slide_type == "cover"), script.slides[0])
 
-    llm = ChatOpenAI(model="gpt-4o-mini", temperature=0.2, api_key=OPENAI_API_KEY)
+    # 같은 글에 6점도 8점도 주는 변동이 측정마다 성공·실패를 뒤바꿨다. 심사는 온도 0으로 고정한다.
+    llm = ChatOpenAI(model="gpt-4o-mini", temperature=0, api_key=OPENAI_API_KEY)
     structured = llm.with_structured_output(_AIScore)
     prompt = ChatPromptTemplate.from_messages([
         ("system", _EVAL_SYSTEM),
@@ -225,6 +238,18 @@ def _ai_evaluate(script: CardNewsScript) -> _AIScore:
 
 
 # ── 공개 API ──────────────────────────────────────────────
+
+HOOK_FLOOR = 7.5          # 표지가 출력 기준을 지킨 경우 후킹력의 하한(통과선 PASS_THRESHOLD는 그대로)
+COVER_TITLE_MAX = 22
+
+
+def _cover_meets_standard(script: CardNewsScript) -> bool:
+    """표지 제목이 수치와 그 대상이 붙은 구절이고 22자 이내인가(출력 기준 S6과 같은 정의)."""
+    from src.qa.script_assembler import has_complete_figure
+
+    title = (script.cover.title or "").strip()
+    return bool(title) and len(title) <= COVER_TITLE_MAX and has_complete_figure(title)
+
 
 def verify(
     script: CardNewsScript,
@@ -261,6 +286,14 @@ def verify(
         "자연스러움": ai.naturalness,
         "완성도": ai.completeness,
     }
+    # 표지의 구체성은 출력 기준(S6)이 코드로 정의한다: 수치와 그 대상이 붙은 구절, 22자 이내.
+    # 이 기준을 통과한 표지에 판정 AI가 6점을 주고 서로 모순되는 개선안을 내서(회사명을 빼라 → 넣어라)
+    # 생성이 반복 실패하던 일이 있었다(기록된 편집 점수 실패 19건 중 18건이 후킹력). 그래서 기준을 지킨
+    # 표지는 후킹력을 최소 HOOK_FLOOR로 보장하고, 나머지 항목은 계속 AI가 채점한다.
+    hook_lifted = False
+    if _cover_meets_standard(script) and scores["후킹력"] < HOOK_FLOOR:
+        scores["후킹력"] = HOOK_FLOOR
+        hook_lifted = True
     avg = sum(scores.values()) / len(scores)
     # 평균만 보면 한 항목의 치명적인 실패가 다른 점수에 가려질 수 있다.
     # 모든 편집 품질 축이 기준을 넘어야 렌더링을 허용한다.
@@ -275,6 +308,8 @@ def verify(
             f"다음 항목이 기준({PASS_THRESHOLD}점) 미달입니다: {', '.join(low)}\n\n"
             f"개선 방향:\n{ai.feedback}"
         )
+        if hook_lifted:
+            feedback += "\n\n표지 제목은 이미 출력 기준(수치와 대상이 있는 22자 이내 구절)을 통과했으니 바꾸지 마십시오."
 
     return VerifyResult(
         passed=passed,

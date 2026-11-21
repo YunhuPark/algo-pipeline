@@ -45,14 +45,10 @@ load_dotenv(override=False)
 
 # ── 환경 변수 ─────────────────────────────────────────────
 # Threads 전용 토큰 → 없으면 Instagram 토큰 폴백 (같은 Meta 플랫폼)
-THREADS_ACCESS_TOKEN: str = (
-    os.getenv("THREADS_ACCESS_TOKEN")
-    or os.getenv("IG_ACCESS_TOKEN", "")
-)
-THREADS_USER_ID: str = (
-    os.getenv("THREADS_USER_ID")
-    or os.getenv("IG_USER_ID", "")
-)
+# .env only - never the process environment (another project keeps its own Threads token there)
+from src import threads_credentials as _creds  # noqa: E402
+
+THREADS_ACCESS_TOKEN, THREADS_USER_ID = _creds.load()
 # 이미지 공개 URL 베이스 (ngrok 없이 정적 서버 사용 시)
 _IMAGE_BASE_URL: str = os.getenv("IG_IMAGE_BASE_URL", "")
 
@@ -108,15 +104,15 @@ def _get_public_url(image_dir: Path, port: int = 8765) -> str:
 
 # ── Threads Graph API 헬퍼 ────────────────────────────────
 
-def _create_carousel_item(image_url: str) -> str:
+def _create_carousel_item(media_url: str, is_video: bool = False) -> str:
     """
-    캐러셀 아이템용 이미지 컨테이너 생성 → container_id 반환.
+    캐러셀 아이템용 이미지/영상 컨테이너 생성 → container_id 반환.
     """
     resp = httpx.post(
         f"{THREADS_API_BASE}/{THREADS_USER_ID}/threads",
         params={
-            "media_type":       "IMAGE",
-            "image_url":        image_url,
+            "media_type":       "VIDEO" if is_video else "IMAGE",
+            "video_url" if is_video else "image_url": media_url,
             "is_carousel_item": "true",
             "access_token":     THREADS_ACCESS_TOKEN,
         },
@@ -124,11 +120,19 @@ def _create_carousel_item(image_url: str) -> str:
     )
     data = resp.json()
     if "id" not in data:
-        raise RuntimeError(f"Threads 이미지 컨테이너 생성 실패: {data}")
+        raise RuntimeError(f"Threads {'영상' if is_video else '이미지'} 컨테이너 생성 실패: {data}")
     return data["id"]
 
 
-def _create_carousel_container(container_ids: list[str], caption: str) -> str:
+def normalize_topic_tag(tag: str) -> str:
+    """A Threads topic tag: 1-50 chars, no periods or ampersands. Empty/invalid -> no tag."""
+    tag = (tag or "").strip().lstrip("#").strip()
+    if not tag or len(tag) > 50 or "." in tag or "&" in tag:
+        return ""
+    return tag
+
+
+def _create_carousel_container(container_ids: list[str], caption: str, topic_tag: str = "") -> str:
     """
     캐러셀 컨테이너 생성 → carousel_id 반환.
     """
@@ -139,6 +143,7 @@ def _create_carousel_container(container_ids: list[str], caption: str) -> str:
             "children":     ",".join(container_ids),
             "text":         caption,
             "access_token": THREADS_ACCESS_TOKEN,
+            **({"topic_tag": normalize_topic_tag(topic_tag)} if normalize_topic_tag(topic_tag) else {}),
         },
         timeout=30,
     )
@@ -202,6 +207,8 @@ def publish(
     hook: str,
     hashtags: list[str],
     base_url: str = "",
+    caption: str = "",
+    topic_tag: str = "",
 ) -> str:
     """
     카드뉴스 이미지들을 Threads 캐러셀로 게시.
@@ -219,18 +226,19 @@ def publish(
     """
     if not THREADS_ACCESS_TOKEN or not THREADS_USER_ID:
         raise EnvironmentError(
-            ".env에 THREADS_ACCESS_TOKEN(또는 IG_ACCESS_TOKEN)과 "
-            "THREADS_USER_ID(또는 IG_USER_ID)가 없습니다."
+            ".env에 THREADS_ACCESS_TOKEN과 THREADS_USER_ID가 없습니다."
         )
+    # a token from the wrong account must never post (see threads_credentials)
+    _creds.assert_expected_account(THREADS_ACCESS_TOKEN, THREADS_USER_ID)
 
-    # PNG 파일만 필터
-    imgs = [p for p in image_paths if p.suffix.lower() == ".png"]
+    # PNG(이미지)와 MP4(영상 카드)만 사용
+    imgs = [p for p in image_paths if p.suffix.lower() in (".png", ".mp4")]
     if not imgs:
-        raise ValueError("업로드할 PNG 파일이 없습니다.")
+        raise ValueError("업로드할 PNG/MP4 파일이 없습니다.")
 
     # 단일 이미지는 캐러셀 불필요 → 단순 IMAGE 게시
-    if len(imgs) == 1:
-        return _publish_single(imgs[0], hook, hashtags, base_url)
+    if len(imgs) == 1 and imgs[0].suffix.lower() == ".png":
+        return _publish_single(imgs[0], hook, hashtags, base_url, caption, topic_tag)
 
     # 공개 URL 결정: 명시 인자 → .env → ngrok 자동 시작
     url_base = (base_url or _IMAGE_BASE_URL or "").rstrip("/")
@@ -242,21 +250,22 @@ def publish(
     print(f"\n  [ThreadsPublisher] Threads 업로드 시작 ({len(imgs)}장)...")
     print(f"  [ThreadsPublisher] 이미지 URL 베이스: {url_base}")
 
-    caption = _build_caption(hook, hashtags)
+    caption = caption or _build_caption(hook, hashtags)
 
     # 1. 각 이미지 캐러셀 아이템 컨테이너 생성
     container_ids: list[str] = []
     for i, img_path in enumerate(imgs, 1):
         img_url = f"{url_base}/{img_path.name}"
         print(f"  [ThreadsPublisher] 컨테이너 생성 ({i}/{len(imgs)}): {img_path.name}")
-        cid = _create_carousel_item(img_url)
+        is_video = img_path.suffix.lower() == ".mp4"
+        cid = _create_carousel_item(img_url, is_video=is_video)
         print(f"    → container_id: {cid}")
-        _wait_for_ready(cid)
+        _wait_for_ready(cid, max_wait=300 if is_video else 60)
         container_ids.append(cid)
 
     # 2. 캐러셀 컨테이너 생성
     print("  [ThreadsPublisher] 캐러셀 컨테이너 생성 중...")
-    carousel_id = _create_carousel_container(container_ids, caption)
+    carousel_id = _create_carousel_container(container_ids, caption, topic_tag)
     print(f"    → carousel_id: {carousel_id}")
     _wait_for_ready(carousel_id)
 
@@ -274,6 +283,8 @@ def _publish_single(
     hook: str,
     hashtags: list[str],
     base_url: str = "",
+    caption: str = "",
+    topic_tag: str = "",
 ) -> str:
     """단일 이미지를 Threads 단독 게시물로 업로드."""
     url_base = (base_url or _IMAGE_BASE_URL or "").rstrip("/")
@@ -282,7 +293,7 @@ def _publish_single(
         url_base = _get_public_url(img_path.parent).rstrip("/")
 
     img_url = f"{url_base}/{img_path.name}"
-    caption = _build_caption(hook, hashtags)
+    caption = caption or _build_caption(hook, hashtags)
 
     # 단일 이미지 컨테이너
     resp = httpx.post(
@@ -292,6 +303,7 @@ def _publish_single(
             "image_url":    img_url,
             "text":         caption,
             "access_token": THREADS_ACCESS_TOKEN,
+            **({"topic_tag": normalize_topic_tag(topic_tag)} if normalize_topic_tag(topic_tag) else {}),
         },
         timeout=30,
     )
