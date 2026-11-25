@@ -122,7 +122,10 @@ def main() -> None:
         port = 5001
         print(f"웹 대시보드 시작: http://localhost:{port}")
         from src.dashboard.app import app
-        app.run(host="0.0.0.0", port=port, debug=False, threaded=True)
+        # 127.0.0.1 로만 바인딩한다. 0.0.0.0 이면 같은 와이파이의 다른 기기가 접속할 수 있고,
+        # 대시보드 인증(HTTP Basic)이 평문으로 오간다. 외부 노출이 필요하면 proxy_router 의
+        # 터널을 쓸 때 별도로 검토한다.
+        app.run(host="127.0.0.1", port=port, debug=False, threaded=True)
         return
 
     # ── 성과 분석 ─────────────────────────────────────────

@@ -34,3 +34,16 @@ ffmpeg.exe
 
 # algo-site (별도 repo)
 algo-site/
+
+# Claude Code 로컬 설정 (로컬 명령 기록 포함 — 키가 섞일 수 있음)
+.claude/settings.local.json
+
+# 비밀 정보
+.env
+.env.*
+!.env.example
+cookies.txt
+*.pem
+*.key
+token*.json
+credentials*.json
